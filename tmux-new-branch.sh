@@ -10,6 +10,7 @@ mkdir -p "$ENVS_DIR"
 select_repo() {
     {
         echo "← Back"
+        echo "⚡ Plain terminal (no project)"
         find "$CODE_DIR" -maxdepth 2 -name ".git" -type d 2>/dev/null | \
             xargs -I {} dirname {} | \
             grep "^${CODE_DIR}/[^/]*$" | \
@@ -50,6 +51,9 @@ main() {
                     exit 0
                 elif [[ "$REPO_NAME" == "← Back" ]]; then
                     exit 0  # Can't go back from first step
+                elif [[ "$REPO_NAME" == "⚡ Plain terminal (no project)" ]]; then
+                    tmux new-window -c "#{pane_current_path}"
+                    exit 0
                 fi
                 REPO_ROOT="${CODE_DIR}/${REPO_NAME}"
                 step=2

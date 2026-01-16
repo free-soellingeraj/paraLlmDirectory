@@ -6,6 +6,7 @@ ENVS_DIR="$HOME/code/envs"
 select_env() {
     {
         echo "← Back"
+        echo "⚡ Just close window (no cleanup)"
         for dir in "$ENVS_DIR"/*/; do
             if [[ -d "$dir" ]]; then
                 basename "$dir"
@@ -36,6 +37,9 @@ main() {
                     exit 0
                 elif [[ "$ENV_NAME" == "← Back" ]]; then
                     exit 0  # Can't go back from first step
+                elif [[ "$ENV_NAME" == "⚡ Just close window (no cleanup)" ]]; then
+                    tmux kill-window
+                    exit 0
                 fi
                 ENV_DIR="${ENVS_DIR}/${ENV_NAME}"
                 step=2
