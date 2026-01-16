@@ -118,7 +118,12 @@ main() {
                 CLONE_DIR="${ENV_DIR}/${REPO_NAME}"
 
                 tmux new-window -n "$BRANCH_NAME" -c "$CLONE_DIR"
-                tmux send-keys "claude --resume" Enter
+                # Run setup hook if it exists
+                if [[ -f "$CLONE_DIR/paraLlm_setup.sh" ]]; then
+                    tmux send-keys "./paraLlm_setup.sh && claude --resume" Enter
+                else
+                    tmux send-keys "claude --resume" Enter
+                fi
                 exit 0
                 ;;
             3c)
@@ -161,7 +166,12 @@ main() {
                 git checkout "$BRANCH_NAME" 2>&1
 
                 tmux new-window -n "$BRANCH_NAME" -c "$CLONE_DIR"
-                tmux send-keys "claude" Enter
+                # Run setup hook if it exists
+                if [[ -f "$CLONE_DIR/paraLlm_setup.sh" ]]; then
+                    tmux send-keys "./paraLlm_setup.sh && claude" Enter
+                else
+                    tmux send-keys "claude" Enter
+                fi
                 exit 0
                 ;;
             3b)
@@ -185,7 +195,12 @@ main() {
                     echo "Opening existing clone..."
                     sleep 1
                     tmux new-window -n "$BRANCH_NAME" -c "$CLONE_DIR"
-                    tmux send-keys "claude --resume" Enter
+                    # Run setup hook if it exists
+                    if [[ -f "$CLONE_DIR/paraLlm_setup.sh" ]]; then
+                        tmux send-keys "./paraLlm_setup.sh && claude --resume" Enter
+                    else
+                        tmux send-keys "claude --resume" Enter
+                    fi
                     exit 0
                 fi
 
@@ -224,7 +239,12 @@ main() {
                 fi
 
                 tmux new-window -n "$BRANCH_NAME" -c "$CLONE_DIR"
-                tmux send-keys "claude" Enter
+                # Run setup hook if it exists
+                if [[ -f "$CLONE_DIR/paraLlm_setup.sh" ]]; then
+                    tmux send-keys "./paraLlm_setup.sh && claude" Enter
+                else
+                    tmux send-keys "claude" Enter
+                fi
                 exit 0
                 ;;
         esac

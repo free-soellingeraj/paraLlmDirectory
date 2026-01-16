@@ -15,6 +15,7 @@ fi
 # Make scripts executable
 chmod +x "$SCRIPT_DIR/tmux-new-branch.sh"
 chmod +x "$SCRIPT_DIR/tmux-cleanup-branch.sh"
+chmod +x "$SCRIPT_DIR/envs.sh"
 
 # Create envs directory
 mkdir -p ~/code/envs
@@ -58,3 +59,6 @@ echo "Keybindings:"
 echo "  Ctrl+b c  - Create/resume feature branch"
 echo "  Ctrl+b k  - Cleanup feature branch"
 echo "  Ctrl+b C  - Plain new window"
+echo ""
+echo "Optional: Add this alias to your ~/.zshrc or ~/.bashrc:"
+echo "  alias envs='$SCRIPT_DIR/envs.sh'"

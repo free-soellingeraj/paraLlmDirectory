@@ -116,9 +116,75 @@ mkdir -p ~/code/envs
 - Press `Esc` or `Ctrl+c` to cancel at any time
 - When typing branch name, type `back` to go back
 
+## Project Hooks
+
+Projects can define setup and teardown scripts that run automatically:
+
+### `paraLlm_setup.sh`
+
+If this script exists in your project root, it runs when creating or resuming an environment (before Claude starts).
+
+**Example for an iOS project:**
+```bash
+#!/bin/bash
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Install pods if needed
+if [[ ! -d "$SCRIPT_DIR/Pods" ]]; then
+    (cd "$SCRIPT_DIR" && pod install)
+fi
+
+# Open Xcode
+open "$SCRIPT_DIR/MyApp.xcworkspace"
+```
+
+### `paraLlm_teardown.sh`
+
+If this script exists, it runs when cleaning up an environment (before deletion).
+
+**Example:**
+```bash
+#!/bin/bash
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Close Xcode workspace
+osascript -e "
+    tell application \"Xcode\"
+        repeat with doc in workspace documents
+            if path of doc is \"$SCRIPT_DIR/MyApp.xcworkspace\" then
+                close doc
+            end if
+        end repeat
+    end tell
+" 2>/dev/null
+```
+
+## Environment Status
+
+Check the status of all your parallel environments:
+
+```bash
+# Add alias to ~/.zshrc
+alias envs='~/code/para-llm-directory/envs.sh'
+
+# Then run:
+envs        # Show all environments with branch and status
+envs -v     # Verbose: also show unpushed commit messages
+```
+
+**Output:**
+```
+ENVIRONMENT                              BRANCH                    STATUS
+-----------                              ------                    ------
+RiffyApp-delta-storage-refactor          delta-storage-refactor    clean
+RiffyApp-new-feature                     new-feature               2 modified 1 untracked
+MyProject-bugfix                         bugfix                    ↑3 unpushed
+```
+
 ## Notes
 
 - Base repos in `~/code` should not have dashes in their names (dashes indicate feature clones)
 - Each feature gets a fresh clone, so changes are isolated
 - Claude Code sessions are per-directory, so `--resume` works per feature
 - Unpushed commits are detected before deletion to prevent data loss
+- Project hooks are optional - environments work fine without them
