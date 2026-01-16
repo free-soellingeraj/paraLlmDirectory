@@ -91,6 +91,12 @@ main() {
                 # Extract branch name from env name (everything after first dash)
                 BRANCH_NAME="${ENV_NAME#*-}"
 
+                # Run teardown hook if it exists
+                if [[ -f "$CLONE_DIR/paraLlm_teardown.sh" ]]; then
+                    echo "Running teardown hook..."
+                    (cd "$CLONE_DIR" && ./paraLlm_teardown.sh)
+                fi
+
                 # Kill any tmux windows with this branch name
                 tmux list-windows -a -F '#{session_name}:#{window_index} #{window_name}' 2>/dev/null | \
                     grep " ${BRANCH_NAME}$" | \
