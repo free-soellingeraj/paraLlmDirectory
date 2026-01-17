@@ -56,6 +56,7 @@ To update this project's llm-context tools to the latest version:
 This will update the ctx script, merge new deny rules into settings, and refresh the managed section of this file while preserving your customizations.
 <!-- END LLM-CONTEXT-MANAGED -->
 
+
 ## Quick Reference
 
 <!-- Add project-specific quick reference here -->
