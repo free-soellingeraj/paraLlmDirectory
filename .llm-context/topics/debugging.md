@@ -147,3 +147,12 @@ tmux source-file ~/.tmux.conf
 # Or remove para-llm bindings manually
 # Edit ~/.tmux.conf and remove the para-llm-directory section
 ```
+# debugging
+
+## Overview
+<!-- Describe what this topic covers -->
+
+## Details
+<!-- Add detailed information here -->
+
+**File**: <!-- path/to/relevant/file.ext:line -->

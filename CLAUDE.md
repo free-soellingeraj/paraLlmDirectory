@@ -1,5 +1,6 @@
 # paraLlmDirectory
 
+<!-- BEGIN LLM-CONTEXT-MANAGED -->
 ## Documentation System
 
 This project uses a topic-based documentation system for LLM context.
@@ -46,6 +47,14 @@ Content with **bold** for emphasis
 ./ctx              # List available topics
 ./ctx <topic>      # View topic content
 ```
+
+### Updating llm-context
+To update this project's llm-context tools to the latest version:
+1. Read `.llm-context/.source` to get the llm-context install path
+2. Run `<path>/llm-context update` in this project directory
+
+This will update the ctx script, merge new deny rules into settings, and refresh the managed section of this file while preserving your customizations.
+<!-- END LLM-CONTEXT-MANAGED -->
 
 ## Quick Reference
 

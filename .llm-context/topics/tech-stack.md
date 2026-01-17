@@ -108,3 +108,12 @@ Required for `display-popup` command. Older versions will need alternative appro
 
 ### Bash 3.2 vs 4+
 Scripts avoid Bash 4+ features (associative arrays, `|&` syntax) for macOS compatibility with default Bash.
+# tech stack
+
+## Overview
+<!-- Describe what this topic covers -->
+
+## Details
+<!-- Add detailed information here -->
+
+**File**: <!-- path/to/relevant/file.ext:line -->

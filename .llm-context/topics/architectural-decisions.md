@@ -119,3 +119,12 @@ done
 **Trade-off**: Constraint on project naming, but simple and predictable.
 
 **File**: `tmux-new-branch.sh:17-18`, `README.md:188-189`
+# architectural decisions
+
+## Overview
+<!-- Describe what this topic covers -->
+
+## Details
+<!-- Add detailed information here -->
+
+**File**: <!-- path/to/relevant/file.ext:line -->

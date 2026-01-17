@@ -133,3 +133,12 @@ Optional scripts that projects can define:
 - **Purpose**: Project-specific cleanup
 
 Both receive the working directory context automatically.
+# data model
+
+## Overview
+<!-- Describe what this topic covers -->
+
+## Details
+<!-- Add detailed information here -->
+
+**File**: <!-- path/to/relevant/file.ext:line -->
