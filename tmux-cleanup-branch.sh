@@ -116,6 +116,7 @@ main() {
                 fi
 
                 sleep 1
+                tmux kill-window
                 exit 0
                 ;;
         esac
