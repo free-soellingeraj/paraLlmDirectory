@@ -16,6 +16,8 @@ fi
 chmod +x "$SCRIPT_DIR/tmux-new-branch.sh"
 chmod +x "$SCRIPT_DIR/tmux-cleanup-branch.sh"
 chmod +x "$SCRIPT_DIR/envs.sh"
+chmod +x "$SCRIPT_DIR/tmux-command-center.sh"
+chmod +x "$SCRIPT_DIR/pane-monitor.sh"
 
 # Create envs directory
 mkdir -p ~/code/envs
@@ -42,6 +44,14 @@ bind-key k display-popup -E -w 60% -h 60% "$SCRIPT_DIR/tmux-cleanup-branch.sh"
 
 # Ctrl+b C: original behavior (plain new window)
 bind-key C new-window -c "#{pane_current_path}"
+
+# Ctrl+b v: Command Center (view all AI sessions)
+bind-key v run-shell "$SCRIPT_DIR/tmux-command-center.sh"
+
+# Ctrl+b b: Toggle broadcast mode (when in command center)
+bind-key b if-shell '[ "\$(tmux display-message -p \"#{window_name}\")" = "command-center" ]' \
+    'set-window-option synchronize-panes; display-message "Toggled broadcast mode"' \
+    'display-message "Broadcast toggle only works in command-center window"'
 EOF
     echo "Added bindings to ~/.tmux.conf"
 fi
@@ -58,6 +68,8 @@ echo ""
 echo "Keybindings:"
 echo "  Ctrl+b c  - Create/resume feature branch"
 echo "  Ctrl+b k  - Cleanup feature branch"
+echo "  Ctrl+b v  - Command Center (view all AI sessions)"
+echo "  Ctrl+b b  - Toggle broadcast mode (in command center)"
 echo "  Ctrl+b C  - Plain new window"
 echo ""
 echo "Optional: Add this alias to your ~/.zshrc or ~/.bashrc:"
