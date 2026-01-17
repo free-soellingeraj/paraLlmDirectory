@@ -89,11 +89,22 @@ create_command_center() {
     # Apply tiled layout
     tmux select-layout -t "$COMMAND_CENTER" tiled
 
+    # Enable pane border status to show window names at top of each tile
+    tmux set-window-option -t "$COMMAND_CENTER" pane-border-status top
+    tmux set-window-option -t "$COMMAND_CENTER" pane-border-format " #{pane_index}: #T "
+
+    # Set pane titles from the saved names
+    local pane_index=0
+    while IFS='|' read -r pane_id name origin; do
+        tmux select-pane -t "$COMMAND_CENTER.$pane_index" -T "$name"
+        ((pane_index++))
+    done < "$STATE_FILE"
+
     # Select first pane
     tmux select-pane -t "$COMMAND_CENTER.0"
 
     # Show help message
-    tmux display-message "Command Center: $count windows | Arrow keys=navigate | ^b z=zoom | ^b q=quit (restores layout)"
+    tmux display-message "Command Center: $count windows | Arrows=navigate | ^b z=zoom | ^b b=broadcast"
 }
 
 create_command_center
