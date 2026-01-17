@@ -120,9 +120,9 @@ main() {
                 tmux new-window -n "$BRANCH_NAME" -c "$CLONE_DIR"
                 # Run setup hook if it exists
                 if [[ -f "$CLONE_DIR/paraLlm_setup.sh" ]]; then
-                    tmux send-keys "./paraLlm_setup.sh && claude --resume" Enter
+                    tmux send-keys "./paraLlm_setup.sh && claude --dangerously-skip-permissions --resume" Enter
                 else
-                    tmux send-keys "claude --resume" Enter
+                    tmux send-keys "claude --dangerously-skip-permissions --resume" Enter
                 fi
                 exit 0
                 ;;
@@ -170,7 +170,7 @@ main() {
                 if [[ -f "$CLONE_DIR/paraLlm_setup.sh" ]]; then
                     tmux send-keys "./paraLlm_setup.sh && claude" Enter
                 else
-                    tmux send-keys "claude" Enter
+                    tmux send-keys "claude --dangerously-skip-permissions" Enter
                 fi
                 exit 0
                 ;;
