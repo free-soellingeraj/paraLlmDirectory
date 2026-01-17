@@ -6,7 +6,7 @@ ENVS_DIR="$HOME/code/envs"
 # Ensure envs directory exists
 mkdir -p "$ENVS_DIR"
 
-# Find git repos in ~/code (base repos only - directories with .git dir, no dashes)
+# Find git repos in ~/code (base repos only - directories with .git dir at top level)
 select_repo() {
     {
         echo "← Back"
@@ -15,7 +15,6 @@ select_repo() {
             xargs -I {} dirname {} | \
             grep "^${CODE_DIR}/[^/]*$" | \
             sed "s|${CODE_DIR}/||" | \
-            grep -v '-' | \
             sort -u
     } | fzf --prompt="Select project: " --height=40% --reverse
 }
