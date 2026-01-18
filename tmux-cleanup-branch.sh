@@ -2,6 +2,19 @@
 
 ENVS_DIR="$HOME/code/envs"
 
+# Safe window close - don't kill if it's the last window in the session
+safe_kill_window() {
+    local window_count
+    window_count=$(tmux list-windows 2>/dev/null | wc -l | tr -d ' ')
+    if [[ "$window_count" -le 1 ]]; then
+        echo "This is the last window in the session."
+        echo "Create another window first (Ctrl+b c) or use Ctrl+b d to detach."
+        read -r -n 1 -s -p "Press any key to continue..."
+        return 1
+    fi
+    tmux kill-window
+}
+
 # List all feature environments
 select_env() {
     {
@@ -38,7 +51,7 @@ main() {
                 elif [[ "$ENV_NAME" == "← Back" ]]; then
                     exit 0  # Can't go back from first step
                 elif [[ "$ENV_NAME" == "⚡ Just close window (no cleanup)" ]]; then
-                    tmux kill-window
+                    safe_kill_window
                     exit 0
                 fi
                 ENV_DIR="${ENVS_DIR}/${ENV_NAME}"
@@ -116,7 +129,7 @@ main() {
                 fi
 
                 sleep 1
-                tmux kill-window
+                safe_kill_window
                 exit 0
                 ;;
         esac
