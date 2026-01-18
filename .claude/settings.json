@@ -3,7 +3,11 @@
     "allow": [
       "WebSearch",
       "WebFetch",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(gh pr create --title \"Add .claude/settings.local.json with safe defaults\" --body \"$\\(cat <<''EOF''\n## Summary\n- Adds `.claude/settings.local.json` to the repo with pre-configured permissions\n- Auto-allows `WebSearch` and `WebFetch` \\(no more confirmations\\)\n- Denies destructive commands: `rm`, `sudo`, `kill`, psql mutations, etc.\n- Portable settings that work across any machine after clone\n\n## Test plan\n- [ ] Clone repo fresh, verify no permission prompts for web search\n- [ ] Verify destructive commands are still blocked\n\n🤖 Generated with [Claude Code]\\(https://claude.com/claude-code\\)\nEOF\n\\)\")",
+      "Bash(git mv:*)"
     ],
     "deny": [
       "Bash(rm *)",
