@@ -25,6 +25,14 @@ Log of bugs encountered and fixed in the para-llm-directory project. Each entry 
 **Fix**: Added `tmux kill-window` at the end of successful cleanup flow
 **File**: `tmux-cleanup-branch.sh:119`
 
+### BUG-002: Session terminates when closing last window
+**Date**: 2026-01-18
+**Symptom**: When using `ctrl+b k` with only one window in the tmux session, selecting "Just close window" or completing a cleanup would kill the entire tmux session. Reopening and using `ctrl+b v` would show "there are no windows".
+**Cause**: `tmux kill-window` was called unconditionally. When the last window in a session is killed, tmux terminates the entire session (default tmux behavior).
+**Fix**: Added `safe_kill_window()` function that checks window count before killing. If it's the last window, displays a message instead of killing.
+**File**: `tmux-cleanup-branch.sh:5-16` (new function), `tmux-cleanup-branch.sh:54`, `tmux-cleanup-branch.sh:132`
+**PR**: #8
+
 ---
 
 ## Known Bug-Prone Areas
@@ -50,12 +58,3 @@ When fixing bugs, document:
 2. Steps to reproduce
 3. The actual vs expected behavior
 4. Any related issues or PRs
-# bugs fixed
-
-## Overview
-<!-- Describe what this topic covers -->
-
-## Details
-<!-- Add detailed information here -->
-
-**File**: <!-- path/to/relevant/file.ext:line -->
