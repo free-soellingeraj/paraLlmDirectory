@@ -33,6 +33,13 @@ Log of bugs encountered and fixed in the para-llm-directory project. Each entry 
 **File**: `tmux-cleanup-branch.sh:5-16` (new function), `tmux-cleanup-branch.sh:54`, `tmux-cleanup-branch.sh:132`
 **PR**: #8
 
+### BUG-003: New feature opens in separate window instead of command center
+**Date**: 2026-01-18
+**Symptom**: When in command center view (`ctrl+b v`) and creating a new feature with `ctrl+b c`, the new window opens separately instead of appearing as a new tile in the command center.
+**Cause**: `tmux-new-branch.sh` always created new windows with `tmux new-window`, which creates a standalone window. The command center had no knowledge of newly created windows.
+**Fix**: Added `create_feature_window()` helper function that checks if command center exists and, if so, joins the new pane to it with `tmux join-pane`, reapplies tiled layout, and sets the pane title.
+**File**: `tmux-new-branch.sh:10-46` (new function), lines 158, 206, 235, 279
+
 ---
 
 ## Known Bug-Prone Areas
