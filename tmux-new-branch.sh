@@ -2,9 +2,48 @@
 
 CODE_DIR="$HOME/code"
 ENVS_DIR="$HOME/code/envs"
+COMMAND_CENTER="command-center"
 
 # Ensure envs directory exists
 mkdir -p "$ENVS_DIR"
+
+# Create a new window and add it to command center if active
+# Usage: create_feature_window "branch-name" "/path/to/dir"
+create_feature_window() {
+    local branch_name="$1"
+    local working_dir="$2"
+
+    # Check if command center window exists
+    local cc_exists
+    cc_exists=$(tmux list-windows -F '#{window_name}' 2>/dev/null | grep -x "$COMMAND_CENTER")
+
+    # Create the new window
+    tmux new-window -n "$branch_name" -c "$working_dir"
+
+    if [[ -n "$cc_exists" ]]; then
+        # Command center is active - join this window's pane to it
+        local new_pane
+        new_pane=$(tmux display-message -p '#{pane_id}')
+
+        # Join the new pane into command center
+        tmux join-pane -s "$new_pane" -t "$COMMAND_CENTER" -h
+
+        # Reapply tiled layout
+        tmux select-layout -t "$COMMAND_CENTER" tiled
+
+        # Set the pane title
+        local pane_count
+        pane_count=$(tmux list-panes -t "$COMMAND_CENTER" | wc -l)
+        local last_pane_index=$((pane_count - 1))
+        tmux select-pane -t "$COMMAND_CENTER.$last_pane_index" -T "$branch_name"
+
+        # Select the new pane
+        tmux select-pane -t "$COMMAND_CENTER.$last_pane_index"
+
+        # Switch to command center window
+        tmux select-window -t "$COMMAND_CENTER"
+    fi
+}
 
 # Find git repos in ~/code (base repos only - directories with .git dir at top level)
 select_repo() {
@@ -116,7 +155,7 @@ main() {
                 ENV_DIR="${ENVS_DIR}/${REPO_NAME}-${BRANCH_NAME}"
                 CLONE_DIR="${ENV_DIR}/${REPO_NAME}"
 
-                tmux new-window -n "$BRANCH_NAME" -c "$CLONE_DIR"
+                create_feature_window "$BRANCH_NAME" "$CLONE_DIR"
                 # Run setup hook if it exists
                 if [[ -f "$CLONE_DIR/paraLlm_setup.sh" ]]; then
                     tmux send-keys "./paraLlm_setup.sh && claude --dangerously-skip-permissions --resume" Enter
@@ -164,7 +203,7 @@ main() {
                 cd "$CLONE_DIR" || exit 1
                 git checkout "$BRANCH_NAME" 2>&1
 
-                tmux new-window -n "$BRANCH_NAME" -c "$CLONE_DIR"
+                create_feature_window "$BRANCH_NAME" "$CLONE_DIR"
                 # Run setup hook if it exists
                 if [[ -f "$CLONE_DIR/paraLlm_setup.sh" ]]; then
                     tmux send-keys "./paraLlm_setup.sh && claude" Enter
@@ -193,7 +232,7 @@ main() {
                     echo "Directory already exists at $ENV_DIR"
                     echo "Opening existing clone..."
                     sleep 1
-                    tmux new-window -n "$BRANCH_NAME" -c "$CLONE_DIR"
+                    create_feature_window "$BRANCH_NAME" "$CLONE_DIR"
                     # Run setup hook if it exists
                     if [[ -f "$CLONE_DIR/paraLlm_setup.sh" ]]; then
                         tmux send-keys "./paraLlm_setup.sh && claude --resume" Enter
@@ -237,7 +276,7 @@ main() {
                     git checkout -b "$BRANCH_NAME" 2>&1
                 fi
 
-                tmux new-window -n "$BRANCH_NAME" -c "$CLONE_DIR"
+                create_feature_window "$BRANCH_NAME" "$CLONE_DIR"
                 # Run setup hook if it exists
                 if [[ -f "$CLONE_DIR/paraLlm_setup.sh" ]]; then
                     tmux send-keys "./paraLlm_setup.sh && claude" Enter
