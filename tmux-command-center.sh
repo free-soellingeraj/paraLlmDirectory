@@ -1,40 +1,44 @@
 #!/bin/bash
 
-# Command Center - Tiled view of all environment windows
+# Command Center - Tiled view of all windows in the current session
 # Moves actual panes into a tiled layout for direct interaction
 # Usage: Called via Ctrl+b v keybinding
 
-ENVS_DIR="$HOME/code/envs"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 COMMAND_CENTER="command-center"
 STATE_FILE="/tmp/tmux-command-center-state-$$"
 
-# Discover all tmux windows that match env directory patterns
+# Set up hooks for dynamic window/pane management
+setup_hooks() {
+    local hooks_script="$SCRIPT_DIR/tmux-cc-hooks.sh"
+
+    # Hook: when a new window is created, join it to command center
+    tmux set-hook -g after-new-window "run-shell 'bash \"$hooks_script\" new-window'"
+
+    # Hook: when a pane exits, reapply the tiled layout
+    tmux set-hook -g pane-exited "run-shell 'bash \"$hooks_script\" pane-exited'"
+
+    # Hook: when a window is closed, check if we need to clean up hooks
+    tmux set-hook -g window-unlinked "run-shell 'bash \"$hooks_script\" window-unlinked'"
+}
+
+# Remove hooks when command center is closed
+cleanup_hooks() {
+    tmux set-hook -gu after-new-window
+    tmux set-hook -gu pane-exited
+}
+
+# Discover all tmux windows in the current session (excluding command center)
 discover_windows() {
-    local all_windows
-    all_windows=$(tmux list-windows -a -F '#{session_name}:#{window_index} #{window_name} #{pane_id}' 2>/dev/null)
+    local current_session
+    current_session=$(tmux display-message -p '#{session_name}')
 
-    for env in "$ENVS_DIR"/*/; do
-        [[ ! -d "$env" ]] && continue
-
-        local env_name
-        env_name=$(basename "$env")
-        local branch
-        branch="${env_name#*-}"
-
-        # Look for window with this name (branch in middle, pane_id at end)
-        local match
-        match=$(echo "$all_windows" | grep " ${branch} " | head -1)
-
-        if [[ -n "$match" ]]; then
-            local pane_id window_name session_window
-            pane_id=$(echo "$match" | awk '{print $3}')
-            window_name=$(echo "$match" | awk '{print $2}')
-            session_window=$(echo "$match" | awk '{print $1}')
-
-            # Don't include command center itself
-            if [[ "$window_name" != "$COMMAND_CENTER" ]]; then
-                echo "$pane_id|$window_name|$session_window"
-            fi
+    # List all windows in current session: session:index window_name pane_id
+    tmux list-windows -t "$current_session" -F '#{session_name}:#{window_index} #{window_name} #{pane_id}' 2>/dev/null | \
+    while read -r session_window window_name pane_id; do
+        # Don't include command center itself
+        if [[ "$window_name" != "$COMMAND_CENTER" ]]; then
+            echo "$pane_id|$window_name|$session_window"
         fi
     done
 }
@@ -50,8 +54,8 @@ create_command_center() {
     local count=${#windows[@]}
 
     if [[ $count -eq 0 ]]; then
-        echo "No environment windows found."
-        echo "Use Ctrl+b c to create one."
+        echo "No windows found (besides command center)."
+        echo "Create a window first with Ctrl+b c or standard tmux commands."
         read -r -n 1
         exit 0
     fi
@@ -102,6 +106,9 @@ create_command_center() {
 
     # Select first pane
     tmux select-pane -t "$COMMAND_CENTER.0"
+
+    # Set up hooks for dynamic updates
+    setup_hooks
 
     # Show help message
     tmux display-message "Command Center: $count windows | Arrows=navigate | ^b z=zoom | ^b b=broadcast"
