@@ -40,6 +40,41 @@ Log of bugs encountered and fixed in the para-llm-directory project. Each entry 
 **Fix**: Added `create_feature_window()` helper function that checks if command center exists and, if so, joins the new pane to it with `tmux join-pane`, reapplies tiled layout, and sets the pane title.
 **File**: `tmux-new-branch.sh:10-46` (new function), lines 158, 206, 235, 279
 
+### BUG-004: Command center creates zombie window
+**Date**: 2026-01-20
+**Symptom**: After opening and closing command center, an extra window with wrong pane remained in `ctrl+b w` list
+**Cause**: `create_command_center()` used `swap-pane` for the first pane, which left the original window alive with an empty shell. Remaining panes used `join-pane` which killed their windows.
+**Fix**: Changed to use `join-pane` for ALL panes uniformly, then kill the auto-created empty shell pane
+**File**: `tmux-command-center.sh:138-185`
+
+### BUG-005: Command center freezes tmux on open
+**Date**: 2026-01-20
+**Symptom**: After `ctrl+b v`, tmux became completely unresponsive. Couldn't interact or even use `ctrl+b w`. Had to kill terminal and reattach.
+**Cause**: Background processes started with `&` weren't fully detached. tmux's `run-shell` waits for child processes, and the state-detector processes inherited file descriptors that kept the connection open.
+**Fix**: Start background processes with `nohup ... </dev/null >/dev/null 2>&1 &` to fully detach from parent
+**File**: `tmux-command-center.sh:218-226`, `plugins/claude-state-monitor/monitor-manager.sh:92-95`
+
+### BUG-006: State detector always shows "Waiting for Input"
+**Date**: 2026-01-20
+**Symptom**: Status indicator never changed to "Working" even when Claude was running commands
+**Cause**: Prompt detection checked for `❯` anywhere in last 5 lines, but `❯` also appears in conversation history (user messages). Detector always found a match.
+**Fix**: Changed to check for `❯` at the START of a line only (`grep -qE '^[[:space:]]*❯'`), which matches the actual prompt, not history
+**File**: `plugins/claude-state-monitor/state-detector.sh:42-51`
+
+### BUG-007: Claude Code Stop hook never fires
+**Date**: 2026-01-20
+**Symptom**: State stayed "working" after Claude finished its turn. "Waiting for Input" only appeared after polling delay.
+**Cause**: Claude Code's `Stop` hook appears to not fire reliably (or at all). Hooks for `PreToolUse` and `PostToolUse` work, but `Stop` does not update state files.
+**Fix**: Removed reliance on hooks for state detection. Simplified to pure terminal-based detection (prompt visibility for Claude, child processes for regular terminals).
+**File**: `plugins/claude-state-monitor/state-detector.sh` (full rewrite), `.llm-context/topics/product-features.md` (updated docs)
+
+### BUG-008: Ctrl+b k in command center kills all windows
+**Date**: 2026-01-20
+**Symptom**: In command center, selecting "Just close window" from `Ctrl+b k` killed all windows except command center
+**Cause**: `safe_kill_window()` called `tmux kill-window` without checking if we're in command center. This killed the command center window which contained all joined panes.
+**Fix**: Added `in_command_center()` check. When in command center, kill just the active pane and reapply tiled layout instead of killing the window.
+**File**: `tmux-cleanup-branch.sh:8-49`
+
 ---
 
 ## Known Bug-Prone Areas

@@ -1,9 +1,50 @@
 #!/bin/bash
 
 ENVS_DIR="$HOME/code/envs"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+COMMAND_CENTER="command-center"
+
+# Check if we're in command center
+in_command_center() {
+    local current_window
+    current_window=$(tmux display-message -p '#{window_name}' 2>/dev/null)
+    [[ "$current_window" == "$COMMAND_CENTER" ]]
+}
+
+# Kill current pane in command center and reapply layout
+kill_pane_in_command_center() {
+    local active_pane
+    active_pane=$(tmux display-message -p '#{pane_id}' 2>/dev/null)
+
+    # Count panes in command center
+    local pane_count
+    pane_count=$(tmux list-panes -t "$COMMAND_CENTER" 2>/dev/null | wc -l | tr -d ' ')
+
+    if [[ "$pane_count" -le 1 ]]; then
+        echo "This is the last pane in command center."
+        echo "Use Ctrl+b v to exit command center first."
+        read -r -n 1 -s -p "Press any key to continue..."
+        return 1
+    fi
+
+    # Kill the active pane
+    tmux kill-pane -t "$active_pane"
+
+    # Reapply tiled layout to reclaim space
+    tmux select-layout -t "$COMMAND_CENTER" tiled
+
+    echo "Pane closed. Command center updated."
+    sleep 0.5
+}
 
 # Safe window close - don't kill if it's the last window in the session
 safe_kill_window() {
+    # If in command center, kill just the current pane instead
+    if in_command_center; then
+        kill_pane_in_command_center
+        return $?
+    fi
+
     local window_count
     window_count=$(tmux list-windows 2>/dev/null | wc -l | tr -d ' ')
     if [[ "$window_count" -le 1 ]]; then
@@ -110,13 +151,31 @@ main() {
                     (cd "$CLONE_DIR" && ./paraLlm_teardown.sh)
                 fi
 
-                # Kill any tmux windows with this branch name
-                tmux list-windows -a -F '#{session_name}:#{window_index} #{window_name}' 2>/dev/null | \
-                    grep " ${BRANCH_NAME}$" | \
-                    cut -d' ' -f1 | \
-                    while read -r win; do
-                        tmux kill-window -t "$win" 2>/dev/null
-                    done
+                # Kill any tmux windows/panes with this branch name
+                if in_command_center; then
+                    # In command center: find and kill the pane for this branch
+                    # Look up pane by checking the state file
+                    SESSION_NAME=$(tmux display-message -p '#{session_name}')
+                    STATE_FILE="/tmp/tmux-command-center-state-${SESSION_NAME}"
+                    if [[ -f "$STATE_FILE" ]]; then
+                        # Find pane ID for this branch in state file
+                        local pane_to_kill
+                        pane_to_kill=$(grep "|${BRANCH_NAME}|" "$STATE_FILE" 2>/dev/null | cut -d'|' -f1 | head -1)
+                        if [[ -n "$pane_to_kill" ]]; then
+                            tmux kill-pane -t "$pane_to_kill" 2>/dev/null
+                            # Reapply layout
+                            tmux select-layout -t "$COMMAND_CENTER" tiled 2>/dev/null
+                        fi
+                    fi
+                else
+                    # Normal mode: kill windows by name
+                    tmux list-windows -a -F '#{session_name}:#{window_index} #{window_name}' 2>/dev/null | \
+                        grep " ${BRANCH_NAME}$" | \
+                        cut -d' ' -f1 | \
+                        while read -r win; do
+                            tmux kill-window -t "$win" 2>/dev/null
+                        done
+                fi
 
                 # Delete the environment
                 echo "Deleting $ENV_DIR..."
@@ -129,7 +188,10 @@ main() {
                 fi
 
                 sleep 1
-                safe_kill_window
+                # Don't call safe_kill_window if in command center - pane already killed above
+                if ! in_command_center; then
+                    safe_kill_window
+                fi
                 exit 0
                 ;;
         esac

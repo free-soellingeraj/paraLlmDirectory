@@ -102,12 +102,83 @@ All selection screens support:
 
 ---
 
+### 6. Command Center (`Ctrl+b v`)
+Tiled view showing all active feature windows for at-a-glance monitoring.
+
+**Features**:
+- Joins all session windows into a single tiled layout
+- Each tile shows the pane from one feature branch
+- Pane borders display: `pane_index: project | branch`
+- Direct interaction with any pane (keyboard input forwarded)
+
+**Navigation**:
+- Arrow keys to move between panes
+- `Ctrl+b z` to zoom/unzoom a pane
+- `Ctrl+b b` to toggle broadcast mode (type in all panes)
+
+**File**: `tmux-command-center.sh`
+
+---
+
+### 7. Pane State Visual Indicators
+Visual feedback showing whether each Command Center tile is waiting for input or actively working.
+
+**Tile Title Bar Format**:
+```
+pane_index: status | project | branch
+```
+
+Example titles:
+- `0: Waiting for Input | myProject | feature-auth`
+- `1: Working | myProject | bugfix-login`
+
+**Active Pane Indicator**:
+The currently selected pane is marked with asterisks (handled by tmux `pane-border-format`):
+```
+** 0: Waiting for Input | myProject | feature-auth **
+```
+
+**Two States**:
+| State | Color | Meaning |
+|-------|-------|---------|
+| **Waiting for Input** | Green | Prompt visible, ready for user input |
+| **Working** | Yellow | Command running or Claude processing |
+
+**Detection Method** (terminal-based, simple & reliable):
+
+For Claude Code sessions:
+- Checks if the Claude prompt (`❯`) is visible in the pane
+- Prompt visible → "Waiting for Input"
+- Prompt not visible → "Working"
+
+For regular terminals (non-Claude):
+- Checks if shell has child processes running
+- No children → "Waiting for Input"
+- Has children → "Working"
+
+**Why terminal detection over hooks**:
+- Claude Code's `Stop` hook doesn't fire reliably
+- Prompt detection is simple and works consistently
+- 0.3s polling provides responsive updates
+- No complex state machine or priority logic needed
+
+**Implementation** (plugin architecture):
+- `plugins/claude-state-monitor/state-detector.sh` - Per-pane monitor using prompt/process detection
+- `plugins/claude-state-monitor/monitor-manager.sh` - Starts/stops monitors with Command Center
+- `plugins/claude-state-monitor/get-pane-display.sh` - Helper for tmux pane-border-format
+- State written to `/tmp/claude-pane-display/<pane_id>`
+
+**File**: `plugins/claude-state-monitor/`
+
+---
+
 ## Key Bindings Summary
 
 | Binding | Action |
 |---------|--------|
 | `Ctrl+b c` | Create/resume feature environment |
 | `Ctrl+b k` | Cleanup feature environment |
+| `Ctrl+b v` | Command Center (tiled view) |
 | `Ctrl+b C` | Plain new tmux window |
 
 ---
@@ -122,12 +193,3 @@ All selection screens support:
     └── ProjectName-feature/
         └── ProjectName/      # Cloned repo
 ```
-# product features
-
-## Overview
-<!-- Describe what this topic covers -->
-
-## Details
-<!-- Add detailed information here -->
-
-**File**: <!-- path/to/relevant/file.ext:line -->

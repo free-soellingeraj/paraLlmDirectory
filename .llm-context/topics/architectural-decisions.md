@@ -119,12 +119,119 @@ done
 **Trade-off**: Constraint on project naming, but simple and predictable.
 
 **File**: `tmux-new-branch.sh:17-18`, `README.md:188-189`
-# architectural decisions
 
-## Overview
-<!-- Describe what this topic covers -->
+---
 
-## Details
-<!-- Add detailed information here -->
+## ADR-007: Claude Code Hooks for State Detection
 
-**File**: <!-- path/to/relevant/file.ext:line -->
+**Decision**: Use Claude Code's built-in hooks system for accurate state detection instead of parsing terminal output.
+
+**Context**: The Command Center feature needs to display Claude's state (ready/waiting/processing) with visual indicators. Previous implementations attempted to parse terminal output via tmux pipe-pane, but this proved unreliable due to timing issues and the complexity of Claude's UI rendering.
+
+**Alternatives Considered**:
+
+| Approach | Feasibility | Notes |
+|----------|-------------|-------|
+| Terminal output parsing | ⚠️ Unreliable | Timing issues, ANSI codes, UI complexity |
+| tmux pipe-pane | ⚠️ Partially works | Real-time but still parsing terminal output |
+| Polling capture-pane | ⚠️ Unreliable | Misses transient states, timing dependent |
+| **Claude Code hooks** | ✅ Best option | Official API, accurate events, no parsing |
+
+**How Claude Code Hooks Work**:
+
+Claude Code provides a hooks system that fires events at specific lifecycle points:
+- `SessionStart` / `SessionEnd` - Session lifecycle
+- `PreToolUse` / `PostToolUse` - Tool execution
+- `Stop` - Claude finishes responding
+- `Notification` - Permission prompts, idle state
+
+Hooks are configured in `~/.claude/settings.json`:
+```json
+{
+  "hooks": {
+    "PreToolUse": [{
+      "matcher": "*",
+      "hooks": [{
+        "type": "command",
+        "command": "~/.para-llm/plugins/claude-state-monitor/hooks/state-tracker.sh pre_tool"
+      }]
+    }],
+    "Stop": [{
+      "hooks": [{
+        "type": "command",
+        "command": "~/.para-llm/plugins/claude-state-monitor/hooks/state-tracker.sh stop"
+      }]
+    }]
+  }
+}
+```
+
+**Architecture**:
+```
+┌─────────────────────────────────────────────────────────┐
+│  Claude Code (in pane)                                  │
+│       │                                                 │
+│       ▼ (hooks fire on state changes)                  │
+│  ┌─────────────────────────────────────────────────┐   │
+│  │  state-tracker.sh (called by hooks)             │   │
+│  │  - Receives event JSON via stdin                │   │
+│  │  - Writes state to /tmp/claude-state/by-cwd/    │   │
+│  └─────────────────────────────────────────────────┘   │
+│                                                         │
+│  ┌─────────────────────────────────────────────────┐   │
+│  │  state-detector.sh (one per monitored pane)     │   │
+│  │  - Polls every 1 second                         │   │
+│  │  - Reads /tmp/claude-state/by-cwd/<path>.json   │   │
+│  │  - Falls back to shell process check for non-   │   │
+│  │    Claude terminals                             │   │
+│  │  - Writes to /tmp/claude-pane-display/<id>      │   │
+│  │  - Updates border: tmux set-option -p ...       │   │
+│  └─────────────────────────────────────────────────┘   │
+│       │                                                 │
+│       ▼                                                 │
+│  tmux pane-border-format reads display file            │
+└─────────────────────────────────────────────────────────┘
+```
+
+**State Mapping**:
+| Hook Event | State | Display |
+|------------|-------|---------|
+| `PreToolUse` | working | `Working: <tool_name>` |
+| `PostToolUse` | working | `Working` |
+| `Stop` | ready | `Waiting for Input` |
+| `Notification (idle_prompt)` | ready | `Waiting for Input` |
+| `Notification (permission_prompt)` | blocked | `Needs Action: Permission` |
+
+**For Non-Claude Terminals**:
+- Checks if shell has child processes
+- Child processes running → `Working`
+- No children (idle shell) → `Waiting for Input`
+
+**Rationale**:
+- **Accurate**: Uses official Claude Code events, not terminal parsing
+- **Reliable**: No timing/race conditions from output streaming
+- **Extensible**: Easy to add more hook types for future states
+- **Dual mode**: Works for both Claude and regular terminals
+
+**Plugin Structure**:
+```
+plugins/claude-state-monitor/
+├── hooks/
+│   ├── state-tracker.sh   # Hook handler, writes state to JSON
+│   └── hooks-config.json  # Claude settings.json hooks template
+├── state-detector.sh      # Per-pane monitor (reads hooks + shell state)
+├── monitor-manager.sh     # Start/stop monitors for Command Center
+├── get-pane-display.sh    # Helper for tmux pane-border-format
+└── README.md              # Plugin documentation
+```
+
+**Installation**:
+- `install.sh` copies hooks to `~/.para-llm/plugins/claude-state-monitor/hooks/`
+- Merges hooks configuration into `~/.claude/settings.json`
+
+**File**: `plugins/claude-state-monitor/`
+
+**References**:
+- Claude Code hooks: https://code.claude.com/docs/en/hooks.md
+- Claude Code hooks guide: https://code.claude.com/docs/en/hooks-guide.md
+- Feature branch: `feature-link-visuals-to-claude-completion`
