@@ -6,9 +6,13 @@ ENVS_DIR="$HOME/code/envs"
 # Ensure envs directory exists
 mkdir -p "$ENVS_DIR"
 
-# Check if command center exists
-command_center_exists() {
-    tmux list-windows -F '#{window_name}' 2>/dev/null | grep -qx "command-center"
+# Check if we're currently in command center (matches cleanup script approach)
+COMMAND_CENTER="command-center"
+
+in_command_center() {
+    local current_window
+    current_window=$(tmux display-message -p '#{window_name}' 2>/dev/null)
+    [[ "$current_window" == "$COMMAND_CENTER" ]]
 }
 
 # Create a new window for a feature branch
@@ -20,8 +24,8 @@ create_feature_window() {
     local project_name
     project_name=$(basename "$working_dir")
 
-    if command_center_exists; then
-        # Command center is active - create window then join to command center
+    if in_command_center; then
+        # In command center - create window then join to command center
         tmux new-window -n "$branch_name" -c "$working_dir"
         local new_pane_id
         new_pane_id=$(tmux display-message -p '#{pane_id}')
@@ -33,13 +37,13 @@ create_feature_window() {
         echo "$new_pane_id|$branch_name|new|$project_name" >> "$state_file"
 
         # Join pane to command center
-        tmux join-pane -s "$new_pane_id" -t "command-center" -h
+        tmux join-pane -s "$new_pane_id" -t "$COMMAND_CENTER" -h
 
         # Reapply tiled layout
-        tmux select-layout -t "command-center" tiled
+        tmux select-layout -t "$COMMAND_CENTER" tiled
 
         # Switch to command center and select the new pane
-        tmux select-window -t "command-center"
+        tmux select-window -t "$COMMAND_CENTER"
     else
         # Normal mode - just create window
         tmux new-window -n "$branch_name" -c "$working_dir"
