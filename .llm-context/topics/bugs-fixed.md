@@ -68,6 +68,13 @@ Log of bugs encountered and fixed in the para-llm-directory project. Each entry 
 **Fix**: Removed reliance on hooks for state detection. Simplified to pure terminal-based detection (prompt visibility for Claude, child processes for regular terminals).
 **File**: `plugins/claude-state-monitor/state-detector.sh` (full rewrite), `.llm-context/topics/product-features.md` (updated docs)
 
+### BUG-008: Ctrl+b k in command center kills all windows
+**Date**: 2026-01-20
+**Symptom**: In command center, selecting "Just close window" from `Ctrl+b k` killed all windows except command center
+**Cause**: `safe_kill_window()` called `tmux kill-window` without checking if we're in command center. This killed the command center window which contained all joined panes.
+**Fix**: Added `in_command_center()` check. When in command center, kill just the active pane and reapply tiled layout instead of killing the window.
+**File**: `tmux-cleanup-branch.sh:8-49`
+
 ---
 
 ## Known Bug-Prone Areas
