@@ -8,10 +8,12 @@ mkdir -p "$ENVS_DIR"
 
 # Check if we're currently in command center (matches cleanup script approach)
 COMMAND_CENTER="command-center"
+DEBUG_LOG="/tmp/new-branch-debug.log"
 
 in_command_center() {
     local current_window
     current_window=$(tmux display-message -p '#{window_name}' 2>/dev/null)
+    echo "$(date): in_command_center check: current_window='$current_window' COMMAND_CENTER='$COMMAND_CENTER'" >> "$DEBUG_LOG"
     [[ "$current_window" == "$COMMAND_CENTER" ]]
 }
 
@@ -24,7 +26,9 @@ create_feature_window() {
     local project_name
     project_name=$(basename "$working_dir")
 
+    echo "$(date): create_feature_window called: branch='$branch_name' dir='$working_dir'" >> "$DEBUG_LOG"
     if in_command_center; then
+        echo "$(date): IN command center - will join pane" >> "$DEBUG_LOG"
         # In command center - create window then join to command center
         tmux new-window -n "$branch_name" -c "$working_dir"
         local new_pane_id
@@ -42,9 +46,22 @@ create_feature_window() {
         # Reapply tiled layout
         tmux select-layout -t "$COMMAND_CENTER" tiled
 
+        # Initialize display file for the new pane
+        local safe_id="${new_pane_id//\%/}"
+        mkdir -p /tmp/claude-pane-display
+        echo "Waiting for Input | $project_name | $branch_name" > "/tmp/claude-pane-display/$safe_id"
+
+        # Start state monitor for the new pane
+        local monitor_script
+        monitor_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/plugins/claude-state-monitor/state-detector.sh"
+        if [[ -x "$monitor_script" ]]; then
+            nohup "$monitor_script" "$new_pane_id" "$project_name" "$branch_name" </dev/null >/dev/null 2>&1 &
+        fi
+
         # Switch to command center and select the new pane
         tmux select-window -t "$COMMAND_CENTER"
     else
+        echo "$(date): NOT in command center - normal window creation" >> "$DEBUG_LOG"
         # Normal mode - just create window
         tmux new-window -n "$branch_name" -c "$working_dir"
     fi
@@ -119,7 +136,10 @@ main() {
                 elif [[ "$REPO_NAME" == "← Back" ]]; then
                     exit 0  # Can't go back from first step
                 elif [[ "$REPO_NAME" == "⚡ Plain terminal (no project)" ]]; then
-                    tmux new-window -c "#{pane_current_path}"
+                    # Use create_feature_window to handle command center case
+                    local current_path
+                    current_path=$(tmux display-message -p '#{pane_current_path}')
+                    create_feature_window "terminal" "$current_path"
                     exit 0
                 fi
                 REPO_ROOT="${CODE_DIR}/${REPO_NAME}"
