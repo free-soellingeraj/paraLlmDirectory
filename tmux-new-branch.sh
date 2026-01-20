@@ -6,15 +6,44 @@ ENVS_DIR="$HOME/code/envs"
 # Ensure envs directory exists
 mkdir -p "$ENVS_DIR"
 
+# Check if command center exists
+command_center_exists() {
+    tmux list-windows -F '#{window_name}' 2>/dev/null | grep -qx "command-center"
+}
+
 # Create a new window for a feature branch
-# The command center hooks will automatically join it if command center is active
+# If command center is active, joins the pane to it instead
 # Usage: create_feature_window "branch-name" "/path/to/dir"
 create_feature_window() {
     local branch_name="$1"
     local working_dir="$2"
+    local project_name
+    project_name=$(basename "$working_dir")
 
-    # Create the new window - hooks handle command center integration automatically
-    tmux new-window -n "$branch_name" -c "$working_dir"
+    if command_center_exists; then
+        # Command center is active - create window then join to command center
+        tmux new-window -n "$branch_name" -c "$working_dir"
+        local new_pane_id
+        new_pane_id=$(tmux display-message -p '#{pane_id}')
+
+        # Add to state file so it can be restored later
+        local session_name
+        session_name=$(tmux display-message -p '#{session_name}')
+        local state_file="/tmp/tmux-command-center-state-${session_name}"
+        echo "$new_pane_id|$branch_name|new|$project_name" >> "$state_file"
+
+        # Join pane to command center
+        tmux join-pane -s "$new_pane_id" -t "command-center" -h
+
+        # Reapply tiled layout
+        tmux select-layout -t "command-center" tiled
+
+        # Switch to command center and select the new pane
+        tmux select-window -t "command-center"
+    else
+        # Normal mode - just create window
+        tmux new-window -n "$branch_name" -c "$working_dir"
+    fi
 }
 
 # Find git repos in ~/code (base repos only - directories with .git dir at top level)
