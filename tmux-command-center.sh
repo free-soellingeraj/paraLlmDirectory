@@ -6,8 +6,29 @@
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 COMMAND_CENTER="command-center"
-STATE_FILE="/tmp/tmux-command-center-state-$$"
-MONITOR_PID_FILE="/tmp/tmux-claude-monitor-pid"
+# Use session-based state file so we can find it when restoring
+SESSION_NAME=$(tmux display-message -p '#{session_name}' 2>/dev/null)
+STATE_FILE="/tmp/tmux-command-center-state-${SESSION_NAME}"
+
+# Plugin paths
+MONITOR_PLUGIN="$SCRIPT_DIR/plugins/claude-state-monitor/monitor-manager.sh"
+
+# Check if command center already exists
+command_center_exists() {
+    tmux list-windows -F '#{window_name}' 2>/dev/null | grep -qxF "$COMMAND_CENTER"
+}
+
+# Check if we're currently in the command center
+in_command_center() {
+    local current_window
+    current_window=$(tmux display-message -p '#{window_name}' 2>/dev/null)
+    [[ "$current_window" == "$COMMAND_CENTER" ]]
+}
+
+# Switch to the command center window
+goto_command_center() {
+    tmux select-window -t "$COMMAND_CENTER"
+}
 
 # Set up hooks for dynamic window/pane management
 setup_hooks() {
@@ -27,6 +48,68 @@ setup_hooks() {
 cleanup_hooks() {
     tmux set-hook -gu after-new-window
     tmux set-hook -gu pane-exited
+    tmux set-hook -gu window-unlinked
+}
+
+# Stop the state monitor plugin
+stop_state_monitor() {
+    if [[ -x "$MONITOR_PLUGIN" ]]; then
+        "$MONITOR_PLUGIN" detach "$COMMAND_CENTER" >/dev/null 2>&1
+    fi
+}
+
+# Restore panes to their original windows and close command center
+restore_command_center() {
+    # Stop the monitor first
+    stop_state_monitor
+
+    # Clean up hooks
+    cleanup_hooks
+
+    # Safety check: need state file to restore
+    if [[ ! -f "$STATE_FILE" ]] || [[ ! -s "$STATE_FILE" ]]; then
+        tmux display-message "Cannot close: no state file to restore from"
+        return 1
+    fi
+
+    # Count panes we need to restore
+    local total_panes
+    total_panes=$(wc -l < "$STATE_FILE" | tr -d ' ')
+
+    # Restore panes from state file
+    local restored=0
+    local first_restored_window=""
+
+    while IFS='|' read -r pane_id name origin project; do
+        [[ -z "$pane_id" ]] && continue
+
+        # Check if this pane still exists
+        if tmux list-panes -a -F '#{pane_id}' 2>/dev/null | grep -qx "$pane_id"; then
+            # Break pane out to a new window with its original name
+            if tmux break-pane -s "$pane_id" -n "$name" 2>/dev/null; then
+                ((restored++))
+                # Remember first restored window
+                if [[ -z "$first_restored_window" ]]; then
+                    first_restored_window="$name"
+                fi
+            fi
+        fi
+    done < "$STATE_FILE"
+
+    # Command center should be auto-killed when last pane is broken out
+    # But try to kill it anyway in case it still exists
+    if command_center_exists; then
+        tmux kill-window -t "$COMMAND_CENTER" 2>/dev/null
+    fi
+
+    # Clean up state file
+    rm -f "$STATE_FILE"
+
+    # Select first window AFTER everything else is done
+    # Use run-shell -b to defer this until after current run-shell completes
+    if [[ -n "$first_restored_window" ]]; then
+        tmux run-shell -b "sleep 0.1; tmux select-window -t '$first_restored_window' 2>/dev/null"
+    fi
 }
 
 # Discover all tmux windows in the current session (excluding command center)
@@ -67,24 +150,15 @@ create_command_center() {
     # Create new window for command center
     tmux new-window -n "$COMMAND_CENTER"
 
+    # Get the empty shell pane that was auto-created
+    local empty_pane
+    empty_pane=$(tmux display-message -t "$COMMAND_CENTER" -p '#{pane_id}')
+
     # Save state: which panes we're borrowing and from where
     > "$STATE_FILE"
 
-    # Join first pane (it replaces the empty shell in the new window)
-    local first="${windows[0]}"
-    local first_pane first_name first_origin first_project
-    first_pane=$(echo "$first" | cut -d'|' -f1)
-    first_name=$(echo "$first" | cut -d'|' -f2)
-    first_origin=$(echo "$first" | cut -d'|' -f3)
-    first_project=$(echo "$first" | cut -d'|' -f4)
-
-    # Swap the first pane into command center
-    tmux swap-pane -s "$first_pane" -t "$COMMAND_CENTER"
-    echo "$first_pane|$first_name|$first_origin|$first_project" >> "$STATE_FILE"
-
-    # Join remaining panes
-    for ((i=1; i<count; i++)); do
-        local entry="${windows[$i]}"
+    # Join ALL panes into command center (this kills their original windows)
+    for entry in "${windows[@]}"; do
         local pane_id name origin project
         pane_id=$(echo "$entry" | cut -d'|' -f1)
         name=$(echo "$entry" | cut -d'|' -f2)
@@ -96,50 +170,68 @@ create_command_center() {
         echo "$pane_id|$name|$origin|$project" >> "$STATE_FILE"
     done
 
+    # Kill the empty shell pane that was auto-created with the window
+    tmux kill-pane -t "$empty_pane" 2>/dev/null
+
     # Apply tiled layout
     tmux select-layout -t "$COMMAND_CENTER" tiled
 
     # Enable pane border status to show window names at top of each tile
     tmux set-window-option -t "$COMMAND_CENTER" pane-border-status top
-    tmux set-window-option -t "$COMMAND_CENTER" pane-border-format " #{pane_index}: #T "
+    # Use dynamic format that reads from display files written by the state monitor
+    # Helper script looks up pane_id by index and reads the corresponding display file
+    # #{?pane_active,** , } adds ** around active pane (handled by tmux, not script)
+    local display_helper="$SCRIPT_DIR/plugins/claude-state-monitor/get-pane-display.sh"
+    tmux set-window-option -t "$COMMAND_CENTER" pane-border-format \
+        "#{?pane_active,** , }#{pane_index}: #($display_helper #{pane_index})#{?pane_active, **,} "
 
-    # Set pane titles with format: project | branch
-    local pane_index=0
+    # Initialize display files with project | branch before monitor starts
+    mkdir -p /tmp/claude-pane-display
     while IFS='|' read -r pane_id name origin project; do
-        local title="${project} | ${name}"
-        tmux select-pane -t "$COMMAND_CENTER.$pane_index" -T "$title"
-        ((pane_index++))
+        local safe_id="${pane_id//\%/}"
+        echo "${project} | ${name}" > "/tmp/claude-pane-display/$safe_id"
     done < "$STATE_FILE"
 
     # Select first pane
     tmux select-pane -t "$COMMAND_CENTER.0"
 
-    # Set up hooks for dynamic updates
-    setup_hooks
+    # Hooks disabled for stability - can be re-enabled later
+    # setup_hooks
 
-    # Show help message
-    tmux display-message "Command Center: $count windows | Arrows=navigate | ^b z=zoom | ^b b=broadcast"
+    # Show help message - remind user to use Ctrl+b v to close safely
+    tmux display-message "Command Center: $count windows | ^b v=close safely | ^b z=zoom | ^b b=broadcast"
 
     # Start Claude state monitor in background
     start_state_monitor
 }
 
-# Start the Claude state monitor for visual feedback
+# Start the Claude state monitor plugin (fully backgrounded)
 start_state_monitor() {
-    # Kill any existing monitor
-    if [[ -f "$MONITOR_PID_FILE" ]]; then
-        local old_pid
-        old_pid=$(cat "$MONITOR_PID_FILE" 2>/dev/null)
-        if [[ -n "$old_pid" ]] && kill -0 "$old_pid" 2>/dev/null; then
-            kill "$old_pid" 2>/dev/null
-        fi
-    fi
-
-    # Start new monitor
-    if [[ -x "$SCRIPT_DIR/claude-state-monitor.sh" ]]; then
-        "$SCRIPT_DIR/claude-state-monitor.sh" "$COMMAND_CENTER" &
-        echo $! > "$MONITOR_PID_FILE"
+    if [[ -x "$MONITOR_PLUGIN" ]]; then
+        # Run in background, fully detached from this script
+        nohup "$MONITOR_PLUGIN" attach "$COMMAND_CENTER" </dev/null >/dev/null 2>&1 &
+    elif [[ -f "$MONITOR_PLUGIN" ]]; then
+        chmod +x "$MONITOR_PLUGIN" 2>/dev/null
+        nohup "$MONITOR_PLUGIN" attach "$COMMAND_CENTER" </dev/null >/dev/null 2>&1 &
     fi
 }
 
-create_command_center
+# Main: Smart command center toggle
+# Debug: log state to temp file
+echo "$(date): exists=$(command_center_exists && echo Y || echo N) in_cc=$(in_command_center && echo Y || echo N) current=$(tmux display-message -p '#{window_name}')" >> /tmp/cc-debug.log
+
+if command_center_exists; then
+    if in_command_center; then
+        # In command center: close it and restore panes
+        echo "$(date): -> restore_command_center" >> /tmp/cc-debug.log
+        restore_command_center
+    else
+        # Not in command center but it exists: switch to it
+        echo "$(date): -> goto_command_center" >> /tmp/cc-debug.log
+        goto_command_center
+    fi
+else
+    # No command center: create it
+    echo "$(date): -> create_command_center" >> /tmp/cc-debug.log
+    create_command_center
+fi

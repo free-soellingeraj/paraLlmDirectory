@@ -147,12 +147,67 @@ tmux source-file ~/.tmux.conf
 # Or remove para-llm bindings manually
 # Edit ~/.tmux.conf and remove the para-llm-directory section
 ```
-# debugging
 
-## Overview
-<!-- Describe what this topic covers -->
+---
 
-## Details
-<!-- Add detailed information here -->
+## Testing from Feature Branch Environments
 
-**File**: <!-- path/to/relevant/file.ext:line -->
+When developing new features for para-llm-directory itself, you can test changes by pointing your tmux bindings to a feature branch's scripts.
+
+### How It Works
+
+The `install.sh` script writes **absolute paths** to `~/.tmux.conf`. Running install from a feature branch directory makes tmux use that branch's scripts:
+
+```bash
+# From your feature branch environment
+cd ~/code/envs/paraLlmDirectory-feature-xyz/paraLlmDirectory
+./install.sh
+```
+
+This will:
+1. Backup your existing `~/.tmux.conf`
+2. **Remove** any existing para-llm-directory bindings
+3. **Add new bindings** pointing to the feature branch directory
+4. Reload tmux config
+
+### Verify Which Scripts Are Active
+
+```bash
+# Check where bindings point
+grep "para-llm-directory" ~/.tmux.conf
+
+# You should see paths like:
+# /Users/.../envs/paraLlmDirectory-feature-xyz/paraLlmDirectory/tmux-command-center.sh
+```
+
+### Workflow
+
+1. **Create feature branch environment**: `Ctrl+b c` → paraLlmDirectory → New → feature-name
+2. **Make changes** to scripts in the feature branch
+3. **Install from feature branch**: `./install.sh`
+4. **Test** using `Ctrl+b v`, `Ctrl+b c`, etc.
+5. **Iterate** - changes take effect immediately (no reinstall needed for most changes)
+6. **When done**: Install from main repo to restore normal bindings
+
+### Risks and Considerations
+
+| Risk | Mitigation |
+|------|------------|
+| Bugs in dev code affect tmux | Backup is created; can restore with `cp ~/.tmux.conf.backup ~/.tmux.conf` |
+| Forgetting which install is active | Check with `grep para-llm ~/.tmux.conf \| head -1` |
+| Deleting feature env breaks bindings | Reinstall from main repo before cleanup |
+| Multiple developers/envs | Each install overwrites; only one can be active |
+
+### Restoring Main Repo Bindings
+
+```bash
+# Option 1: Reinstall from main repo
+cd ~/code/paraLlmDirectory
+./install.sh
+
+# Option 2: Restore backup
+cp ~/.tmux.conf.backup ~/.tmux.conf
+tmux source-file ~/.tmux.conf
+```
+
+**File**: `install.sh:36-48`

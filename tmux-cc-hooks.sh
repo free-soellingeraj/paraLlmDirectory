@@ -3,8 +3,12 @@
 # Command Center Hooks - Handle dynamic window/pane changes
 # Called by tmux hooks when command center is active
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 COMMAND_CENTER="command-center"
 ACTION="$1"
+
+# Plugin path
+MONITOR_PLUGIN="$SCRIPT_DIR/plugins/claude-state-monitor/monitor-manager.sh"
 
 # Check if command center exists
 cc_exists() {
@@ -22,6 +26,22 @@ cleanup_hooks() {
 handle_window_unlinked() {
     if ! cc_exists; then
         cleanup_hooks
+
+        # Try to restore any remaining panes from state file
+        local session_name
+        session_name=$(tmux display-message -p '#{session_name}' 2>/dev/null)
+        local state_file="/tmp/tmux-command-center-state-${session_name}"
+
+        if [[ -f "$state_file" ]]; then
+            # State file exists but CC is gone - panes were likely destroyed
+            # Clean up the state file
+            rm -f "$state_file"
+        fi
+
+        # Clean up monitor plugin (detaches all pipe-pane connections)
+        if [[ -x "$MONITOR_PLUGIN" ]]; then
+            "$MONITOR_PLUGIN" detach "$COMMAND_CENTER" 2>/dev/null
+        fi
     fi
 }
 

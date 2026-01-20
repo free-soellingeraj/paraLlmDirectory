@@ -1,0 +1,76 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.para-llm/plugins/claude-state-monitor/hooks/state-tracker.sh session_start"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.para-llm/plugins/claude-state-monitor/hooks/state-tracker.sh session_end"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.para-llm/plugins/claude-state-monitor/hooks/state-tracker.sh pre_tool"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.para-llm/plugins/claude-state-monitor/hooks/state-tracker.sh post_tool"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.para-llm/plugins/claude-state-monitor/hooks/state-tracker.sh stop"
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "matcher": "idle_prompt",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.para-llm/plugins/claude-state-monitor/hooks/state-tracker.sh idle"
+          }
+        ]
+      },
+      {
+        "matcher": "permission_prompt",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.para-llm/plugins/claude-state-monitor/hooks/state-tracker.sh permission"
+          }
+        ]
+      }
+    ]
+  }
+}
