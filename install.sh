@@ -18,11 +18,46 @@ chmod +x "$SCRIPT_DIR/tmux-cleanup-branch.sh"
 chmod +x "$SCRIPT_DIR/envs.sh"
 chmod +x "$SCRIPT_DIR/tmux-command-center.sh"
 chmod +x "$SCRIPT_DIR/tmux-cc-hooks.sh"
+chmod +x "$SCRIPT_DIR/remote-utils.sh"
 
 # Make plugin scripts executable (including helper scripts)
 if [[ -d "$SCRIPT_DIR/plugins/claude-state-monitor" ]]; then
     chmod +x "$SCRIPT_DIR/plugins/claude-state-monitor/"*.sh 2>/dev/null || true
     chmod +x "$SCRIPT_DIR/plugins/claude-state-monitor/hooks/"*.sh 2>/dev/null || true
+fi
+
+# Install remote utilities
+echo "Setting up remote session support..."
+
+# Create para-llm directory structure
+mkdir -p "$HOME/.para-llm"
+
+# Copy remote-utils.sh
+cp "$SCRIPT_DIR/remote-utils.sh" "$HOME/.para-llm/"
+chmod +x "$HOME/.para-llm/remote-utils.sh"
+echo "  Installed remote-utils.sh to $HOME/.para-llm/"
+
+# Create sample remote-hosts.conf if it doesn't exist
+REMOTE_HOSTS_CONFIG="$HOME/.para-llm/remote-hosts.conf"
+if [[ ! -f "$REMOTE_HOSTS_CONFIG" ]]; then
+    cat > "$REMOTE_HOSTS_CONFIG" << 'EOF'
+# Remote hosts configuration for para-llm-directory
+# Add hosts you want to connect to for remote Claude Code sessions
+#
+# Format:
+#   ssh:hostname     - SSH host (from ~/.ssh/config or hostname)
+#   coder:workspace  - Coder workspace name
+#   coder:*          - Auto-discover workspaces from `coder list`
+#
+# Examples:
+# ssh:devbox
+# ssh:gpu-server
+# coder:my-workspace
+# coder:*
+EOF
+    echo "  Created sample $REMOTE_HOSTS_CONFIG"
+else
+    echo "  $REMOTE_HOSTS_CONFIG already exists, skipping"
 fi
 
 # Install Claude Code hooks for state monitoring
@@ -126,11 +161,15 @@ echo "Scripts now at:"
 echo "  $SCRIPT_DIR"
 echo ""
 echo "Keybindings:"
-echo "  Ctrl+b c  - Create/resume feature branch"
+echo "  Ctrl+b c  - Create/resume feature branch (local or remote)"
 echo "  Ctrl+b k  - Cleanup feature branch"
 echo "  Ctrl+b v  - Command Center (tiled view of all envs)"
 echo "  Ctrl+b b  - Toggle broadcast mode (type in all panes)"
 echo "  Ctrl+b C  - Plain new window"
+echo ""
+echo "Remote Sessions:"
+echo "  Configure remote hosts in: ~/.para-llm/remote-hosts.conf"
+echo "  Then use Ctrl+b c to select a remote host and project"
 echo ""
 echo "Optional: Add this alias to your ~/.zshrc or ~/.bashrc:"
 echo "  alias envs='$SCRIPT_DIR/envs.sh'"

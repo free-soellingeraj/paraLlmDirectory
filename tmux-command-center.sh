@@ -80,7 +80,7 @@ restore_command_center() {
     local restored=0
     local first_restored_window=""
 
-    while IFS='|' read -r pane_id name origin project; do
+    while IFS='|' read -r pane_id name origin project host; do
         [[ -z "$pane_id" ]] && continue
 
         # Check if this pane still exists
@@ -113,6 +113,7 @@ restore_command_center() {
 }
 
 # Discover all tmux windows in the current session (excluding command center)
+# Output format: pane_id|window_name|session_window|project|host
 discover_windows() {
     local current_session
     current_session=$(tmux display-message -p '#{session_name}')
@@ -123,9 +124,21 @@ discover_windows() {
         # Don't include command center itself
         if [[ "$window_name" != "$COMMAND_CENTER" ]]; then
             # Extract project name from path (last directory component)
-            local project
+            local project host
             project=$(basename "$pane_path")
-            echo "$pane_id|$window_name|$session_window|$project"
+
+            # Detect if this is a remote session by checking window name format: branch@hostname
+            if [[ "$window_name" == *@* ]]; then
+                # Remote session - extract hostname from window name
+                local hostname="${window_name##*@}"
+                # Try to determine if it's SSH or coder (default to ssh)
+                # We can't definitively know, but ssh: is the safe default
+                host="ssh:$hostname"
+            else
+                host="local"
+            fi
+
+            echo "$pane_id|$window_name|$session_window|$project|$host"
         fi
     done
 }
@@ -159,15 +172,18 @@ create_command_center() {
 
     # Join ALL panes into command center (this kills their original windows)
     for entry in "${windows[@]}"; do
-        local pane_id name origin project
+        local pane_id name origin project host
         pane_id=$(echo "$entry" | cut -d'|' -f1)
         name=$(echo "$entry" | cut -d'|' -f2)
         origin=$(echo "$entry" | cut -d'|' -f3)
         project=$(echo "$entry" | cut -d'|' -f4)
+        host=$(echo "$entry" | cut -d'|' -f5)
+        # Default to local if host not specified (backward compatibility)
+        [[ -z "$host" ]] && host="local"
 
         # Join this pane into command center
         tmux join-pane -s "$pane_id" -t "$COMMAND_CENTER" -h
-        echo "$pane_id|$name|$origin|$project" >> "$STATE_FILE"
+        echo "$pane_id|$name|$origin|$project|$host" >> "$STATE_FILE"
     done
 
     # Kill the empty shell pane that was auto-created with the window
@@ -187,9 +203,15 @@ create_command_center() {
 
     # Initialize display files with project | branch before monitor starts
     mkdir -p /tmp/claude-pane-display
-    while IFS='|' read -r pane_id name origin project; do
+    while IFS='|' read -r pane_id name origin project host; do
         local safe_id="${pane_id//\%/}"
-        echo "${project} | ${name}" > "/tmp/claude-pane-display/$safe_id"
+        # Include host indicator for remote sessions
+        if [[ "$host" != "local" && -n "$host" ]]; then
+            local host_display="${host#*:}"  # Remove ssh: or coder: prefix
+            echo "${project} | ${name} | 🌐${host_display}" > "/tmp/claude-pane-display/$safe_id"
+        else
+            echo "${project} | ${name}" > "/tmp/claude-pane-display/$safe_id"
+        fi
     done < "$STATE_FILE"
 
     # Select first pane

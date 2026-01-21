@@ -4,6 +4,20 @@ ENVS_DIR="$HOME/code/envs"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 COMMAND_CENTER="command-center"
 
+# Check if current window is a remote session (name contains @)
+is_remote_session() {
+    local window_name
+    window_name=$(tmux display-message -p '#{window_name}' 2>/dev/null)
+    [[ "$window_name" == *@* ]]
+}
+
+# Get the hostname from a remote session window name
+get_remote_session_host() {
+    local window_name
+    window_name=$(tmux display-message -p '#{window_name}' 2>/dev/null)
+    echo "${window_name##*@}"
+}
+
 # Check if we're in command center
 in_command_center() {
     local current_window
@@ -61,12 +75,69 @@ select_env() {
     {
         echo "← Back"
         echo "⚡ Just close window (no cleanup)"
+
+        # Check for remote sessions in command center state file
+        local session_name state_file
+        session_name=$(tmux display-message -p '#{session_name}')
+        state_file="/tmp/tmux-command-center-state-${session_name}"
+
+        # List remote sessions from state file (those with host != local)
+        if [[ -f "$state_file" ]]; then
+            local has_remote=false
+            while IFS='|' read -r pane_id name origin project host; do
+                if [[ "$host" != "local" && -n "$host" ]]; then
+                    if [[ "$has_remote" == false ]]; then
+                        echo "── Remote Sessions ──"
+                        has_remote=true
+                    fi
+                    echo "🌐 $name"
+                fi
+            done < "$state_file"
+        fi
+
+        # List local environments
+        local has_local=false
         for dir in "$ENVS_DIR"/*/; do
             if [[ -d "$dir" ]]; then
+                if [[ "$has_local" == false ]]; then
+                    echo "── Local Environments ──"
+                    has_local=true
+                fi
                 basename "$dir"
             fi
         done 2>/dev/null | sort
     } | fzf --prompt="Select feature to cleanup: " --height=40% --reverse
+}
+
+# Close a remote session (just kills the pane/connection)
+close_remote_session() {
+    local session_name="$1"
+
+    if in_command_center; then
+        # Find and kill the pane for this remote session
+        local state_file
+        session_name=$(tmux display-message -p '#{session_name}')
+        state_file="/tmp/tmux-command-center-state-${session_name}"
+
+        if [[ -f "$state_file" ]]; then
+            local pane_to_kill
+            pane_to_kill=$(grep "|${session_name}|" "$state_file" 2>/dev/null | cut -d'|' -f1 | head -1)
+            if [[ -n "$pane_to_kill" ]]; then
+                tmux kill-pane -t "$pane_to_kill" 2>/dev/null
+                # Reapply layout
+                tmux select-layout -t "$COMMAND_CENTER" tiled 2>/dev/null
+                echo "Remote session closed."
+                sleep 0.5
+                return 0
+            fi
+        fi
+
+        # If we're the active pane in command center, kill current pane
+        kill_pane_in_command_center
+    else
+        # Normal mode: just kill the window
+        tmux kill-window
+    fi
 }
 
 select_confirm() {
@@ -93,6 +164,23 @@ main() {
                     exit 0  # Can't go back from first step
                 elif [[ "$ENV_NAME" == "⚡ Just close window (no cleanup)" ]]; then
                     safe_kill_window
+                    exit 0
+                elif [[ "$ENV_NAME" == "── Remote Sessions ──" ]] || [[ "$ENV_NAME" == "── Local Environments ──" ]]; then
+                    # Section headers - ignore and re-prompt
+                    continue
+                elif [[ "$ENV_NAME" == 🌐* ]]; then
+                    # Remote session selected - confirm and close
+                    local remote_name="${ENV_NAME#🌐 }"
+                    echo "This will close the remote connection: $remote_name"
+                    echo "No files will be deleted on the remote machine."
+                    echo ""
+                    local confirm
+                    confirm=$(printf "← Back\nNo - cancel\nYes - close connection" | \
+                        fzf --prompt="Close remote session? " --height=12% --reverse)
+
+                    if [[ "$confirm" == "Yes - close connection" ]]; then
+                        close_remote_session "$remote_name"
+                    fi
                     exit 0
                 fi
                 ENV_DIR="${ENVS_DIR}/${ENV_NAME}"

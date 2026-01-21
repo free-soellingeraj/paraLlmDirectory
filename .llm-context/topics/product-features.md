@@ -172,13 +172,69 @@ For regular terminals (non-Claude):
 
 ---
 
+### 8. Remote Sessions (SSH & Coder)
+Run Claude Code on remote machines via SSH or Coder workspaces while maintaining full Command Center compatibility.
+
+**Supported host types**:
+- **SSH hosts**: Any host from `~/.ssh/config` or direct hostname
+- **Coder workspaces**: Named workspaces or auto-discovery via `coder list`
+
+**Configuration** (`~/.para-llm/remote-hosts.conf`):
+```bash
+# SSH hosts
+ssh:devbox
+ssh:gpu-server
+
+# Coder workspaces (explicit)
+coder:my-workspace
+
+# Auto-discover all coder workspaces
+coder:*
+```
+
+**Workflow** (`Ctrl+b c`):
+1. Select a remote host from the "Remote" section
+2. Script tests connectivity and discovers code directory
+3. Lists git projects on the remote machine (with caching)
+4. Select project and branch
+5. Creates tmux window running: `ssh -t host "cd path && git checkout branch; claude"`
+
+**Remote session naming**:
+- Window names include hostname: `feature-xyz@devbox`
+- Command Center displays 🌐 indicator for remote sessions
+
+**Cleanup** (`Ctrl+b k`):
+- Remote sessions show in separate "Remote Sessions" section
+- Closing only kills the SSH connection
+- No files deleted on remote (safety for shared machines)
+
+**How it works**:
+- Claude Code runs **on the remote machine**
+- State detection works via terminal parsing (captures SSH output)
+- Command Center integration is seamless
+
+**Code directory discovery**:
+Checks these paths on the remote in order: `~/code`, `~/projects`, `/workspace`
+
+**Caching**:
+- Code directory: cached 10 minutes
+- Project list: cached 5 minutes
+- Cache stored in `/tmp/para-llm-remote-cache/`
+
+**Files**:
+- `remote-utils.sh` - Shared remote operation functions
+- `tmux-new-branch.sh` - Steps 4-6 for remote workflow
+
+---
+
 ## Key Bindings Summary
 
 | Binding | Action |
 |---------|--------|
-| `Ctrl+b c` | Create/resume feature environment |
-| `Ctrl+b k` | Cleanup feature environment |
+| `Ctrl+b c` | Create/resume feature environment (local or remote) |
+| `Ctrl+b k` | Cleanup feature environment or close remote session |
 | `Ctrl+b v` | Command Center (tiled view) |
+| `Ctrl+b b` | Toggle broadcast mode (type in all panes) |
 | `Ctrl+b C` | Plain new tmux window |
 
 ---
