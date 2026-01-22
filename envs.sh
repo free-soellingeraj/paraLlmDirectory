@@ -4,7 +4,11 @@
 # Usage: envs [options]
 #   -v, --verbose  Show more details (last commit, etc.)
 
-ENVS_DIR="$HOME/code/envs"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Load configuration
+source "$SCRIPT_DIR/para-llm-config.sh"
+
 VERBOSE=false
 
 while [[ $# -gt 0 ]]; do
