@@ -75,6 +75,23 @@ Log of bugs encountered and fixed in the para-llm-directory project. Each entry 
 **Fix**: Added `in_command_center()` check. When in command center, kill just the active pane and reapply tiled layout instead of killing the window.
 **File**: `tmux-cleanup-branch.sh:8-49`
 
+### BUG-009: Installation always uses hardcoded ~/code directory
+**Date**: 2026-01-22
+**Symptom**: When installing para-llm-directory, it always creates environments in `~/code/envs` regardless of where the user's repositories are actually located.
+**Cause**: `CODE_DIR` and `ENVS_DIR` were hardcoded at the top of multiple scripts (`tmux-new-branch.sh:3-4`, `envs.sh:7`, `tmux-cleanup-branch.sh:3`) as `$HOME/code` and `$HOME/code/envs`.
+**Fix**:
+1. Created `para-llm-config.sh` - a configuration loader that reads from `~/.para-llm/config`
+2. Updated `install.sh` to prompt user for their preferred directories during installation
+3. Updated all scripts to source `para-llm-config.sh` instead of hardcoding paths
+**Files**: `para-llm-config.sh` (new), `install.sh:6-60`, `tmux-new-branch.sh:3-7`, `envs.sh:7-11`, `tmux-cleanup-branch.sh:3-7`
+
+### BUG-010: Claude launched without --dangerously-skip-permissions on new branches
+**Date**: 2026-01-22
+**Symptom**: When creating a new branch or attaching to a remote branch, Claude was launched without the `--dangerously-skip-permissions` flag, requiring manual permission grants for every action.
+**Cause**: Some `tmux send-keys` commands in `tmux-new-branch.sh` used just `claude` or `claude --resume` without the permissions flag, while others correctly included it.
+**Fix**: Updated all Claude launch commands to consistently use `claude --dangerously-skip-permissions` (with `--resume` added where appropriate for existing sessions).
+**File**: `tmux-new-branch.sh:234`, `tmux-new-branch.sh:263-265`, `tmux-new-branch.sh:307-309`
+
 ---
 
 ## Known Bug-Prone Areas

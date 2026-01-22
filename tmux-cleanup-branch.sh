@@ -1,7 +1,10 @@
 #!/bin/bash
 
-ENVS_DIR="$HOME/code/envs"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Load configuration
+source "$SCRIPT_DIR/para-llm-config.sh"
+
 COMMAND_CENTER="command-center"
 
 # Check if we're in command center

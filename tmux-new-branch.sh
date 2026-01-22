@@ -1,7 +1,9 @@
 #!/bin/bash
 
-CODE_DIR="$HOME/code"
-ENVS_DIR="$HOME/code/envs"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Load configuration
+source "$SCRIPT_DIR/para-llm-config.sh"
 
 # Ensure envs directory exists
 mkdir -p "$ENVS_DIR"
@@ -231,7 +233,7 @@ main() {
                 create_feature_window "$BRANCH_NAME" "$CLONE_DIR"
                 # Run setup hook if it exists
                 if [[ -f "$CLONE_DIR/paraLlm_setup.sh" ]]; then
-                    tmux send-keys "./paraLlm_setup.sh && claude" Enter
+                    tmux send-keys "./paraLlm_setup.sh && claude --dangerously-skip-permissions" Enter
                 else
                     tmux send-keys "claude --dangerously-skip-permissions" Enter
                 fi
@@ -260,9 +262,9 @@ main() {
                     create_feature_window "$BRANCH_NAME" "$CLONE_DIR"
                     # Run setup hook if it exists
                     if [[ -f "$CLONE_DIR/paraLlm_setup.sh" ]]; then
-                        tmux send-keys "./paraLlm_setup.sh && claude --resume" Enter
+                        tmux send-keys "./paraLlm_setup.sh && claude --dangerously-skip-permissions --resume" Enter
                     else
-                        tmux send-keys "claude --resume" Enter
+                        tmux send-keys "claude --dangerously-skip-permissions --resume" Enter
                     fi
                     exit 0
                 fi
@@ -304,9 +306,9 @@ main() {
                 create_feature_window "$BRANCH_NAME" "$CLONE_DIR"
                 # Run setup hook if it exists
                 if [[ -f "$CLONE_DIR/paraLlm_setup.sh" ]]; then
-                    tmux send-keys "./paraLlm_setup.sh && claude" Enter
+                    tmux send-keys "./paraLlm_setup.sh && claude --dangerously-skip-permissions" Enter
                 else
-                    tmux send-keys "claude" Enter
+                    tmux send-keys "claude --dangerously-skip-permissions" Enter
                 fi
                 exit 0
                 ;;
