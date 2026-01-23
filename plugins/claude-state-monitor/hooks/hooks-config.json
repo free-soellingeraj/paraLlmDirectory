@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "~/.para-llm/plugins/claude-state-monitor/hooks/state-tracker.sh session_start"
+            "command": "__PARA_LLM_ROOT__/plugins/claude-state-monitor/hooks/state-tracker.sh session_start"
           }
         ]
       }
@@ -15,7 +15,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "~/.para-llm/plugins/claude-state-monitor/hooks/state-tracker.sh session_end"
+            "command": "__PARA_LLM_ROOT__/plugins/claude-state-monitor/hooks/state-tracker.sh session_end"
           }
         ]
       }
@@ -26,7 +26,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "~/.para-llm/plugins/claude-state-monitor/hooks/state-tracker.sh pre_tool"
+            "command": "__PARA_LLM_ROOT__/plugins/claude-state-monitor/hooks/state-tracker.sh pre_tool"
           }
         ]
       }
@@ -37,7 +37,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "~/.para-llm/plugins/claude-state-monitor/hooks/state-tracker.sh post_tool"
+            "command": "__PARA_LLM_ROOT__/plugins/claude-state-monitor/hooks/state-tracker.sh post_tool"
           }
         ]
       }
@@ -47,7 +47,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "~/.para-llm/plugins/claude-state-monitor/hooks/state-tracker.sh stop"
+            "command": "__PARA_LLM_ROOT__/plugins/claude-state-monitor/hooks/state-tracker.sh stop"
           }
         ]
       }
@@ -58,7 +58,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "~/.para-llm/plugins/claude-state-monitor/hooks/state-tracker.sh idle"
+            "command": "__PARA_LLM_ROOT__/plugins/claude-state-monitor/hooks/state-tracker.sh idle"
           }
         ]
       },
@@ -67,7 +67,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "~/.para-llm/plugins/claude-state-monitor/hooks/state-tracker.sh permission"
+            "command": "__PARA_LLM_ROOT__/plugins/claude-state-monitor/hooks/state-tracker.sh permission"
           }
         ]
       }
