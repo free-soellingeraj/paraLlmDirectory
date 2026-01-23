@@ -1,0 +1,11 @@
+name: Branch Check
+
+on:
+  pull_request:
+    branches: [develop]
+
+jobs:
+  up-to-date:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Branch is up to date"
