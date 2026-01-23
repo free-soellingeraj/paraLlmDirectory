@@ -230,6 +230,9 @@ main() {
                 cd "$CLONE_DIR" || exit 1
                 git checkout "$BRANCH_NAME" 2>&1
 
+                # Restore env files from central store
+                "$SCRIPT_DIR/env-restore.sh" "$REPO_NAME" "$CLONE_DIR"
+
                 create_feature_window "$BRANCH_NAME" "$CLONE_DIR"
                 # Run setup hook if it exists
                 if [[ -f "$CLONE_DIR/paraLlm_setup.sh" ]]; then
@@ -302,6 +305,9 @@ main() {
                     # Branch doesn't exist, create new branch
                     git checkout -b "$BRANCH_NAME" 2>&1
                 fi
+
+                # Restore env files from central store
+                "$SCRIPT_DIR/env-restore.sh" "$REPO_NAME" "$CLONE_DIR"
 
                 create_feature_window "$BRANCH_NAME" "$CLONE_DIR"
                 # Run setup hook if it exists
