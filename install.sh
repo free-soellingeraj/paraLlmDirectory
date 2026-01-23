@@ -61,6 +61,8 @@ mkdir -p "$PARA_LLM_ROOT/recovery"
 mkdir -p "$PARA_LLM_ROOT/scripts"
 mkdir -p "$PARA_LLM_ROOT/tmux-plugins"
 mkdir -p "$PARA_LLM_ROOT/plugins"
+mkdir -p "$PARA_LLM_ROOT/.env_files"
+chmod 700 "$PARA_LLM_ROOT/.env_files"
 
 # Write bootstrap pointer
 echo "$PARA_LLM_ROOT" > "$BOOTSTRAP_FILE"
@@ -94,6 +96,8 @@ chmod +x "$SCRIPT_DIR/envs.sh"
 chmod +x "$SCRIPT_DIR/tmux-command-center.sh"
 chmod +x "$SCRIPT_DIR/tmux-cc-hooks.sh"
 chmod +x "$SCRIPT_DIR/para-llm-config.sh"
+chmod +x "$SCRIPT_DIR/env-manage.sh"
+chmod +x "$SCRIPT_DIR/env-restore.sh"
 
 # Make plugin scripts executable (including helper scripts)
 if [[ -d "$SCRIPT_DIR/plugins/claude-state-monitor" ]]; then
@@ -228,6 +232,9 @@ bind-key v run-shell "$SCRIPT_DIR/tmux-command-center.sh"
 # Ctrl+b b: Toggle broadcast mode (type in all panes at once)
 bind-key b set-window-option synchronize-panes \; display-message "Toggled broadcast mode"
 
+# Ctrl+b e: Manage .env files (add/list/remove from central store)
+bind-key e display-popup -E -w 70% -h 70% "$SCRIPT_DIR/env-manage.sh"
+
 # para-llm-directory: session recovery
 set -g @resurrect-dir '$PARA_LLM_ROOT/recovery/resurrect'
 set -g @resurrect-capture-pane-contents 'on'
@@ -262,12 +269,14 @@ echo "    recovery/      - Session state + resurrect saves"
 echo "    scripts/       - Recovery scripts"
 echo "    tmux-plugins/  - tmux-resurrect + tmux-continuum"
 echo "    plugins/       - Claude state monitor hooks"
+echo "    .env_files/    - Centrally managed .env files (chmod 700)"
 echo ""
 echo "Keybindings:"
 echo "  Ctrl+b c  - Create/resume feature branch"
 echo "  Ctrl+b k  - Cleanup feature branch"
 echo "  Ctrl+b v  - Command Center (tiled view of all envs)"
 echo "  Ctrl+b b  - Toggle broadcast mode (type in all panes)"
+echo "  Ctrl+b e  - Manage .env files"
 echo "  Ctrl+b C  - Plain new window"
 echo "  Ctrl+b R  - Manual restore Claude sessions"
 echo ""
