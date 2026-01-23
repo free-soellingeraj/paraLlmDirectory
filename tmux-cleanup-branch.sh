@@ -171,13 +171,19 @@ main() {
                         fi
                     fi
                 else
-                    # Normal mode: kill windows by name
-                    tmux list-windows -a -F '#{session_name}:#{window_index} #{window_name}' 2>/dev/null | \
+                    # Normal mode: kill windows by name (current session only)
+                    local current_window_name
+                    current_window_name=$(tmux display-message -p '#{window_name}' 2>/dev/null)
+                    tmux list-windows -F '#{window_index} #{window_name}' 2>/dev/null | \
                         grep " ${BRANCH_NAME}$" | \
                         cut -d' ' -f1 | \
-                        while read -r win; do
-                            tmux kill-window -t "$win" 2>/dev/null
+                        while read -r win_idx; do
+                            tmux kill-window -t ":${win_idx}" 2>/dev/null
                         done
+                    # Only kill current window if it was the feature window
+                    if [[ "$current_window_name" == "$BRANCH_NAME" ]]; then
+                        safe_kill_window
+                    fi
                 fi
 
                 # Delete the environment
@@ -191,10 +197,6 @@ main() {
                 fi
 
                 sleep 1
-                # Don't call safe_kill_window if in command center - pane already killed above
-                if ! in_command_center; then
-                    safe_kill_window
-                fi
                 exit 0
                 ;;
         esac
