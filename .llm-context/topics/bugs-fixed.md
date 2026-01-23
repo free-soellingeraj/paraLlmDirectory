@@ -85,6 +85,13 @@ Log of bugs encountered and fixed in the para-llm-directory project. Each entry 
 3. Updated all scripts to source `para-llm-config.sh` instead of hardcoding paths
 **Files**: `para-llm-config.sh` (new), `install.sh:6-60`, `tmux-new-branch.sh:3-7`, `envs.sh:7-11`, `tmux-cleanup-branch.sh:3-7`
 
+### BUG-011: Ctrl+b k feature cleanup kills unrelated windows
+**Date**: 2026-01-23
+**Symptom**: When using `Ctrl+b k` from a non-feature window to clean up a feature environment, the current window (and potentially windows in other sessions) were also killed.
+**Cause**: Two issues: (1) `safe_kill_window()` was called unconditionally after feature cleanup, killing whatever window the user was in regardless of whether it was the feature window. (2) `tmux list-windows -a` searched across ALL sessions, potentially killing same-named windows elsewhere.
+**Fix**: (1) Only call `safe_kill_window()` if the current window's name matches the branch being cleaned up. (2) Removed `-a` flag to scope window search to current session only.
+**File**: `tmux-cleanup-branch.sh:173-186`, `tmux-cleanup-branch.sh:196` (removed)
+
 ### BUG-010: Claude launched without --dangerously-skip-permissions on new branches
 **Date**: 2026-01-22
 **Symptom**: When creating a new branch or attaching to a remote branch, Claude was launched without the `--dangerously-skip-permissions` flag, requiring manual permission grants for every action.
