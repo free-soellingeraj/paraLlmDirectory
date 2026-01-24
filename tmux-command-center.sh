@@ -1,4 +1,6 @@
-#!/bin/bash
+#!/usr/bin/env bash
+
+set -u
 
 # Command Center - Tiled view of all windows in the current session
 # Moves actual panes into a tiled layout for direct interaction
@@ -155,7 +157,7 @@ create_command_center() {
     empty_pane=$(tmux display-message -t "$COMMAND_CENTER" -p '#{pane_id}')
 
     # Save state: which panes we're borrowing and from where
-    > "$STATE_FILE"
+    : > "$STATE_FILE"
 
     # Join ALL panes into command center (this kills their original windows)
     for entry in "${windows[@]}"; do
@@ -217,21 +219,15 @@ start_state_monitor() {
 }
 
 # Main: Smart command center toggle
-# Debug: log state to temp file
-echo "$(date): exists=$(command_center_exists && echo Y || echo N) in_cc=$(in_command_center && echo Y || echo N) current=$(tmux display-message -p '#{window_name}')" >> /tmp/cc-debug.log
-
 if command_center_exists; then
     if in_command_center; then
         # In command center: close it and restore panes
-        echo "$(date): -> restore_command_center" >> /tmp/cc-debug.log
         restore_command_center
     else
         # Not in command center but it exists: switch to it
-        echo "$(date): -> goto_command_center" >> /tmp/cc-debug.log
         goto_command_center
     fi
 else
     # No command center: create it
-    echo "$(date): -> create_command_center" >> /tmp/cc-debug.log
     create_command_center
 fi

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 DIR="$(dirname "$0")/.llm-context/topics"
 if [ -z "$1" ]; then
   echo "Topics:" && ls -1 "$DIR" 2>/dev/null | sed 's/\.md$//'

@@ -1,6 +1,8 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # para-llm-config.sh - Configuration loader for para-llm-directory
 # Source this file to get PARA_LLM_ROOT, CODE_DIR, and ENVS_DIR variables
+
+set -u
 
 BOOTSTRAP_FILE="$HOME/.para-llm-root"
 

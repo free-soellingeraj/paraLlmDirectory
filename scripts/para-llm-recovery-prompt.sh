@@ -1,6 +1,8 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # para-llm-recovery-prompt.sh - Prompt user to restore saved sessions on tmux start
 # Runs via session-created hook
+
+set -u
 
 # Read PARA_LLM_ROOT from bootstrap pointer
 BOOTSTRAP_FILE="$HOME/.para-llm-root"

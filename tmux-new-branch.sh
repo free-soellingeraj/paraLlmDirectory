@@ -1,4 +1,6 @@
-#!/bin/bash
+#!/usr/bin/env bash
+
+set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -10,12 +12,10 @@ mkdir -p "$ENVS_DIR"
 
 # Check if we're currently in command center (matches cleanup script approach)
 COMMAND_CENTER="command-center"
-DEBUG_LOG="/tmp/new-branch-debug.log"
 
 in_command_center() {
     local current_window
     current_window=$(tmux display-message -p '#{window_name}' 2>/dev/null)
-    echo "$(date): in_command_center check: current_window='$current_window' COMMAND_CENTER='$COMMAND_CENTER'" >> "$DEBUG_LOG"
     [[ "$current_window" == "$COMMAND_CENTER" ]]
 }
 
@@ -28,9 +28,7 @@ create_feature_window() {
     local project_name
     project_name=$(basename "$working_dir")
 
-    echo "$(date): create_feature_window called: branch='$branch_name' dir='$working_dir'" >> "$DEBUG_LOG"
     if in_command_center; then
-        echo "$(date): IN command center - will join pane" >> "$DEBUG_LOG"
         # In command center - create window then join to command center
         tmux new-window -n "$branch_name" -c "$working_dir"
         local new_pane_id
@@ -63,7 +61,6 @@ create_feature_window() {
         # Switch to command center and select the new pane
         tmux select-window -t "$COMMAND_CENTER"
     else
-        echo "$(date): NOT in command center - normal window creation" >> "$DEBUG_LOG"
         # Normal mode - just create window
         tmux new-window -n "$branch_name" -c "$working_dir"
     fi
@@ -110,7 +107,7 @@ select_remote_branch() {
             grep -v 'HEAD' | \
             sed 's|origin/||' | \
             sed 's/^[ *]*//' | \
-            while read branch; do
+            while read -r branch; do
                 # Exclude branches that already have local clones
                 if [[ ! -d "$ENVS_DIR/${project}-${branch}" ]]; then
                     echo "$branch"
@@ -218,9 +215,7 @@ main() {
                 # Create env directory and clone
                 mkdir -p "$ENV_DIR"
                 echo "Cloning $REPO_NAME..."
-                git clone "$REMOTE_URL" "$CLONE_DIR" 2>&1
-
-                if [[ $? -ne 0 ]]; then
+                if ! git clone "$REMOTE_URL" "$CLONE_DIR" 2>&1; then
                     echo "Failed to clone. Press enter to close."
                     read -r
                     rm -rf "$ENV_DIR"
@@ -283,9 +278,7 @@ main() {
                 # Create env directory and clone
                 mkdir -p "$ENV_DIR"
                 echo "Cloning $REPO_NAME..."
-                git clone "$REMOTE_URL" "$CLONE_DIR" 2>&1
-
-                if [[ $? -ne 0 ]]; then
+                if ! git clone "$REMOTE_URL" "$CLONE_DIR" 2>&1; then
                     echo "Failed to clone. Press enter to close."
                     read -r
                     rm -rf "$ENV_DIR"

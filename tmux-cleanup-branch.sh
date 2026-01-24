@@ -1,4 +1,6 @@
-#!/bin/bash
+#!/usr/bin/env bash
+
+set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -127,7 +129,7 @@ main() {
                 # Check for unpushed changes
                 CLONE_DIR=$(find "$ENV_DIR" -maxdepth 1 -type d ! -name "$(basename "$ENV_DIR")" | head -1)
                 if [[ -d "$CLONE_DIR/.git" ]]; then
-                    cd "$CLONE_DIR"
+                    cd "$CLONE_DIR" || exit 1
                     UNPUSHED=$(git log --oneline @{u}.. 2>/dev/null | wc -l | tr -d ' ')
                     if [[ "$UNPUSHED" -gt 0 ]]; then
                         echo "WARNING: $UNPUSHED unpushed commit(s) detected!"
@@ -188,9 +190,7 @@ main() {
 
                 # Delete the environment
                 echo "Deleting $ENV_DIR..."
-                rm -rf "$ENV_DIR"
-
-                if [[ $? -eq 0 ]]; then
+                if rm -rf "$ENV_DIR"; then
                     echo "✓ Deleted successfully"
                 else
                     echo "Failed to delete"

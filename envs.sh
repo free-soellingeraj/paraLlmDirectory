@@ -1,4 +1,6 @@
-#!/bin/bash
+#!/usr/bin/env bash
+
+set -u
 
 # envs - Show status of all parallel development environments
 # Usage: envs [options]

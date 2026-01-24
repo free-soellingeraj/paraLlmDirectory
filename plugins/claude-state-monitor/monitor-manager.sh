@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Claude State Monitor Manager
 # Manages state-detector processes for Command Center panes

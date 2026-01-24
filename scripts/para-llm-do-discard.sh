@@ -1,6 +1,8 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # para-llm-do-discard.sh - Discard recovery state
 # Called from recovery prompt menu
+
+set -u
 
 BOOTSTRAP_FILE="$HOME/.para-llm-root"
 if [[ ! -f "$BOOTSTRAP_FILE" ]]; then
