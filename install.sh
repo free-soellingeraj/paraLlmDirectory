@@ -219,9 +219,6 @@ bind-key c display-popup -E -w 60% -h 60% "$SCRIPT_DIR/tmux-new-branch.sh"
 # Ctrl+b k: cleanup/delete a feature branch environment
 bind-key k display-popup -E -w 60% -h 60% "$SCRIPT_DIR/tmux-cleanup-branch.sh"
 
-# Ctrl+b C: original behavior (plain new window)
-bind-key C new-window -c "#{pane_current_path}"
-
 # Ctrl+b v: Command Center (tiled view of all env windows)
 bind-key v run-shell "$SCRIPT_DIR/tmux-command-center.sh"
 
@@ -268,7 +265,6 @@ echo "  Ctrl+b c  - Create/resume feature branch"
 echo "  Ctrl+b k  - Cleanup feature branch"
 echo "  Ctrl+b v  - Command Center (tiled view of all envs)"
 echo "  Ctrl+b b  - Toggle broadcast mode (type in all panes)"
-echo "  Ctrl+b C  - Plain new window"
 echo "  Ctrl+b R  - Manual restore Claude sessions"
 echo ""
 echo "Recovery:"
