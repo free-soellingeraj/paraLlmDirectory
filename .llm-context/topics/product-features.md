@@ -9,6 +9,7 @@ para-llm-directory is a tmux-based workflow manager for running multiple Claude 
 Opens an interactive popup to create or resume a feature branch environment.
 
 **Workflow options**:
+- **Plain terminal**: Open a bare shell in `CODE_DIR` (no project context, no Claude)
 - **Resume**: Continue working on an existing local clone with `claude --resume`
 - **Attach**: Checkout an existing remote branch into a new local environment
 - **New**: Create a fresh feature branch from a new clone
@@ -82,13 +83,6 @@ Optional scripts that run automatically during environment lifecycle.
 - Cleanup temporary files
 
 **File**: `README.md:119-160`
-
----
-
-### 5. Plain Terminal Fallback (`Ctrl+b C`)
-Opens a standard tmux window without project context, preserving original tmux behavior.
-
-**File**: `install.sh:44`
 
 ---
 
@@ -179,7 +173,6 @@ For regular terminals (non-Claude):
 | `Ctrl+b c` | Create/resume feature environment |
 | `Ctrl+b k` | Cleanup feature environment |
 | `Ctrl+b v` | Command Center (tiled view) |
-| `Ctrl+b C` | Plain new tmux window |
 
 ---
 

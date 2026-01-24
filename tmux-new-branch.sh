@@ -135,10 +135,21 @@ main() {
                 elif [[ "$REPO_NAME" == "← Back" ]]; then
                     exit 0  # Can't go back from first step
                 elif [[ "$REPO_NAME" == "⚡ Plain terminal (no project)" ]]; then
-                    # Use create_feature_window to handle command center case
-                    local current_path
-                    current_path=$(tmux display-message -p '#{pane_current_path}')
-                    create_feature_window "terminal" "$current_path"
+                    # Open bare shell in CODE_DIR at end of window list
+                    if in_command_center; then
+                        create_feature_window "terminal" "$CODE_DIR"
+                    else
+                        # Get last index before creating the window
+                        local last_idx
+                        last_idx=$(tmux list-windows -F '#{window_index}' | sort -n | tail -1)
+                        # Create window then move to end if not already there
+                        tmux new-window -n "terminal" -c "$CODE_DIR"
+                        local cur_idx
+                        cur_idx=$(tmux display-message -p '#{window_index}')
+                        if [[ "$cur_idx" -le "$last_idx" ]]; then
+                            tmux move-window -t ":$((last_idx + 1))"
+                        fi
+                    fi
                     exit 0
                 fi
                 REPO_ROOT="${CODE_DIR}/${REPO_NAME}"
