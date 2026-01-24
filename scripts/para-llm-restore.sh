@@ -1,6 +1,8 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # para-llm-restore.sh - Re-launch Claude in restored panes
 # Idempotent: checks that pane is idle before launching
+
+set -u
 
 # Read PARA_LLM_ROOT from bootstrap pointer
 BOOTSTRAP_FILE="$HOME/.para-llm-root"

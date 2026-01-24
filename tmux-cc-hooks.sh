@@ -1,4 +1,6 @@
-#!/bin/bash
+#!/usr/bin/env bash
+
+set -u
 
 # Command Center Hooks - Handle dynamic window/pane changes
 # Called by tmux hooks when command center is active

@@ -1,4 +1,6 @@
-#!/bin/bash
+#!/usr/bin/env bash
+
+set -u
 
 # Get display string for a pane by index
 # Called by tmux pane-border-format: #(/path/to/get-pane-display.sh #{pane_index})

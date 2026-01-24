@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Pane State Detector - Simple terminal-based state detection
 # Detects whether a pane is waiting for input or actively working

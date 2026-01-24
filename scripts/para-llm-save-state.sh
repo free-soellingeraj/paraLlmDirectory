@@ -1,6 +1,8 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # para-llm-save-state.sh - Save Claude session state for recovery
 # Called by tmux-resurrect's @resurrect-hook-post-save-all (every 1 minute via continuum)
+
+set -u
 
 # Read PARA_LLM_ROOT from bootstrap pointer
 BOOTSTRAP_FILE="$HOME/.para-llm-root"
@@ -39,7 +41,7 @@ SESSION_NAME=$(echo "$PANE_DATA" | head -1 | cut -d'|' -f1)
         if [[ "$pane_path" == "$ENVS_DIR"/* ]]; then
             # Derive project and branch from path
             # Path structure: $ENVS_DIR/<project>-<branch>/<project>/...
-            REL_PATH="${pane_path#$ENVS_DIR/}"
+            REL_PATH="${pane_path#"$ENVS_DIR"/}"
             ENV_NAME="${REL_PATH%%/*}"
 
             # Extract project and branch from env name (format: project-branch)
@@ -66,7 +68,7 @@ SESSION_NAME=$(echo "$PANE_DATA" | head -1 | cut -d'|' -f1)
 
                 if [[ -n "$PROJECT" ]]; then
                     # Branch is env_name with project prefix removed
-                    BRANCH="${ENV_NAME#$PROJECT-}"
+                    BRANCH="${ENV_NAME#"$PROJECT"-}"
 
                     # Check if Claude is running in this pane
                     HAD_CLAUDE="false"

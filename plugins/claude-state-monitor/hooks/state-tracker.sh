@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Claude Code Hooks State Tracker
 # Called by Claude Code hooks to track operational state
@@ -66,18 +66,17 @@ esac
 
 # Write state to session-specific file
 STATE_FILE="$STATE_DIR/$SESSION_ID.json"
-cat > "$STATE_FILE" <<EOF
-{
-  "session_id": "$SESSION_ID",
-  "state": "$STATE",
-  "detail": "$DETAIL",
-  "cwd": "$CWD",
-  "tool": "$TOOL_NAME",
-  "permission_mode": "$PERMISSION_MODE",
-  "event": "$EVENT_TYPE",
-  "timestamp": "$TIMESTAMP"
-}
-EOF
+jq -n \
+  --arg session_id "$SESSION_ID" \
+  --arg state "$STATE" \
+  --arg detail "$DETAIL" \
+  --arg cwd "$CWD" \
+  --arg tool "$TOOL_NAME" \
+  --arg permission_mode "$PERMISSION_MODE" \
+  --arg event "$EVENT_TYPE" \
+  --arg timestamp "$TIMESTAMP" \
+  '{session_id: $session_id, state: $state, detail: $detail, cwd: $cwd, tool: $tool, permission_mode: $permission_mode, event: $event, timestamp: $timestamp}' \
+  > "$STATE_FILE"
 
 # Also write to a CWD-indexed file for easy lookup by pane path
 if [[ -n "$CWD" ]]; then
@@ -90,8 +89,10 @@ if [[ -n "$CWD" ]]; then
     # Direct tmux update for real-time feedback
     MAPPING_FILE="$PANE_MAPPING_DIR/by-cwd/$CWD_SAFE"
     if [[ -f "$MAPPING_FILE" ]]; then
-        # Read pane mapping
-        source "$MAPPING_FILE"
+        # Read pane mapping (expected format: KEY=VALUE lines)
+        PANE_ID=$(grep '^PANE_ID=' "$MAPPING_FILE" | cut -d'=' -f2-)
+        PROJECT=$(grep '^PROJECT=' "$MAPPING_FILE" | cut -d'=' -f2-)
+        BRANCH=$(grep '^BRANCH=' "$MAPPING_FILE" | cut -d'=' -f2-)
 
         # Map state to color
         case "$STATE" in

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Pane Monitor - Mirrors a target tmux pane with live updates and input forwarding
 # Usage: pane-monitor.sh TARGET_PANE_ID SESSION_NAME
@@ -41,14 +41,15 @@ get_width() {
 
 # Draw header bar
 draw_header() {
-    local width=$(get_width)
+    local width
+    width="$(get_width)"
     local label=" ◆ $SESSION_NAME  [typing enabled]"
     local label_len=${#label}
     local padding=$((width - label_len))
     if [[ $padding -lt 0 ]]; then padding=0; fi
 
     # Colored header bar spanning full width
-    printf "${HEADER_BG}${HEADER_FG}${BOLD}%s%${padding}s${RESET}\n" "$label" ""
+    printf '%s%s%s%s%*s%s\n' "$HEADER_BG" "$HEADER_FG" "$BOLD" "$label" "$padding" "" "$RESET"
     # Separator line
     printf "${DIM}%*s${RESET}\n" "$width" "" | tr ' ' '─'
 }
@@ -56,7 +57,6 @@ draw_header() {
 # Track if target is still alive
 check_target_alive() {
     tmux has-session -t "$TARGET_PANE" 2>/dev/null
-    return $?
 }
 
 # Main loop with input forwarding
