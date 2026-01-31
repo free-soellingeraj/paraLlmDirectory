@@ -12,6 +12,15 @@ COMMAND_CENTER="command-center"
 SESSION_NAME=$(tmux display-message -p '#{session_name}' 2>/dev/null)
 STATE_FILE="/tmp/tmux-command-center-state-${SESSION_NAME}"
 
+# Find PARA_LLM_ROOT via bootstrap file for persistent storage
+BOOTSTRAP_FILE="$HOME/.para-llm-root"
+if [[ -f "$BOOTSTRAP_FILE" ]]; then
+    PARA_LLM_ROOT="$(cat "$BOOTSTRAP_FILE")"
+    PANE_DISPLAY_DIR="$PARA_LLM_ROOT/recovery/pane-display"
+else
+    PANE_DISPLAY_DIR="/tmp/claude-pane-display"  # fallback for uninstalled state
+fi
+
 # Plugin paths
 MONITOR_PLUGIN="$SCRIPT_DIR/plugins/claude-state-monitor/monitor-manager.sh"
 
@@ -188,10 +197,10 @@ create_command_center() {
         "#{?pane_active,** , }#{pane_index}: #($display_helper #{pane_index})#{?pane_active, **,} "
 
     # Initialize display files with project | branch before monitor starts
-    mkdir -p /tmp/claude-pane-display
+    mkdir -p "$PANE_DISPLAY_DIR"
     while IFS='|' read -r pane_id name origin project; do
         local safe_id="${pane_id//\%/}"
-        echo "${project} | ${name}" > "/tmp/claude-pane-display/$safe_id"
+        echo "${project} | ${name}" > "$PANE_DISPLAY_DIR/$safe_id"
     done < "$STATE_FILE"
 
     # Select first pane

@@ -12,7 +12,16 @@ set -euo pipefail
 
 STATE_DIR="/tmp/claude-state"
 PANE_MAPPING_DIR="/tmp/claude-pane-mapping"
-DISPLAY_DIR="/tmp/claude-pane-display"
+
+# Find PARA_LLM_ROOT via bootstrap file for persistent storage
+BOOTSTRAP_FILE="$HOME/.para-llm-root"
+if [[ -f "$BOOTSTRAP_FILE" ]]; then
+    PARA_LLM_ROOT="$(cat "$BOOTSTRAP_FILE")"
+    DISPLAY_DIR="$PARA_LLM_ROOT/recovery/pane-display"
+else
+    DISPLAY_DIR="/tmp/claude-pane-display"  # fallback for uninstalled state
+fi
+
 mkdir -p "$STATE_DIR"
 
 EVENT_TYPE="${1:-unknown}"

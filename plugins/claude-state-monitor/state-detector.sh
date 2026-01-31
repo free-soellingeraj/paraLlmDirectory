@@ -22,7 +22,15 @@ BRANCH="${3:-unknown}"
 
 # Configuration
 POLL_INTERVAL=0.3                         # Fast polling for responsive updates
-DISPLAY_DIR="/tmp/claude-pane-display"    # Where to write display strings
+
+# Find PARA_LLM_ROOT via bootstrap file for persistent storage
+BOOTSTRAP_FILE="$HOME/.para-llm-root"
+if [[ -f "$BOOTSTRAP_FILE" ]]; then
+    PARA_LLM_ROOT="$(cat "$BOOTSTRAP_FILE")"
+    DISPLAY_DIR="$PARA_LLM_ROOT/recovery/pane-display"
+else
+    DISPLAY_DIR="/tmp/claude-pane-display"  # fallback for uninstalled state
+fi
 
 # Colors for pane borders
 COLOR_READY="green"
