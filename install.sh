@@ -121,6 +121,7 @@ cp "$SCRIPT_DIR/scripts/para-llm-restore.sh" "$PARA_LLM_ROOT/scripts/"
 cp "$SCRIPT_DIR/scripts/para-llm-recovery-prompt.sh" "$PARA_LLM_ROOT/scripts/"
 cp "$SCRIPT_DIR/scripts/para-llm-do-restore.sh" "$PARA_LLM_ROOT/scripts/"
 cp "$SCRIPT_DIR/scripts/para-llm-do-discard.sh" "$PARA_LLM_ROOT/scripts/"
+cp "$SCRIPT_DIR/tmux-command-center.sh" "$PARA_LLM_ROOT/scripts/"
 chmod +x "$PARA_LLM_ROOT/scripts/"*.sh
 echo "  Installed recovery scripts to $PARA_LLM_ROOT/scripts/"
 
