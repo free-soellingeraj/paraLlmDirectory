@@ -166,6 +166,40 @@ For regular terminals (non-Claude):
 
 ---
 
+### 8. Sound Notifications
+Audio alerts when Claude Code finishes its turn or needs attention.
+
+**Notification Types**:
+| Event | Sound | When |
+|-------|-------|------|
+| `idle_prompt` | Glass | Claude finished and is waiting for input |
+| `permission_prompt` | Sosumi | Claude needs permission to proceed |
+
+**Smart Behavior**:
+- Only plays when the pane is NOT currently focused
+- Avoids annoying you when you're already looking at Claude
+
+**Configuration** (in `$PARA_LLM_ROOT/config`):
+```bash
+# Disable sounds entirely
+NOTIFICATION_SOUND_ENABLED=0
+
+# Custom sound files (macOS .aiff format)
+NOTIFICATION_SOUND_IDLE="/path/to/done.aiff"
+NOTIFICATION_SOUND_PERMISSION="/path/to/alert.aiff"
+
+# Play even when pane is focused (default: only when unfocused)
+NOTIFICATION_SOUND_ONLY_UNFOCUSED=0
+```
+
+**Implementation**:
+- `plugins/claude-state-monitor/hooks/notification-sound.sh` - Plays sounds via `afplay`
+- Triggered by Claude Code's `Notification` hook
+
+**File**: `plugins/claude-state-monitor/hooks/notification-sound.sh`
+
+---
+
 ## Key Bindings Summary
 
 | Binding | Action |
