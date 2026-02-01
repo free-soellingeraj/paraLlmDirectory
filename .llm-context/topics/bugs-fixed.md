@@ -106,6 +106,13 @@ Log of bugs encountered and fixed in the para-llm-directory project. Each entry 
 **Fix**: Move pane display storage to persistent `$PARA_LLM_ROOT/recovery/pane-display/` using the existing bootstrap mechanism (`~/.para-llm-root`). All scripts now read the bootstrap file to find PARA_LLM_ROOT, with fallback to `/tmp` for uninstalled state.
 **Files**: `plugins/claude-state-monitor/get-pane-display.sh`, `plugins/claude-state-monitor/state-detector.sh`, `plugins/claude-state-monitor/hooks/state-tracker.sh`, `tmux-command-center.sh`, `install.sh`
 
+### BUG-013: Hooks-based state tracking never updates pane borders
+**Date**: 2026-02-01
+**Symptom**: When Claude Code hooks fire (PreToolUse, PostToolUse, Stop, etc.), the pane border status labels don't update. Only the polling-based state-detector updates work.
+**Cause**: The `state-tracker.sh` script (called by Claude Code hooks) expected a pane mapping file at `/tmp/claude-pane-mapping/by-cwd/<cwd_safe>` containing PANE_ID, PROJECT, and BRANCH. However, this mapping file was never created by any script.
+**Fix**: Modified `state-detector.sh` to create the pane mapping file when it starts monitoring a pane. The mapping is indexed by the pane's working directory (CWD) so that `state-tracker.sh` can look up which tmux pane corresponds to the CWD that Claude reports in its hook input.
+**Files**: `plugins/claude-state-monitor/state-detector.sh:27-47` (new create_pane_mapping function), `plugins/claude-state-monitor/state-detector.sh:166-173` (cleanup)
+
 ---
 
 ## Known Bug-Prone Areas
