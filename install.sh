@@ -254,7 +254,7 @@ bind-key R run-shell '$PARA_LLM_ROOT/scripts/para-llm-restore.sh'
 # Claude Code status in status line (shows aggregate state)
 # Appends to existing status-right, preserving user customizations
 set -ga status-right ' #($SCRIPT_DIR/plugins/claude-state-monitor/tmux-status.sh)'
-set -g status-interval 2
+set -g status-interval 5
 set -g status-right-length 120
 
 # Pane border titles (shows Claude state per pane)
