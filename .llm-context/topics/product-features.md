@@ -166,6 +166,51 @@ For regular terminals (non-Claude):
 
 ---
 
+### 8. tmux Status Line Integration
+Shows aggregate Claude state across all active sessions in the tmux status bar.
+
+**Display Format**:
+```
+Claude: 2 ready, 1 working
+Claude: 1 blocked
+Claude: idle
+```
+
+**Colors**:
+| State | Color | Meaning |
+|-------|-------|---------|
+| ready | Green | Sessions waiting for input |
+| working | Yellow | Sessions actively processing |
+| blocked | Cyan | Sessions needing permission |
+
+**Emoji Mode** (optional):
+```
+🤖 ✓2, ⚙1
+🤖 idle
+```
+
+**Configuration** (via environment variables):
+```bash
+# Disable status line
+export CLAUDE_STATUS_ENABLED=0
+
+# Custom prefix (default: "Claude")
+export CLAUDE_STATUS_PREFIX="CC"
+
+# Use emoji icons instead of text
+export CLAUDE_STATUS_EMOJI=1
+```
+
+**Auto-refresh**: Status updates every 2 seconds via tmux's `status-interval`.
+
+**Implementation**:
+- `plugins/claude-state-monitor/tmux-status.sh` - Reads state files and outputs formatted status
+- Automatically added to tmux status-right by install.sh
+
+**File**: `plugins/claude-state-monitor/tmux-status.sh`
+
+---
+
 ## Key Bindings Summary
 
 | Binding | Action |

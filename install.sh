@@ -240,6 +240,11 @@ set-hook -g session-created 'run-shell -b "sleep 1 && $PARA_LLM_ROOT/scripts/par
 
 # Ctrl+b R: Manual restore trigger
 bind-key R run-shell '$PARA_LLM_ROOT/scripts/para-llm-restore.sh'
+
+# Claude Code status in status line (shows aggregate state)
+# Appends to existing status-right, preserving user customizations
+set -ga status-right ' #($SCRIPT_DIR/plugins/claude-state-monitor/tmux-status.sh)'
+set -g status-interval 2
 # end para-llm-directory
 EOF
 echo "Added bindings to ~/.tmux.conf"
