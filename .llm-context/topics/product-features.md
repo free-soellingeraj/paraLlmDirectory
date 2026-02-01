@@ -180,16 +180,16 @@ Native macOS notifications when Claude Code needs attention.
 - Only shows when the pane is NOT currently focused
 - Uses native macOS Notification Center (via osascript)
 
-**Configuration** (via environment variables):
+**Configuration** (in `$PARA_LLM_ROOT/config`):
 ```bash
 # Disable desktop notifications
-export CLAUDE_DESKTOP_NOTIFY_ENABLED=0
+NOTIFICATION_DESKTOP_ENABLED=0
 
 # Include sound in notification (default: off, use notification-sound.sh instead)
-export CLAUDE_DESKTOP_NOTIFY_SOUND=1
+NOTIFICATION_DESKTOP_SOUND=1
 
 # Show even when pane is focused (default: only when unfocused)
-export CLAUDE_DESKTOP_NOTIFY_ONLY_UNFOCUSED=0
+NOTIFICATION_DESKTOP_ONLY_UNFOCUSED=0
 ```
 
 **Implementation**:

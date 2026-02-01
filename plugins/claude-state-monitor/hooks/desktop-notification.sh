@@ -6,10 +6,10 @@
 # Usage: desktop-notification.sh <event_type>
 # Event types: idle, permission
 #
-# Configuration (via environment variables):
-#   CLAUDE_DESKTOP_NOTIFY_ENABLED=1|0 (default: 1)
-#   CLAUDE_DESKTOP_NOTIFY_SOUND=1|0 (default: 0, use notification-sound.sh instead)
-#   CLAUDE_DESKTOP_NOTIFY_ONLY_UNFOCUSED=1|0 (default: 1)
+# Configuration (in $PARA_LLM_ROOT/config):
+#   NOTIFICATION_DESKTOP_ENABLED=1|0 (default: 1)
+#   NOTIFICATION_DESKTOP_SOUND=1|0 (default: 0, use notification-sound.sh instead)
+#   NOTIFICATION_DESKTOP_ONLY_UNFOCUSED=1|0 (default: 1)
 
 set -euo pipefail
 
@@ -18,10 +18,19 @@ EVENT_TYPE="${1:-idle}"
 # Read hook input from stdin
 INPUT=$(cat)
 
-# Configuration with defaults
-NOTIFY_ENABLED="${CLAUDE_DESKTOP_NOTIFY_ENABLED:-1}"
-NOTIFY_SOUND="${CLAUDE_DESKTOP_NOTIFY_SOUND:-0}"
-ONLY_UNFOCUSED="${CLAUDE_DESKTOP_NOTIFY_ONLY_UNFOCUSED:-1}"
+# Load para-llm-directory config
+BOOTSTRAP_FILE="$HOME/.para-llm-root"
+if [[ -f "$BOOTSTRAP_FILE" ]]; then
+    PARA_LLM_ROOT="$(cat "$BOOTSTRAP_FILE")"
+    if [[ -f "$PARA_LLM_ROOT/config" ]]; then
+        source "$PARA_LLM_ROOT/config"
+    fi
+fi
+
+# Configuration with defaults (config file values take precedence)
+NOTIFY_ENABLED="${NOTIFICATION_DESKTOP_ENABLED:-1}"
+NOTIFY_SOUND="${NOTIFICATION_DESKTOP_SOUND:-0}"
+ONLY_UNFOCUSED="${NOTIFICATION_DESKTOP_ONLY_UNFOCUSED:-1}"
 
 # Exit early if notifications disabled
 if [[ "$NOTIFY_ENABLED" != "1" ]]; then
