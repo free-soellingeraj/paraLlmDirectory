@@ -2,12 +2,12 @@
 
 set -u
 
-# Get display string for a pane by index
-# Called by tmux pane-border-format: #(/path/to/get-pane-display.sh #{pane_index})
-# Returns the content of the pane's display file, or "unknown" if not found
+# Get display string for a pane
+# Called by tmux pane-border-format: #(/path/to/get-pane-display.sh #{pane_id})
+# Accepts pane_id (e.g., %0, %1) directly
+# Returns the content of the pane's display file, or empty string if not found
 
-pane_index="$1"
-window="${2:-command-center}"
+pane_id="${1:-}"
 
 # Find PARA_LLM_ROOT via bootstrap file for persistent storage
 BOOTSTRAP_FILE="$HOME/.para-llm-root"
@@ -17,9 +17,6 @@ if [[ -f "$BOOTSTRAP_FILE" ]]; then
 else
     display_dir="/tmp/claude-pane-display"  # fallback for uninstalled state
 fi
-
-# Get pane_id for the given index
-pane_id=$(tmux list-panes -t "$window" -F '#{pane_index}|#{pane_id}' 2>/dev/null | grep "^${pane_index}|" | cut -d'|' -f2)
 
 if [[ -n "$pane_id" ]]; then
     # Strip the % prefix from pane_id
@@ -32,5 +29,5 @@ if [[ -n "$pane_id" ]]; then
     fi
 fi
 
-# Fallback
-echo "unknown"
+# Return empty - no display file means not a tracked pane
+echo ""

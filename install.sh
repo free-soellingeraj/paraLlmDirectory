@@ -256,6 +256,10 @@ bind-key R run-shell '$PARA_LLM_ROOT/scripts/para-llm-restore.sh'
 set -ga status-right ' #($SCRIPT_DIR/plugins/claude-state-monitor/tmux-status.sh)'
 set -g status-interval 2
 set -g status-right-length 120
+
+# Pane border titles (shows Claude state per pane)
+set -g pane-border-status top
+set -g pane-border-format '#{?pane_active,#[reverse],} #($SCRIPT_DIR/plugins/claude-state-monitor/get-pane-display.sh #{pane_id}) #{?pane_active,#[noreverse],}'
 # end para-llm-directory
 EOF
 echo "Added bindings to ~/.tmux.conf"
