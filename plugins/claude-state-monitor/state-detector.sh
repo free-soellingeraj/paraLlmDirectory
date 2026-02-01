@@ -22,6 +22,7 @@ BRANCH="${3:-unknown}"
 
 # Configuration
 POLL_INTERVAL=0.3                         # Fast polling for responsive updates
+PANE_MAPPING_DIR="/tmp/claude-pane-mapping"
 
 # Find PARA_LLM_ROOT via bootstrap file for persistent storage
 BOOTSTRAP_FILE="$HOME/.para-llm-root"
@@ -43,8 +44,33 @@ LABEL_WORKING="Working"
 # State tracking
 CURRENT_STATE=""
 
-# Ensure display directory exists
+# Ensure directories exist
 mkdir -p "$DISPLAY_DIR"
+mkdir -p "$PANE_MAPPING_DIR/by-cwd"
+
+# Create pane mapping file indexed by CWD
+# This allows state-tracker.sh (called by Claude hooks) to find the pane
+create_pane_mapping() {
+    local pane_cwd
+    pane_cwd=$(tmux display-message -p -t "$PANE_ID" '#{pane_current_path}' 2>/dev/null)
+
+    if [[ -n "$pane_cwd" ]]; then
+        # Create sanitized filename from CWD (same logic as state-tracker.sh)
+        local cwd_safe
+        cwd_safe=$(echo "$pane_cwd" | sed 's|/|_|g' | sed 's|^_||')
+        local mapping_file="$PANE_MAPPING_DIR/by-cwd/$cwd_safe"
+
+        # Write mapping in KEY=VALUE format for state-tracker.sh
+        cat > "$mapping_file" << EOF
+PANE_ID=$PANE_ID
+PROJECT=$PROJECT
+BRANCH=$BRANCH
+EOF
+    fi
+}
+
+# Initialize pane mapping
+create_pane_mapping
 
 # Check if Claude prompt (❯) is at the start of a line (active prompt, not in history)
 is_prompt_visible() {
@@ -159,6 +185,16 @@ update_state() {
 # Cleanup on exit
 cleanup() {
     tmux set-option -p -t "$PANE_ID" -u pane-border-style 2>/dev/null
+
+    # Remove pane mapping file
+    local pane_cwd
+    pane_cwd=$(tmux display-message -p -t "$PANE_ID" '#{pane_current_path}' 2>/dev/null)
+    if [[ -n "$pane_cwd" ]]; then
+        local cwd_safe
+        cwd_safe=$(echo "$pane_cwd" | sed 's|/|_|g' | sed 's|^_||')
+        rm -f "$PANE_MAPPING_DIR/by-cwd/$cwd_safe" 2>/dev/null
+    fi
+
     exit 0
 }
 
