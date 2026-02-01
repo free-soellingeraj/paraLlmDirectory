@@ -149,8 +149,8 @@ MAPEOF
             tmux set-option -p -t "$PANE_ID" -u pane-border-style 2>/dev/null || true
         fi
 
-        # Write display file for pane-border-format
-        DISPLAY_STRING="$PROJECT | $BRANCH"
+        # Write display file for pane-border-format (with color codes)
+        DISPLAY_STRING="#[fg=$COLOR]$PROJECT | $BRANCH#[default]"
         SAFE_PANE_ID="${PANE_ID//\%/}"
         mkdir -p "$DISPLAY_DIR"
         echo "$DISPLAY_STRING" > "$DISPLAY_DIR/$SAFE_PANE_ID"
