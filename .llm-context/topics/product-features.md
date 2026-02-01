@@ -179,17 +179,17 @@ Audio alerts when Claude Code finishes its turn or needs attention.
 - Only plays when the pane is NOT currently focused
 - Avoids annoying you when you're already looking at Claude
 
-**Configuration** (via environment variables):
+**Configuration** (in `$PARA_LLM_ROOT/config`):
 ```bash
 # Disable sounds entirely
-export CLAUDE_SOUND_ENABLED=0
+NOTIFICATION_SOUND_ENABLED=0
 
 # Custom sound files (macOS .aiff format)
-export CLAUDE_SOUND_IDLE=/path/to/done.aiff
-export CLAUDE_SOUND_PERMISSION=/path/to/alert.aiff
+NOTIFICATION_SOUND_IDLE="/path/to/done.aiff"
+NOTIFICATION_SOUND_PERMISSION="/path/to/alert.aiff"
 
 # Play even when pane is focused (default: only when unfocused)
-export CLAUDE_SOUND_ONLY_UNFOCUSED=0
+NOTIFICATION_SOUND_ONLY_UNFOCUSED=0
 ```
 
 **Implementation**:

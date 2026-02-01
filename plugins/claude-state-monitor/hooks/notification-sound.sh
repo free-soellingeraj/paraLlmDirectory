@@ -6,11 +6,11 @@
 # Usage: notification-sound.sh <event_type>
 # Event types: idle, permission
 #
-# Configuration (via environment variables):
-#   CLAUDE_SOUND_ENABLED=1|0 (default: 1)
-#   CLAUDE_SOUND_IDLE=/path/to/sound.aiff (default: system Glass sound)
-#   CLAUDE_SOUND_PERMISSION=/path/to/sound.aiff (default: system Sosumi sound)
-#   CLAUDE_SOUND_ONLY_UNFOCUSED=1|0 (default: 1, only play if pane not active)
+# Configuration (in $PARA_LLM_ROOT/config):
+#   NOTIFICATION_SOUND_ENABLED=1|0 (default: 1)
+#   NOTIFICATION_SOUND_IDLE=/path/to/sound.aiff (default: system Glass sound)
+#   NOTIFICATION_SOUND_PERMISSION=/path/to/sound.aiff (default: system Sosumi sound)
+#   NOTIFICATION_SOUND_ONLY_UNFOCUSED=1|0 (default: 1, only play if pane not active)
 
 set -euo pipefail
 
@@ -19,11 +19,20 @@ EVENT_TYPE="${1:-idle}"
 # Read hook input from stdin (contains notification_type, cwd, etc.)
 INPUT=$(cat)
 
-# Configuration with defaults
-SOUND_ENABLED="${CLAUDE_SOUND_ENABLED:-1}"
-SOUND_IDLE="${CLAUDE_SOUND_IDLE:-/System/Library/Sounds/Glass.aiff}"
-SOUND_PERMISSION="${CLAUDE_SOUND_PERMISSION:-/System/Library/Sounds/Sosumi.aiff}"
-ONLY_UNFOCUSED="${CLAUDE_SOUND_ONLY_UNFOCUSED:-1}"
+# Load para-llm-directory config
+BOOTSTRAP_FILE="$HOME/.para-llm-root"
+if [[ -f "$BOOTSTRAP_FILE" ]]; then
+    PARA_LLM_ROOT="$(cat "$BOOTSTRAP_FILE")"
+    if [[ -f "$PARA_LLM_ROOT/config" ]]; then
+        source "$PARA_LLM_ROOT/config"
+    fi
+fi
+
+# Configuration with defaults (config file values take precedence)
+SOUND_ENABLED="${NOTIFICATION_SOUND_ENABLED:-1}"
+SOUND_IDLE="${NOTIFICATION_SOUND_IDLE:-/System/Library/Sounds/Glass.aiff}"
+SOUND_PERMISSION="${NOTIFICATION_SOUND_PERMISSION:-/System/Library/Sounds/Sosumi.aiff}"
+ONLY_UNFOCUSED="${NOTIFICATION_SOUND_ONLY_UNFOCUSED:-1}"
 
 # Exit early if sounds disabled
 if [[ "$SOUND_ENABLED" != "1" ]]; then
