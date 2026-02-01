@@ -254,6 +254,7 @@ bind-key R run-shell '$PARA_LLM_ROOT/scripts/para-llm-restore.sh'
 # Appends to existing status-right, preserving user customizations
 set -ga status-right ' #($SCRIPT_DIR/plugins/claude-state-monitor/tmux-status.sh)'
 set -g status-interval 2
+set -g status-right-length 120
 # end para-llm-directory
 EOF
 echo "Added bindings to ~/.tmux.conf"
