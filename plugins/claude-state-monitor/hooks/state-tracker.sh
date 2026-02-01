@@ -131,7 +131,7 @@ if [[ -n "$CWD" ]]; then
         fi
 
         # Write display file for pane-border-format
-        DISPLAY_STRING="$LABEL | $PROJECT | $BRANCH"
+        DISPLAY_STRING="$PROJECT | $BRANCH"
         SAFE_PANE_ID="${PANE_ID//\%/}"
         mkdir -p "$DISPLAY_DIR"
         echo "$DISPLAY_STRING" > "$DISPLAY_DIR/$SAFE_PANE_ID"
