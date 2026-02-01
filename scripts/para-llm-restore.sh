@@ -47,9 +47,14 @@ fi
 RESTORED=0
 SKIPPED=0
 
+# Directories for pane mapping (used by hooks for real-time updates)
+PANE_MAPPING_DIR="/tmp/claude-pane-mapping"
+DISPLAY_DIR="$PARA_LLM_ROOT/recovery/pane-display"
+mkdir -p "$PANE_MAPPING_DIR/by-cwd" "$DISPLAY_DIR"
+
 while IFS='|' read -r pane_id pane_path pane_pid; do
     # Check if this pane matches a saved entry
-    if [[ -n "${SAVED_ENTRIES[$pane_path]}" ]]; then
+    if [[ -n "${SAVED_ENTRIES[$pane_path]:-}" ]]; then
         IFS='|' read -r project branch <<< "${SAVED_ENTRIES[$pane_path]}"
 
         # Check directory still exists
@@ -65,6 +70,23 @@ while IFS='|' read -r pane_id pane_path pane_pid; do
             SKIPPED=$((SKIPPED + 1))
             continue
         fi
+
+        # Set up pane mapping for this pane (so hooks can update it later)
+        CWD_SAFE=$(echo "$pane_path" | sed 's|/|_|g' | sed 's|^_||')
+        MAPPING_FILE="$PANE_MAPPING_DIR/by-cwd/$CWD_SAFE"
+        cat > "$MAPPING_FILE" << MAPPING_EOF
+PANE_ID=$pane_id
+PROJECT=$project
+BRANCH=$branch
+CWD=$pane_path
+MAPPING_EOF
+
+        # Set initial pane title (will show "Starting..." until Claude hooks update it)
+        SAFE_PANE_ID="${pane_id//\%/}"
+        echo "$project | $branch" > "$DISPLAY_DIR/$SAFE_PANE_ID"
+
+        # Set initial border color to yellow (starting)
+        tmux set-option -p -t "$pane_id" pane-border-style "fg=yellow" 2>/dev/null || true
 
         # Determine launch command
         SETUP_SCRIPT="$pane_path/paraLlm_setup.sh"
