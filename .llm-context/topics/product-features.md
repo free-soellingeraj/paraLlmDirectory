@@ -166,6 +166,40 @@ For regular terminals (non-Claude):
 
 ---
 
+### 8. Desktop Notifications
+Native macOS notifications when Claude Code needs attention.
+
+**Notification Types**:
+| Event | Title | Shown When |
+|-------|-------|------------|
+| `idle_prompt` | "Claude Code Ready" | Claude finished and is waiting for input |
+| `permission_prompt` | "Claude Code Needs Permission" | Claude needs permission to proceed |
+
+**Features**:
+- Shows project name and branch in notification subtitle
+- Only shows when the pane is NOT currently focused
+- Uses native macOS Notification Center (via osascript)
+
+**Configuration** (via environment variables):
+```bash
+# Disable desktop notifications
+export CLAUDE_DESKTOP_NOTIFY_ENABLED=0
+
+# Include sound in notification (default: off, use notification-sound.sh instead)
+export CLAUDE_DESKTOP_NOTIFY_SOUND=1
+
+# Show even when pane is focused (default: only when unfocused)
+export CLAUDE_DESKTOP_NOTIFY_ONLY_UNFOCUSED=0
+```
+
+**Implementation**:
+- `plugins/claude-state-monitor/hooks/desktop-notification.sh` - Shows notifications via osascript
+- Triggered by Claude Code's `Notification` hook
+
+**File**: `plugins/claude-state-monitor/hooks/desktop-notification.sh`
+
+---
+
 ## Key Bindings Summary
 
 | Binding | Action |

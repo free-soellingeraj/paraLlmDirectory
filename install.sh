@@ -148,10 +148,13 @@ echo "Setting up Claude Code hooks for state monitoring..."
 HOOKS_INSTALL_DIR="$PARA_LLM_ROOT/plugins/claude-state-monitor/hooks"
 mkdir -p "$HOOKS_INSTALL_DIR"
 
-# Copy state-tracker script
+# Copy hook scripts
 cp "$SCRIPT_DIR/plugins/claude-state-monitor/hooks/state-tracker.sh" "$HOOKS_INSTALL_DIR/"
+cp "$SCRIPT_DIR/plugins/claude-state-monitor/hooks/desktop-notification.sh" "$HOOKS_INSTALL_DIR/"
 chmod +x "$HOOKS_INSTALL_DIR/state-tracker.sh"
+chmod +x "$HOOKS_INSTALL_DIR/desktop-notification.sh"
 echo "  Installed state-tracker.sh to $HOOKS_INSTALL_DIR"
+echo "  Installed desktop-notification.sh to $HOOKS_INSTALL_DIR"
 
 # Merge hooks configuration into Claude settings
 CLAUDE_SETTINGS="$HOME/.claude/settings.json"
