@@ -184,7 +184,7 @@ Hooks are configured in `~/.claude/settings.json`:
 │  │  - Reads /tmp/claude-state/by-cwd/<path>.json   │   │
 │  │  - Falls back to shell process check for non-   │   │
 │  │    Claude terminals                             │   │
-│  │  - Writes to /tmp/claude-pane-display/<id>      │   │
+│  │  - Writes to $PARA_LLM_ROOT/recovery/pane-display/<id> │
 │  │  - Updates border: tmux set-option -p ...       │   │
 │  └─────────────────────────────────────────────────┘   │
 │       │                                                 │

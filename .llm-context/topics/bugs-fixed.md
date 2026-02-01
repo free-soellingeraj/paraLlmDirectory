@@ -99,6 +99,13 @@ Log of bugs encountered and fixed in the para-llm-directory project. Each entry 
 **Fix**: Updated all Claude launch commands to consistently use `claude --dangerously-skip-permissions` (with `--resume` added where appropriate for existing sessions).
 **File**: `tmux-new-branch.sh:234`, `tmux-new-branch.sh:263-265`, `tmux-new-branch.sh:307-309`
 
+### BUG-012: Window titles become "unknown" after sleep/wake
+**Date**: 2026-02-01
+**Symptom**: Window titles in the command center become "unknown" after laptop sleep/wake cycles or terminal session changes.
+**Cause**: Pane display files were stored in volatile `/tmp/claude-pane-display/` which gets cleared on system sleep/reboot or by OS cleanup processes.
+**Fix**: Move pane display storage to persistent `$PARA_LLM_ROOT/recovery/pane-display/` using the existing bootstrap mechanism (`~/.para-llm-root`). All scripts now read the bootstrap file to find PARA_LLM_ROOT, with fallback to `/tmp` for uninstalled state.
+**Files**: `plugins/claude-state-monitor/get-pane-display.sh`, `plugins/claude-state-monitor/state-detector.sh`, `plugins/claude-state-monitor/hooks/state-tracker.sh`, `tmux-command-center.sh`, `install.sh`
+
 ---
 
 ## Known Bug-Prone Areas
