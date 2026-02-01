@@ -9,17 +9,26 @@
 # Add to tmux.conf:
 #   set -g status-right '#(/path/to/tmux-status.sh)'
 #
-# Configuration (via environment variables):
-#   CLAUDE_STATUS_ENABLED=1|0 (default: 1)
-#   CLAUDE_STATUS_PREFIX="Claude" (default: "Claude")
-#   CLAUDE_STATUS_EMOJI=1|0 (default: 0, use emoji icons)
+# Configuration (in $PARA_LLM_ROOT/config):
+#   STATUS_LINE_ENABLED=1|0 (default: 1)
+#   STATUS_LINE_PREFIX="Claude" (default: "Claude")
+#   STATUS_LINE_EMOJI=1|0 (default: 0, use emoji icons)
 
 set -u
 
-# Configuration
-STATUS_ENABLED="${CLAUDE_STATUS_ENABLED:-1}"
-STATUS_PREFIX="${CLAUDE_STATUS_PREFIX:-Claude}"
-USE_EMOJI="${CLAUDE_STATUS_EMOJI:-0}"
+# Load para-llm-directory config
+BOOTSTRAP_FILE="$HOME/.para-llm-root"
+if [[ -f "$BOOTSTRAP_FILE" ]]; then
+    PARA_LLM_ROOT="$(cat "$BOOTSTRAP_FILE")"
+    if [[ -f "$PARA_LLM_ROOT/config" ]]; then
+        source "$PARA_LLM_ROOT/config"
+    fi
+fi
+
+# Configuration with defaults (config file values take precedence)
+STATUS_ENABLED="${STATUS_LINE_ENABLED:-1}"
+STATUS_PREFIX="${STATUS_LINE_PREFIX:-Claude}"
+USE_EMOJI="${STATUS_LINE_EMOJI:-0}"
 
 # Exit early if disabled
 if [[ "$STATUS_ENABLED" != "1" ]]; then

@@ -189,16 +189,16 @@ Claude: idle
 🤖 idle
 ```
 
-**Configuration** (via environment variables):
+**Configuration** (in `$PARA_LLM_ROOT/config`):
 ```bash
 # Disable status line
-export CLAUDE_STATUS_ENABLED=0
+STATUS_LINE_ENABLED=0
 
 # Custom prefix (default: "Claude")
-export CLAUDE_STATUS_PREFIX="CC"
+STATUS_LINE_PREFIX="CC"
 
 # Use emoji icons instead of text
-export CLAUDE_STATUS_EMOJI=1
+STATUS_LINE_EMOJI=1
 ```
 
 **Auto-refresh**: Status updates every 2 seconds via tmux's `status-interval`.
