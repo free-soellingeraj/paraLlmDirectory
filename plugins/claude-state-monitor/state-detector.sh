@@ -165,7 +165,7 @@ write_display() {
         *)       label="$LABEL_WORKING" ;;
     esac
 
-    local display="$label | $PROJECT | $BRANCH"
+    local display="$label | $BRANCH | $PROJECT"
     local safe_id="${PANE_ID//\%/}"
     echo "$display" > "$DISPLAY_DIR/$safe_id"
 }
