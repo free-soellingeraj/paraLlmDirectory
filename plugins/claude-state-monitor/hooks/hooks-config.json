@@ -59,6 +59,10 @@
           {
             "type": "command",
             "command": "__PARA_LLM_ROOT__/plugins/claude-state-monitor/hooks/state-tracker.sh idle"
+          },
+          {
+            "type": "command",
+            "command": "__PARA_LLM_ROOT__/plugins/claude-state-monitor/hooks/desktop-notification.sh idle"
           }
         ]
       },
@@ -68,6 +72,10 @@
           {
             "type": "command",
             "command": "__PARA_LLM_ROOT__/plugins/claude-state-monitor/hooks/state-tracker.sh permission"
+          },
+          {
+            "type": "command",
+            "command": "__PARA_LLM_ROOT__/plugins/claude-state-monitor/hooks/desktop-notification.sh permission"
           }
         ]
       }
