@@ -18,6 +18,8 @@ Tmux workflow for managing parallel Claude Code sessions across multiple feature
 
 - **Ctrl+b C**: Plain new window (original tmux behavior)
 
+- **Shift+Enter**: Insert newline in Claude Code REPL (via tmux extended keys)
+
 ## Prerequisites
 
 ```bash
