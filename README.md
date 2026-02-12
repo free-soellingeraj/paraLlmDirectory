@@ -20,6 +20,7 @@ Tmux workflow for managing parallel Claude Code sessions across multiple feature
 
 - **Shift+Enter**: Insert newline in Claude Code REPL (requires iTerm2 with CSI u — see below)
 - **Mouse/trackpad**: Scroll tmux panes and click to select panes
+- **Option+drag**: Select and copy text (Cmd+C to copy, iTerm2 native selection)
 
 ## Recommended Terminal
 
