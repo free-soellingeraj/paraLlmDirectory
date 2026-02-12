@@ -214,6 +214,16 @@ echo "Adding bindings pointing to: $SCRIPT_DIR"
 cat >> ~/.tmux.conf << EOF
 
 # para-llm-directory bindings
+
+# Enable extended keys so Shift+Enter passes through to Claude Code as newline
+set -s extended-keys on
+set -as terminal-features 'xterm*:extkeys'
+
+# Enable mouse/trackpad scrolling and pane selection
+set -g mouse on
+
+# Copy text: Option+drag to select, then Cmd+C to copy (iTerm2 native selection)
+
 # Ctrl+b c: interactive project + branch selection, creates clone in envs/
 bind-key c display-popup -E -w 60% -h 60% "$SCRIPT_DIR/tmux-new-branch.sh"
 
