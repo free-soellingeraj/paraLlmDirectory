@@ -219,6 +219,9 @@ cat >> ~/.tmux.conf << EOF
 set -s extended-keys on
 set -as terminal-features 'xterm*:extkeys'
 
+# Enable mouse/trackpad scrolling and pane selection
+set -g mouse on
+
 # Ctrl+b c: interactive project + branch selection, creates clone in envs/
 bind-key c display-popup -E -w 60% -h 60% "$SCRIPT_DIR/tmux-new-branch.sh"
 
