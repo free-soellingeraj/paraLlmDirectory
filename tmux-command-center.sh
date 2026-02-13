@@ -207,17 +207,17 @@ create_command_center() {
     # Enable pane border status to show window names at top of each tile
     tmux set-window-option -t "$COMMAND_CENTER" pane-border-status top
     # Use dynamic format that reads from display files written by the state monitor
-    # Helper script looks up pane_id by index and reads the corresponding display file
+    # Helper script looks up pane_id and reads the corresponding display file
     # #{?pane_active,** , } adds ** around active pane (handled by tmux, not script)
     local display_helper="$SCRIPT_DIR/plugins/claude-state-monitor/get-pane-display.sh"
     tmux set-window-option -t "$COMMAND_CENTER" pane-border-format \
-        "#{?pane_active,** , }#{pane_index}: #($display_helper #{pane_index})#{?pane_active, **,} "
+        "#{?pane_active,** , }#{pane_index}: #($display_helper #{pane_id})#{?pane_active, **,} "
 
     # Initialize display files with project | branch before monitor starts
     mkdir -p "$PANE_DISPLAY_DIR"
     while IFS='|' read -r pane_id name origin project; do
         local safe_id="${pane_id//\%/}"
-        echo "#[fg=green]${project} | ${name}#[default]" > "$PANE_DISPLAY_DIR/$safe_id"
+        echo "#[fg=green]Waiting for Input | ${project} | ${name}#[default]" > "$PANE_DISPLAY_DIR/$safe_id"
     done < "$STATE_FILE"
 
     # Select first pane

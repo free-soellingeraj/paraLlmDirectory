@@ -21,4 +21,14 @@ fi
 f="/tmp/claude-pane-display/$safe_id"
 [[ -f "$f" ]] && cat "$f" && exit 0
 
-echo ""
+# No display file found - detect git/Claude status as fallback
+dir=$(tmux display-message -p -t "$pane_id" '#{pane_current_path}' 2>/dev/null)
+dirname="${dir##*/}"
+
+# Check if it's a git repo
+branch=$(git -C "$dir" branch --show-current 2>/dev/null)
+if [[ -z "$branch" ]]; then
+    echo "#[fg=default]No Git | $dirname#[default]"
+else
+    echo "#[fg=green]No Claude | $dirname | $branch#[default]"
+fi
