@@ -8,17 +8,18 @@ set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 COMMAND_CENTER="command-center"
-# Use session-based state file so we can find it when restoring
 SESSION_NAME=$(tmux display-message -p '#{session_name}' 2>/dev/null)
-STATE_FILE="/tmp/tmux-command-center-state-${SESSION_NAME}"
 
 # Find PARA_LLM_ROOT via bootstrap file for persistent storage
 BOOTSTRAP_FILE="$HOME/.para-llm-root"
 if [[ -f "$BOOTSTRAP_FILE" ]]; then
     PARA_LLM_ROOT="$(cat "$BOOTSTRAP_FILE")"
     PANE_DISPLAY_DIR="$PARA_LLM_ROOT/recovery/pane-display"
+    # Store state file in persistent location (survives reboot)
+    STATE_FILE="$PARA_LLM_ROOT/recovery/command-center-state-${SESSION_NAME}"
 else
     PANE_DISPLAY_DIR="/tmp/claude-pane-display"  # fallback for uninstalled state
+    STATE_FILE="/tmp/tmux-command-center-state-${SESSION_NAME}"
 fi
 
 # Plugin paths
@@ -78,9 +79,25 @@ restore_command_center() {
     cleanup_hooks
 
     # Safety check: need state file to restore
+    # If no state file, create one from current panes (best-effort recovery)
     if [[ ! -f "$STATE_FILE" ]] || [[ ! -s "$STATE_FILE" ]]; then
-        tmux display-message "Cannot close: no state file to restore from"
-        return 1
+        tmux display-message "Recovering: creating state from current panes..."
+        # Create state file from current command center panes
+        mkdir -p "$(dirname "$STATE_FILE")"
+        tmux list-panes -t "$COMMAND_CENTER" -F '#{pane_id}|#{pane_current_path}' 2>/dev/null | while IFS='|' read -r pane_id pane_path; do
+            # Extract project name (last component of path) and use as window name
+            local project branch
+            project=$(basename "$pane_path")
+            # Try to get branch from git
+            branch=$(git -C "$pane_path" branch --show-current 2>/dev/null || echo "unknown")
+            echo "${pane_id}|${branch}|recovered|${project}"
+        done > "$STATE_FILE"
+        # If still no content, we can't proceed
+        if [[ ! -s "$STATE_FILE" ]]; then
+            tmux display-message "No panes found in command center to restore"
+            rm -f "$STATE_FILE"
+            return 1
+        fi
     fi
 
     # Count panes we need to restore
