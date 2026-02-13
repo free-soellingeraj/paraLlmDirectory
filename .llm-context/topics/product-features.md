@@ -211,7 +211,7 @@ STATUS_LINE_PREFIX="CC"
 STATUS_LINE_EMOJI=1
 ```
 
-**Auto-refresh**: Status updates every 2 seconds via tmux's `status-interval`.
+**Auto-refresh**: Status updates every 1 second via tmux's `status-interval`.
 
 **Implementation**:
 - `plugins/claude-state-monitor/tmux-status.sh` - Reads state files and outputs formatted status
