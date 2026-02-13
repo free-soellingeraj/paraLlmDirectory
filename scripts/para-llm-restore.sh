@@ -83,7 +83,7 @@ MAPPING_EOF
 
         # Set initial pane title (will show "Starting..." until Claude hooks update it)
         SAFE_PANE_ID="${pane_id//\%/}"
-        echo "$project | $branch" > "$DISPLAY_DIR/$SAFE_PANE_ID"
+        echo "#[fg=yellow]Working | $project | $branch#[default]" > "$DISPLAY_DIR/$SAFE_PANE_ID"
 
         # Set initial border color to yellow (starting)
         tmux set-option -p -t "$pane_id" pane-border-style "fg=yellow" 2>/dev/null || true

@@ -119,12 +119,19 @@ Visual feedback showing whether each Command Center tile is waiting for input or
 
 **Tile Title Bar Format**:
 ```
-pane_index: status | project | branch
+pane_index: status | directory | branch
 ```
+
+Display files contain: `#[fg=<color>]<status> | <directory> | <branch>#[default]`
+
+For non-git panes: `#[fg=default]No Git | <directory>#[default]` (no branch field)
 
 Example titles:
 - `0: Waiting for Input | myProject | feature-auth`
-- `1: Working | myProject | bugfix-login`
+- `1: Working: Bash | myProject | bugfix-login`
+- `2: Needs Action: Permission | myProject | feature-auth`
+- `3: No Claude | myProject | main`
+- `4: No Git | scripts`
 
 **Active Pane Indicator**:
 The currently selected pane is marked with asterisks (handled by tmux `pane-border-format`):
@@ -132,11 +139,14 @@ The currently selected pane is marked with asterisks (handled by tmux `pane-bord
 ** 0: Waiting for Input | myProject | feature-auth **
 ```
 
-**Two States**:
+**States**:
 | State | Color | Meaning |
 |-------|-------|---------|
-| **Waiting for Input** | Green | Prompt visible, ready for user input |
-| **Working** | Yellow | Command running or Claude processing |
+| **Waiting for Input** | Green | Claude prompt visible, ready for user input |
+| **Working** / **Working: \<tool\>** | Yellow | Claude actively processing or tool running |
+| **Needs Action: Permission** | Cyan | Claude needs permission approval |
+| **No Claude** | Green | Git pane with no Claude session running |
+| **No Git** | Default | Pane not in a git repository |
 
 **Detection Method** (terminal-based, simple & reliable):
 

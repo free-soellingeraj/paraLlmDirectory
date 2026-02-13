@@ -194,18 +194,24 @@ Hooks are configured in `~/.claude/settings.json`:
 ```
 
 **State Mapping**:
-| Hook Event | State | Display |
-|------------|-------|---------|
-| `PreToolUse` | working | `Working: <tool_name>` |
-| `PostToolUse` | working | `Working` |
-| `Stop` | ready | `Waiting for Input` |
-| `Notification (idle_prompt)` | ready | `Waiting for Input` |
-| `Notification (permission_prompt)` | blocked | `Needs Action: Permission` |
+| Hook Event | State | Display | Color |
+|------------|-------|---------|-------|
+| `PreToolUse` | working | `Working: <tool_name>` | Yellow |
+| `PostToolUse` | working | `Working` | Yellow |
+| `Stop` | ready | `Waiting for Input` | Green |
+| `Notification (idle_prompt)` | ready | `Waiting for Input` | Green |
+| `Notification (permission_prompt)` | blocked | `Needs Action: Permission` | Cyan |
 
-**For Non-Claude Terminals**:
+**For Non-Claude Terminals** (state-detector.sh):
 - Checks if shell has child processes
-- Child processes running → `Working`
-- No children (idle shell) → `Waiting for Input`
+- Child processes running → `Working` (yellow)
+- No children (idle shell) → `Waiting for Input` (green)
+
+**For Unmanaged Panes** (get-pane-display.sh fallback):
+| Scenario | Display | Color |
+|----------|---------|-------|
+| Not a git repo | `No Git \| <dirname>` | Default |
+| Git repo, no Claude | `No Claude \| <dirname> \| <branch>` | Green |
 
 **Rationale**:
 - **Accurate**: Uses official Claude Code events, not terminal parsing

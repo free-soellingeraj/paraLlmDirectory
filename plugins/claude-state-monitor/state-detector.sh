@@ -165,7 +165,14 @@ write_display() {
         *)       color="$COLOR_WORKING" ;;
     esac
 
-    local display="#[fg=$color]$PROJECT | $BRANCH#[default]"
+    local label
+    case "$state" in
+        ready)   label="$LABEL_READY" ;;
+        working) label="$LABEL_WORKING" ;;
+        *)       label="$LABEL_WORKING" ;;
+    esac
+
+    local display="#[fg=$color]$label | $PROJECT | $BRANCH#[default]"
     local safe_id="${PANE_ID//\%/}"
     echo "$display" > "$DISPLAY_DIR/$safe_id"
 }

@@ -30,7 +30,7 @@ This plugin uses tmux's `pipe-pane` feature to stream pane output in real-time a
 |------|---------|
 | `state-detector.sh` | Per-pane stream processor. Receives piped output, detects state, updates visuals. |
 | `monitor-manager.sh` | Lifecycle manager. Attaches/detaches pipe-pane for Command Center panes. |
-| `get-pane-display.sh` | Helper for tmux pane-border-format. Looks up display file by pane index. |
+| `get-pane-display.sh` | Helper for tmux pane-border-format. Looks up display file by pane ID. |
 | `README.md` | This documentation |
 
 ## How It Works

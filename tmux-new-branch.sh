@@ -48,8 +48,9 @@ create_feature_window() {
 
         # Initialize display file for the new pane
         local safe_id="${new_pane_id//\%/}"
-        mkdir -p /tmp/claude-pane-display
-        echo "Waiting for Input | $branch_name | $project_name" > "/tmp/claude-pane-display/$safe_id"
+        local display_dir="$PARA_LLM_ROOT/recovery/pane-display"
+        mkdir -p "$display_dir"
+        echo "#[fg=green]No Claude | $project_name | $branch_name#[default]" > "$display_dir/$safe_id"
 
         # Start state monitor for the new pane
         local monitor_script
