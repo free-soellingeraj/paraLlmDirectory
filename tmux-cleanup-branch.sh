@@ -126,51 +126,80 @@ main() {
                 step=3
                 ;;
             3)
-                # Check for unpushed changes
-                CLONE_DIR=$(find "$ENV_DIR" -maxdepth 1 -type d ! -name "$(basename "$ENV_DIR")" | head -1)
-                if [[ -d "$CLONE_DIR/.git" ]]; then
-                    cd "$CLONE_DIR" || exit 1
-                    UNPUSHED=$(git log --oneline @{u}.. 2>/dev/null | wc -l | tr -d ' ')
-                    if [[ "$UNPUSHED" -gt 0 ]]; then
-                        echo "WARNING: $UNPUSHED unpushed commit(s) detected!"
-                        FORCE=$(select_force_confirm)
-                        if [[ -z "$FORCE" ]]; then
-                            exit 0
-                        elif [[ "$FORCE" == "← Back" ]]; then
-                            step=2
-                            continue
-                        elif [[ "$FORCE" == "No - cancel" ]]; then
-                            echo "Cancelled."
-                            sleep 1
-                            exit 0
+                # Check for unpushed changes in ALL repos
+                local total_unpushed=0
+                local repos_with_unpushed=""
+                for clone_dir in "$ENV_DIR"/*/; do
+                    if [[ -d "$clone_dir/.git" ]]; then
+                        local unpushed
+                        unpushed=$(git -C "$clone_dir" log --oneline @{u}.. 2>/dev/null | wc -l | tr -d ' ')
+                        if [[ "$unpushed" -gt 0 ]]; then
+                            total_unpushed=$((total_unpushed + unpushed))
+                            repos_with_unpushed+="  - $(basename "$clone_dir"): $unpushed commit(s)\n"
                         fi
+                    fi
+                done
+
+                if [[ "$total_unpushed" -gt 0 ]]; then
+                    echo "WARNING: Unpushed commits detected!"
+                    echo -e "$repos_with_unpushed"
+                    FORCE=$(select_force_confirm)
+                    if [[ -z "$FORCE" ]]; then
+                        exit 0
+                    elif [[ "$FORCE" == "← Back" ]]; then
+                        step=2
+                        continue
+                    elif [[ "$FORCE" == "No - cancel" ]]; then
+                        echo "Cancelled."
+                        sleep 1
+                        exit 0
                     fi
                 fi
 
                 # Extract branch name from env name (everything after first dash)
                 BRANCH_NAME="${ENV_NAME#*-}"
 
-                # Run teardown hook if it exists
-                if [[ -f "$CLONE_DIR/paraLlm_teardown.sh" ]]; then
-                    echo "Running teardown hook..."
-                    (cd "$CLONE_DIR" && ./paraLlm_teardown.sh)
-                fi
+                # Run teardown hook in each repo if it exists
+                for clone_dir in "$ENV_DIR"/*/; do
+                    if [[ -f "$clone_dir/paraLlm_teardown.sh" ]]; then
+                        echo "Running teardown hook in $(basename "$clone_dir")..."
+                        (cd "$clone_dir" && ./paraLlm_teardown.sh)
+                    fi
+                done
 
                 # Kill any tmux windows/panes with this branch name
                 if in_command_center; then
                     # In command center: find and kill the pane for this branch
-                    # Look up pane by checking the state file
+                    local pane_killed=false
+
+                    # Method 1: Look up pane by checking the state file
                     SESSION_NAME=$(tmux display-message -p '#{session_name}')
                     STATE_FILE="/tmp/tmux-command-center-state-${SESSION_NAME}"
                     if [[ -f "$STATE_FILE" ]]; then
-                        # Find pane ID for this branch in state file
                         local pane_to_kill
                         pane_to_kill=$(grep "|${BRANCH_NAME}|" "$STATE_FILE" 2>/dev/null | cut -d'|' -f1 | head -1)
-                        if [[ -n "$pane_to_kill" ]]; then
-                            tmux kill-pane -t "$pane_to_kill" 2>/dev/null
-                            # Reapply layout
-                            tmux select-layout -t "$COMMAND_CENTER" tiled 2>/dev/null
+                        if [[ -n "$pane_to_kill" ]] && tmux kill-pane -t "$pane_to_kill" 2>/dev/null; then
+                            pane_killed=true
                         fi
+                    fi
+
+                    # Method 2: Find pane by working directory (fallback)
+                    if [[ "$pane_killed" == false ]]; then
+                        local pane_id
+                        while IFS= read -r line; do
+                            pane_id=$(echo "$line" | cut -d: -f1)
+                            local pane_path
+                            pane_path=$(echo "$line" | cut -d: -f2-)
+                            # Check if pane's working dir is inside our env dir
+                            if [[ "$pane_path" == "$ENV_DIR"* ]]; then
+                                tmux kill-pane -t "$pane_id" 2>/dev/null && pane_killed=true
+                            fi
+                        done < <(tmux list-panes -t "$COMMAND_CENTER" -F '#{pane_id}:#{pane_current_path}' 2>/dev/null)
+                    fi
+
+                    # Reapply layout if we killed a pane
+                    if [[ "$pane_killed" == true ]]; then
+                        tmux select-layout -t "$COMMAND_CENTER" tiled 2>/dev/null
                     fi
                 else
                     # Normal mode: kill windows by name (current session only)

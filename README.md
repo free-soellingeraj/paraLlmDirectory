@@ -18,6 +18,19 @@ Tmux workflow for managing parallel Claude Code sessions across multiple feature
 
 - **Ctrl+b C**: Plain new window (original tmux behavior)
 
+- **Shift+Enter**: Insert newline in Claude Code REPL (requires iTerm2 with CSI u — see below)
+- **Mouse/trackpad**: Scroll tmux panes and click to select panes
+- **Option+drag**: Select and copy text (Cmd+C to copy, iTerm2 native selection)
+
+## Recommended Terminal
+
+**iTerm2** is recommended on macOS for the best experience. macOS Terminal.app does not support extended key sequences, so features like Shift+Enter for newlines in the Claude Code REPL will not work.
+
+To set up iTerm2:
+1. Install [iTerm2](https://iterm2.com/)
+2. Go to **Preferences > Profiles > Keys > General**
+3. Enable **"Report modifiers using CSI u"**
+
 ## Prerequisites
 
 ```bash

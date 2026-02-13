@@ -5,6 +5,14 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BOOTSTRAP_FILE="$HOME/.para-llm-root"
 
+# Parse flags
+NON_INTERACTIVE=false
+for arg in "$@"; do
+    case "$arg" in
+        -y|--yes) NON_INTERACTIVE=true ;;
+    esac
+done
+
 echo "Installing para-llm-directory..."
 echo ""
 
@@ -18,9 +26,13 @@ if [[ -f "$BOOTSTRAP_FILE" ]]; then
         echo "  Base repos directory: $CODE_DIR"
         echo "  Para-LLM root: $PARA_LLM_ROOT"
         echo ""
-        read -r -p "Keep existing settings? [Y/n]: " KEEP_CONFIG
-        if [[ "$KEEP_CONFIG" =~ ^[Nn] ]]; then
-            unset CODE_DIR PARA_LLM_ROOT
+        if [[ "$NON_INTERACTIVE" == true ]]; then
+            echo "Keeping existing settings (-y)"
+        else
+            read -r -p "Keep existing settings? [Y/n]: " KEEP_CONFIG
+            if [[ "$KEEP_CONFIG" =~ ^[Nn] ]]; then
+                unset CODE_DIR PARA_LLM_ROOT
+            fi
         fi
         echo ""
     fi
@@ -28,26 +40,36 @@ fi
 
 # Prompt for directories if not already set
 if [[ -z "$CODE_DIR" ]]; then
-    echo "Where are your base git repositories located?"
-    echo "(This is where you keep your main project checkouts)"
-    echo ""
     DEFAULT_CODE_DIR="$HOME/code"
-    read -r -p "Base repos directory [$DEFAULT_CODE_DIR]: " CODE_DIR
-    CODE_DIR="${CODE_DIR:-$DEFAULT_CODE_DIR}"
-    # Expand ~ to $HOME
-    CODE_DIR="${CODE_DIR/#\~/$HOME}"
+    if [[ "$NON_INTERACTIVE" == true ]]; then
+        CODE_DIR="$DEFAULT_CODE_DIR"
+        echo "Using default base repos directory: $CODE_DIR"
+    else
+        echo "Where are your base git repositories located?"
+        echo "(This is where you keep your main project checkouts)"
+        echo ""
+        read -r -p "Base repos directory [$DEFAULT_CODE_DIR]: " CODE_DIR
+        CODE_DIR="${CODE_DIR:-$DEFAULT_CODE_DIR}"
+        # Expand ~ to $HOME
+        CODE_DIR="${CODE_DIR/#\~/$HOME}"
+    fi
     echo ""
 fi
 
 if [[ -z "$PARA_LLM_ROOT" ]]; then
-    echo "Where should para-llm-directory store its data?"
-    echo "(Environments, recovery state, and plugins live here)"
-    echo ""
     DEFAULT_PARA_LLM_ROOT="$CODE_DIR/.para-llm-directory"
-    read -r -p "Para-LLM root [$DEFAULT_PARA_LLM_ROOT]: " PARA_LLM_ROOT
-    PARA_LLM_ROOT="${PARA_LLM_ROOT:-$DEFAULT_PARA_LLM_ROOT}"
-    # Expand ~ to $HOME
-    PARA_LLM_ROOT="${PARA_LLM_ROOT/#\~/$HOME}"
+    if [[ "$NON_INTERACTIVE" == true ]]; then
+        PARA_LLM_ROOT="$DEFAULT_PARA_LLM_ROOT"
+        echo "Using default para-llm root: $PARA_LLM_ROOT"
+    else
+        echo "Where should para-llm-directory store its data?"
+        echo "(Environments, recovery state, and plugins live here)"
+        echo ""
+        read -r -p "Para-LLM root [$DEFAULT_PARA_LLM_ROOT]: " PARA_LLM_ROOT
+        PARA_LLM_ROOT="${PARA_LLM_ROOT:-$DEFAULT_PARA_LLM_ROOT}"
+        # Expand ~ to $HOME
+        PARA_LLM_ROOT="${PARA_LLM_ROOT/#\~/$HOME}"
+    fi
     echo ""
 fi
 
@@ -224,6 +246,16 @@ echo "Adding bindings pointing to: $SCRIPT_DIR"
 cat >> ~/.tmux.conf << EOF
 
 # para-llm-directory bindings
+
+# Enable extended keys so Shift+Enter passes through to Claude Code as newline
+set -s extended-keys on
+set -as terminal-features 'xterm*:extkeys'
+
+# Enable mouse/trackpad scrolling and pane selection
+set -g mouse on
+
+# Copy text: Option+drag to select, then Cmd+C to copy (iTerm2 native selection)
+
 # Ctrl+b c: interactive project + branch selection, creates clone in envs/
 bind-key c display-popup -E -w 60% -h 60% "$SCRIPT_DIR/tmux-new-branch.sh"
 
