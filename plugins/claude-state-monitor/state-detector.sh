@@ -157,15 +157,15 @@ update_border_style() {
 # Write display string for pane-border-format
 write_display() {
     local state="$1"
-    local label
+    local color
 
     case "$state" in
-        ready)   label="$LABEL_READY" ;;
-        working) label="$LABEL_WORKING" ;;
-        *)       label="$LABEL_WORKING" ;;
+        ready)   color="$COLOR_READY" ;;
+        working) color="$COLOR_WORKING" ;;
+        *)       color="$COLOR_WORKING" ;;
     esac
 
-    local display="$label | $BRANCH | $PROJECT"
+    local display="#[fg=$color]$PROJECT | $BRANCH#[default]"
     local safe_id="${PANE_ID//\%/}"
     echo "$display" > "$DISPLAY_DIR/$safe_id"
 }

@@ -217,7 +217,7 @@ create_command_center() {
     mkdir -p "$PANE_DISPLAY_DIR"
     while IFS='|' read -r pane_id name origin project; do
         local safe_id="${pane_id//\%/}"
-        echo "${project} | ${name}" > "$PANE_DISPLAY_DIR/$safe_id"
+        echo "#[fg=green]${project} | ${name}#[default]" > "$PANE_DISPLAY_DIR/$safe_id"
     done < "$STATE_FILE"
 
     # Select first pane
