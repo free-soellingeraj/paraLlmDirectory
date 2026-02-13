@@ -186,6 +186,10 @@ update_state() {
 cleanup() {
     tmux set-option -p -t "$PANE_ID" -u pane-border-style 2>/dev/null
 
+    # Remove display file for this pane
+    local safe_id="${PANE_ID//\%/}"
+    rm -f "$DISPLAY_DIR/$safe_id" 2>/dev/null
+
     # Remove pane mapping file
     local pane_cwd
     pane_cwd=$(tmux display-message -p -t "$PANE_ID" '#{pane_current_path}' 2>/dev/null)

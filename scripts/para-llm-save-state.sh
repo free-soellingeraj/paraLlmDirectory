@@ -92,6 +92,19 @@ SESSION_NAME=$(echo "$PANE_DATA" | head -1 | cut -d'|' -f1)
     done <<< "$PANE_DATA"
 } > "$STATE_FILE.tmp"
 
+# Clean up stale pane display files (from dead panes)
+DISPLAY_DIR="$PARA_LLM_ROOT/recovery/pane-display"
+if [[ -d "$DISPLAY_DIR" ]]; then
+    ACTIVE_PANE_IDS=$(tmux list-panes -a -F '#{pane_id}' 2>/dev/null | sed 's/%//')
+    for display_file in "$DISPLAY_DIR"/*; do
+        [[ -f "$display_file" ]] || continue
+        file_id=$(basename "$display_file")
+        if ! echo "$ACTIVE_PANE_IDS" | grep -qxF "$file_id"; then
+            rm -f "$display_file"
+        fi
+    done
+fi
+
 # Only write if we found at least one env pane
 ENTRY_COUNT=$(grep -c "^[^#]" "$STATE_FILE.tmp" 2>/dev/null | tail -1)
 # Subtract 1 for the header line
