@@ -167,6 +167,28 @@ select_remote_branch() {
     } | fzf --prompt="Select remote branch: " --height=40% --reverse
 }
 
+# Find existing multi-repo environments containing all the selected repos
+select_existing_multi_repo_clone() {
+    local repos=("$@")
+    {
+        echo "← Back"
+        for dir in "$ENVS_DIR"/*/; do
+            if [[ -d "$dir" ]]; then
+                local all_found=true
+                for repo in "${repos[@]}"; do
+                    if [[ ! -d "${dir}${repo}" ]]; then
+                        all_found=false
+                        break
+                    fi
+                done
+                if [[ "$all_found" == true ]]; then
+                    basename "$dir"
+                fi
+            fi
+        done 2>/dev/null | sort
+    } | fzf --prompt="Select environment: " --height=40% --reverse
+}
+
 select_resume_or_new() {
     printf "← Back\nResume - continue existing local clone\nAttach - checkout existing remote branch\nNew - create a new feature branch" | \
         fzf --prompt="What would you like to do? " --height=16% --reverse
@@ -242,15 +264,6 @@ main() {
                         echo "  - $repo"
                     done
                     echo ""
-                    echo -n "Project name (or 'back'): "
-                    read -r PROJECT_NAME
-                    if [[ -z "$PROJECT_NAME" ]]; then
-                        exit 0
-                    elif [[ "$PROJECT_NAME" == "back" ]]; then
-                        continue  # Go back to repo selection
-                    fi
-                    # Use project name for env naming
-                    REPO_NAME="$PROJECT_NAME"
                     # Use first repo for git operations (branch listing, etc.)
                     REPO_ROOT="${CODE_DIR}/${REPO_NAMES[0]}"
                 else
@@ -286,30 +299,54 @@ main() {
                 esac
                 ;;
             3a)
-                # Step 3a: Select existing branch for this project
-                BRANCH_NAME=$(select_existing_clone "$REPO_NAME")
-                if [[ -z "$BRANCH_NAME" ]]; then
-                    exit 0
-                elif [[ "$BRANCH_NAME" == "← Back" ]]; then
-                    step=2
-                    continue
-                fi
+                if [[ "$IS_MULTI_REPO" == true ]]; then
+                    # Multi-repo: find environments containing all selected repos
+                    local selected_env
+                    selected_env=$(select_existing_multi_repo_clone "${REPO_NAMES[@]}")
+                    if [[ -z "$selected_env" ]]; then
+                        exit 0
+                    elif [[ "$selected_env" == "← Back" ]]; then
+                        step=2
+                        continue
+                    fi
 
-                ENV_DIR="${ENVS_DIR}/${REPO_NAME}-${BRANCH_NAME}"
-                CLONE_DIR="${ENV_DIR}/${REPO_NAME}"
-
-                create_feature_window "$BRANCH_NAME" "$CLONE_DIR"
-                # Run setup hook if it exists
-                if [[ -f "$CLONE_DIR/paraLlm_setup.sh" ]]; then
-                    tmux send-keys "./paraLlm_setup.sh && claude --dangerously-skip-permissions --resume" Enter
-                else
+                    ENV_DIR="${ENVS_DIR}/${selected_env}"
+                    PROJECT_NAME="$selected_env"
+                    local window_name="${PROJECT_NAME} multi-repo (${REPO_COUNT})"
+                    create_feature_window "$window_name" "$ENV_DIR"
                     tmux send-keys "claude --dangerously-skip-permissions --resume" Enter
+                    exit 0
+                else
+                    # Step 3a: Select existing branch for this project
+                    BRANCH_NAME=$(select_existing_clone "$REPO_NAME")
+                    if [[ -z "$BRANCH_NAME" ]]; then
+                        exit 0
+                    elif [[ "$BRANCH_NAME" == "← Back" ]]; then
+                        step=2
+                        continue
+                    fi
+
+                    ENV_DIR="${ENVS_DIR}/${REPO_NAME}-${BRANCH_NAME}"
+                    CLONE_DIR="${ENV_DIR}/${REPO_NAME}"
+
+                    create_feature_window "$BRANCH_NAME" "$CLONE_DIR"
+                    # Run setup hook if it exists
+                    if [[ -f "$CLONE_DIR/paraLlm_setup.sh" ]]; then
+                        tmux send-keys "./paraLlm_setup.sh && claude --dangerously-skip-permissions --resume" Enter
+                    else
+                        tmux send-keys "claude --dangerously-skip-permissions --resume" Enter
+                    fi
+                    exit 0
                 fi
-                exit 0
                 ;;
             3c)
                 # Step 3c: Select existing remote branch to attach to
-                BRANCH_NAME=$(select_remote_branch "$REPO_ROOT" "$REPO_NAME")
+                if [[ "$IS_MULTI_REPO" == true ]]; then
+                    # Multi-repo: use first repo for branch listing, no project name filter
+                    BRANCH_NAME=$(select_remote_branch "$REPO_ROOT" "__multi_repo_no_filter__")
+                else
+                    BRANCH_NAME=$(select_remote_branch "$REPO_ROOT" "$REPO_NAME")
+                fi
                 if [[ -z "$BRANCH_NAME" ]]; then
                     exit 0
                 elif [[ "$BRANCH_NAME" == "← Back" ]]; then
@@ -317,7 +354,12 @@ main() {
                     continue
                 fi
 
-                ENV_DIR="${ENVS_DIR}/${REPO_NAME}-${BRANCH_NAME}"
+                if [[ "$IS_MULTI_REPO" == true ]]; then
+                    PROJECT_NAME="$BRANCH_NAME"
+                    ENV_DIR="${ENVS_DIR}/${BRANCH_NAME}"
+                else
+                    ENV_DIR="${ENVS_DIR}/${REPO_NAME}-${BRANCH_NAME}"
+                fi
 
                 # Create env directory
                 mkdir -p "$ENV_DIR"
@@ -375,31 +417,49 @@ main() {
                 exit 0
                 ;;
             3b)
-                # Step 3b: Enter new branch name
-                echo -n "New branch/feature name (or 'back'): "
-                read -r BRANCH_NAME
+                # Step 3b: Enter new branch/project name
+                if [[ "$IS_MULTI_REPO" == true ]]; then
+                    echo -n "Project name (or 'back'): "
+                else
+                    echo -n "New branch/feature name (or 'back'): "
+                fi
+                read -r INPUT_NAME
 
-                if [[ -z "$BRANCH_NAME" ]]; then
+                if [[ -z "$INPUT_NAME" ]]; then
                     exit 0
-                elif [[ "$BRANCH_NAME" == "back" ]]; then
+                elif [[ "$INPUT_NAME" == "back" ]]; then
                     step=2
                     continue
                 fi
 
-                ENV_DIR="${ENVS_DIR}/${REPO_NAME}-${BRANCH_NAME}"
+                if [[ "$IS_MULTI_REPO" == true ]]; then
+                    # Multi-repo: project name is used as branch name
+                    PROJECT_NAME="$INPUT_NAME"
+                    BRANCH_NAME="$INPUT_NAME"
+                    REPO_NAME="$INPUT_NAME"
+                    ENV_DIR="${ENVS_DIR}/${PROJECT_NAME}"
+                else
+                    BRANCH_NAME="$INPUT_NAME"
+                    ENV_DIR="${ENVS_DIR}/${REPO_NAME}-${BRANCH_NAME}"
+                fi
 
                 # Check if env already exists
                 if [[ -d "$ENV_DIR" ]]; then
                     echo "Directory already exists at $ENV_DIR"
                     echo "Opening existing clone..."
                     sleep 1
-                    CLONE_DIR="${ENV_DIR}/${REPO_NAME}"
-                    create_feature_window "$BRANCH_NAME" "$CLONE_DIR"
-                    # Run setup hook if it exists
-                    if [[ -f "$CLONE_DIR/paraLlm_setup.sh" ]]; then
-                        tmux send-keys "./paraLlm_setup.sh && claude --dangerously-skip-permissions --resume" Enter
-                    else
+                    if [[ "$IS_MULTI_REPO" == true ]]; then
+                        local window_name="${PROJECT_NAME} multi-repo (${REPO_COUNT})"
+                        create_feature_window "$window_name" "$ENV_DIR"
                         tmux send-keys "claude --dangerously-skip-permissions --resume" Enter
+                    else
+                        CLONE_DIR="${ENV_DIR}/${REPO_NAME}"
+                        create_feature_window "$BRANCH_NAME" "$CLONE_DIR"
+                        if [[ -f "$CLONE_DIR/paraLlm_setup.sh" ]]; then
+                            tmux send-keys "./paraLlm_setup.sh && claude --dangerously-skip-permissions --resume" Enter
+                        else
+                            tmux send-keys "claude --dangerously-skip-permissions --resume" Enter
+                        fi
                     fi
                     exit 0
                 fi

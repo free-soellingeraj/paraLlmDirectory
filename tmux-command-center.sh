@@ -128,9 +128,9 @@ discover_windows() {
     local current_session
     current_session=$(tmux display-message -p '#{session_name}')
 
-    # List all windows in current session: session:index window_name pane_id pane_current_path
-    tmux list-windows -t "$current_session" -F '#{session_name}:#{window_index} #{window_name} #{pane_id} #{pane_current_path}' 2>/dev/null | \
-    while read -r session_window window_name pane_id pane_path; do
+    # List all windows in current session (pipe-delimited to handle spaces in names)
+    tmux list-windows -t "$current_session" -F '#{session_name}:#{window_index}|#{window_name}|#{pane_id}|#{pane_current_path}' 2>/dev/null | \
+    while IFS='|' read -r session_window window_name pane_id pane_path; do
         # Don't include command center itself
         if [[ "$window_name" != "$COMMAND_CENTER" ]]; then
             # Extract project name from path (last directory component)
