@@ -15,6 +15,15 @@ ENVS_DIR="$PARA_LLM_ROOT/envs"
 # Ensure recovery directory exists
 mkdir -p "$PARA_LLM_ROOT/recovery"
 
+# Exit command center before saving (so restore gets individual windows)
+COMMAND_CENTER="command-center"
+if tmux list-windows -F '#{window_name}' 2>/dev/null | grep -qxF "$COMMAND_CENTER"; then
+    # Command center is active - restore it to normal windows first
+    "$PARA_LLM_ROOT/scripts/tmux-command-center.sh" 2>/dev/null || true
+    # Brief pause to let tmux settle
+    sleep 0.2
+fi
+
 STATE_FILE="$PARA_LLM_ROOT/recovery/session-state"
 TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%S")
 

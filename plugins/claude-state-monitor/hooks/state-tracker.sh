@@ -97,6 +97,25 @@ if [[ -n "$CWD" ]]; then
 
     # Direct tmux update for real-time feedback
     MAPPING_FILE="$PANE_MAPPING_DIR/by-cwd/$CWD_SAFE"
+
+    # Auto-create mapping if it doesn't exist (for panes not created via para-llm)
+    if [[ ! -f "$MAPPING_FILE" ]]; then
+        # Try to detect pane ID from tmux (find pane with matching CWD)
+        DETECTED_PANE=$(tmux list-panes -a -F '#{pane_id}|#{pane_current_path}' 2>/dev/null | grep "|${CWD}$" | head -1 | cut -d'|' -f1)
+        if [[ -n "$DETECTED_PANE" ]]; then
+            # Extract project and branch from path or git
+            DETECTED_PROJECT=$(basename "$CWD")
+            DETECTED_BRANCH=$(git -C "$CWD" branch --show-current 2>/dev/null || echo "main")
+            mkdir -p "$PANE_MAPPING_DIR/by-cwd"
+            cat > "$MAPPING_FILE" << MAPEOF
+PANE_ID=$DETECTED_PANE
+PROJECT=$DETECTED_PROJECT
+BRANCH=$DETECTED_BRANCH
+CWD=$CWD
+MAPEOF
+        fi
+    fi
+
     if [[ -f "$MAPPING_FILE" ]]; then
         # Read pane mapping (expected format: KEY=VALUE lines)
         PANE_ID=$(grep '^PANE_ID=' "$MAPPING_FILE" | cut -d'=' -f2-)
@@ -130,8 +149,8 @@ if [[ -n "$CWD" ]]; then
             tmux set-option -p -t "$PANE_ID" -u pane-border-style 2>/dev/null || true
         fi
 
-        # Write display file for pane-border-format
-        DISPLAY_STRING="$LABEL | $BRANCH | $PROJECT"
+        # Write display file for pane-border-format (with color codes)
+        DISPLAY_STRING="#[fg=$COLOR]$PROJECT | $BRANCH#[default]"
         SAFE_PANE_ID="${PANE_ID//\%/}"
         mkdir -p "$DISPLAY_DIR"
         echo "$DISPLAY_STRING" > "$DISPLAY_DIR/$SAFE_PANE_ID"
