@@ -95,6 +95,9 @@ cat > "$PARA_LLM_ROOT/config" << EOF
 
 # Directory containing your base git repositories
 CODE_DIR="$CODE_DIR"
+
+# Directory where para-llm-directory is installed (source scripts)
+INSTALL_DIR="$SCRIPT_DIR"
 EOF
 
 echo "Configuration saved:"
