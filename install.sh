@@ -300,6 +300,12 @@ set -g pane-border-format '#{?pane_active,#[reverse],} #{window_index}: #{@pane_
 EOF
 echo "Added bindings to ~/.tmux.conf"
 
+# Kill any running state-detector processes (they'll restart with new code when command center reopens)
+if pgrep -f "state-detector.sh" >/dev/null 2>&1; then
+    pkill -f "state-detector.sh" 2>/dev/null || true
+    echo "Stopped old state-detector processes (restart command center to pick up new code)"
+fi
+
 # Reload tmux config if tmux is running
 if tmux list-sessions &> /dev/null; then
     tmux source-file ~/.tmux.conf
