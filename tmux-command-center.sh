@@ -124,10 +124,15 @@ restore_command_center() {
         fi
     done < "$STATE_FILE"
 
-    # Command center should be auto-killed when last pane is broken out
-    # But try to kill it anyway in case it still exists
+    # tmux auto-kills the window when the last pane is broken out.
+    # If any untracked panes remain, break them out too instead of killing them.
     if command_center_exists; then
-        tmux kill-window -t "$COMMAND_CENTER" 2>/dev/null
+        # Break out any remaining panes that weren't in the state file
+        tmux list-panes -t "$COMMAND_CENTER" -F '#{pane_id}|#{pane_current_path}' 2>/dev/null | while IFS='|' read -r remain_id remain_path; do
+            local remain_name
+            remain_name=$(basename "$remain_path")
+            tmux break-pane -s "$remain_id" -n "$remain_name" 2>/dev/null || true
+        done
     fi
 
     # Clean up state file
@@ -206,18 +211,14 @@ create_command_center() {
 
     # Enable pane border status to show window names at top of each tile
     tmux set-window-option -t "$COMMAND_CENTER" pane-border-status top
-    # Use dynamic format that reads from display files written by the state monitor
-    # Helper script looks up pane_id and reads the corresponding display file
+    # Use @pane_display option for instant updates (no #() caching delay)
     # #{?pane_active,** , } adds ** around active pane (handled by tmux, not script)
-    local display_helper="$SCRIPT_DIR/plugins/claude-state-monitor/get-pane-display.sh"
     tmux set-window-option -t "$COMMAND_CENTER" pane-border-format \
-        "#{?pane_active,** , }#{pane_index}: #($display_helper #{pane_id})#{?pane_active, **,} "
+        "#{?pane_active,** , }#{pane_index}: #{@pane_display}#{?pane_active, **,} "
 
-    # Initialize display files with project | branch before monitor starts
-    mkdir -p "$PANE_DISPLAY_DIR"
+    # Initialize pane display options
     while IFS='|' read -r pane_id name origin project; do
-        local safe_id="${pane_id//\%/}"
-        echo "#[fg=green]Waiting for Input | ${project} | ${name}#[default]" > "$PANE_DISPLAY_DIR/$safe_id"
+        tmux set-option -p -t "$pane_id" @pane_display "#[fg=green]Waiting for Input | ${project} | ${name}#[default]" 2>/dev/null || true
     done < "$STATE_FILE"
 
     # Select first pane
