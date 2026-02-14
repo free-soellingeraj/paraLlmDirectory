@@ -72,17 +72,18 @@ EOF
 # Initialize pane mapping
 create_pane_mapping
 
-# Check if Claude prompt (❯) is at the start of a line (active prompt, not in history)
-is_prompt_visible() {
-    local pane_content
-    pane_content=$(tmux capture-pane -t "$PANE_ID" -p -S -3 2>/dev/null)
+# Check if Claude is actively working (not waiting for input)
+is_claude_working() {
+    local bottom_lines
+    # When Claude is working, its status bar shows "esc to interrupt"
+    # When idle/waiting for input, this text is absent
+    # Use tail -3 because tmux capture-pane often has trailing empty lines
+    bottom_lines=$(tmux capture-pane -t "$PANE_ID" -p 2>/dev/null | tail -3)
 
-    # Look for ❯ at the start of a line (with optional leading spaces)
-    # This distinguishes the active prompt from ❯ embedded in conversation history
-    if echo "$pane_content" | grep -qE '^[[:space:]]*❯'; then
-        return 0  # Active prompt visible
+    if echo "$bottom_lines" | grep -qF 'esc to interrupt'; then
+        return 0  # Working
     else
-        return 1  # No active prompt
+        return 1  # Idle
     fi
 }
 
@@ -121,11 +122,11 @@ is_claude_session() {
 # Detect state for this pane
 detect_state() {
     if is_claude_session; then
-        # Claude session: check prompt visibility
-        if is_prompt_visible; then
-            echo "ready"
-        else
+        # Claude session: check if "esc to interrupt" is in the status bar
+        if is_claude_working; then
             echo "working"
+        else
+            echo "ready"
         fi
     else
         # Regular terminal: check for running commands
@@ -173,8 +174,7 @@ write_display() {
     esac
 
     local display="#[fg=$color]$label | $PROJECT | $BRANCH#[default]"
-    local safe_id="${PANE_ID//\%/}"
-    echo "$display" > "$DISPLAY_DIR/$safe_id"
+    tmux set-option -p -t "$PANE_ID" @pane_display "$display" 2>/dev/null || true
 }
 
 # Update if state changed
@@ -192,10 +192,7 @@ update_state() {
 # Cleanup on exit
 cleanup() {
     tmux set-option -p -t "$PANE_ID" -u pane-border-style 2>/dev/null
-
-    # Remove display file for this pane
-    local safe_id="${PANE_ID//\%/}"
-    rm -f "$DISPLAY_DIR/$safe_id" 2>/dev/null
+    tmux set-option -p -t "$PANE_ID" -u @pane_display 2>/dev/null
 
     # Remove pane mapping file
     local pane_cwd
