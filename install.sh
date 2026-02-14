@@ -109,6 +109,66 @@ STATUS_LINE_EMOJI=0
 # STATUS_LINE_PREFIX="Claude"
 EOF
 
+# --- Optional: Speech-to-text plugin ---
+STT_ENABLED=false
+if [[ "$NON_INTERACTIVE" == true ]]; then
+    echo "Skipping STT plugin (non-interactive mode)"
+else
+    echo ""
+    echo "Optional: Speech-to-text (STT) plugin"
+    echo "  Adds Ctrl+b a to dictate into the active pane using whisper.cpp"
+    echo "  Runs fully offline - no API keys or cloud calls"
+    echo ""
+    echo "  Dependencies (installed via homebrew):"
+    echo "    sox          ~3 MB   (audio recording)"
+    echo "    whisper-cpp  ~5 MB   (speech recognition engine)"
+    echo "    whisper model ~142 MB (ggml-base.en, auto-downloaded on first use)"
+    echo ""
+    read -r -p "Install STT plugin? [y/N]: " stt_choice
+    if [[ "$stt_choice" =~ ^[Yy] ]]; then
+        STT_ENABLED=true
+    fi
+fi
+
+if [[ "$STT_ENABLED" == true ]]; then
+    echo ""
+    echo "Setting up STT plugin..."
+
+    # Check/install sox
+    if ! command -v rec &>/dev/null; then
+        echo "  Installing sox (audio recording)..."
+        brew install sox 2>/dev/null || echo "  Warning: Failed to install sox. Install manually: brew install sox"
+    else
+        echo "  sox already installed"
+    fi
+
+    # Check/install whisper-cpp
+    if ! command -v whisper-cli &>/dev/null && ! command -v whisper-cpp &>/dev/null; then
+        echo "  Installing whisper-cpp (speech recognition)..."
+        brew install whisper-cpp 2>/dev/null || echo "  Warning: Failed to install whisper-cpp. Install manually: brew install whisper-cpp"
+    else
+        echo "  whisper-cpp already installed"
+    fi
+
+    echo "  Whisper model (~142 MB) will be auto-downloaded on first use"
+
+    # Save STT config
+    cat >> "$PARA_LLM_ROOT/config" << 'EOF'
+
+# Speech-to-text settings
+STT_ENABLED=1
+# STT_LANGUAGE="en"
+# STT_MODEL_PATH=""  # Override model location (default: $PARA_LLM_ROOT/plugins/stt/models/ggml-base.en.bin)
+EOF
+    echo "  STT plugin enabled (Ctrl+b a)"
+else
+    cat >> "$PARA_LLM_ROOT/config" << 'EOF'
+
+# Speech-to-text settings (disabled - re-run install.sh to enable)
+STT_ENABLED=0
+EOF
+fi
+
 echo "Configuration saved:"
 echo "  Bootstrap pointer: $BOOTSTRAP_FILE"
 echo "  Config: $PARA_LLM_ROOT/config"
@@ -134,6 +194,9 @@ chmod +x "$SCRIPT_DIR/para-llm-config.sh"
 if [[ -d "$SCRIPT_DIR/plugins/claude-state-monitor" ]]; then
     chmod +x "$SCRIPT_DIR/plugins/claude-state-monitor/"*.sh 2>/dev/null || true
     chmod +x "$SCRIPT_DIR/plugins/claude-state-monitor/hooks/"*.sh 2>/dev/null || true
+fi
+if [[ -d "$SCRIPT_DIR/plugins/stt" ]]; then
+    chmod +x "$SCRIPT_DIR/plugins/stt/"*.sh 2>/dev/null || true
 fi
 
 # Make recovery scripts executable
@@ -272,6 +335,19 @@ bind-key v run-shell "$SCRIPT_DIR/tmux-command-center.sh"
 # Ctrl+b b: Toggle broadcast mode (type in all panes at once)
 bind-key b set-window-option synchronize-panes \; display-message "Toggled broadcast mode"
 
+EOF
+
+# Conditionally add STT binding
+if [[ "$STT_ENABLED" == true ]]; then
+cat >> ~/.tmux.conf << EOF
+
+# Ctrl+b a: Toggle speech-to-text recording (press to record, press again to transcribe)
+bind-key a run-shell -b "$SCRIPT_DIR/plugins/stt/toggle-stt.sh"
+EOF
+fi
+
+cat >> ~/.tmux.conf << EOF
+
 # para-llm-directory: session recovery
 set -g @resurrect-dir '$PARA_LLM_ROOT/recovery/resurrect'
 set -g @resurrect-capture-pane-contents 'on'
@@ -290,6 +366,16 @@ bind-key R run-shell '$PARA_LLM_ROOT/scripts/para-llm-restore.sh'
 # Claude Code status in status line (shows aggregate state)
 # Appends to existing status-right, preserving user customizations
 set -ga status-right ' #($SCRIPT_DIR/plugins/claude-state-monitor/tmux-status.sh)'
+EOF
+
+# Conditionally add STT status
+if [[ "$STT_ENABLED" == true ]]; then
+cat >> ~/.tmux.conf << EOF
+set -ga status-right ' #($SCRIPT_DIR/plugins/stt/stt-status.sh)'
+EOF
+fi
+
+cat >> ~/.tmux.conf << EOF
 set -g status-interval 5
 set -g status-right-length 120
 
@@ -323,6 +409,9 @@ echo "  Ctrl+b k  - Cleanup feature branch"
 echo "  Ctrl+b v  - Command Center (tiled view of all envs)"
 echo "  Ctrl+b b  - Toggle broadcast mode (type in all panes)"
 echo "  Ctrl+b R  - Manual restore Claude sessions"
+if [[ "$STT_ENABLED" == true ]]; then
+echo "  Ctrl+b a  - Toggle speech-to-text recording"
+fi
 echo ""
 echo "Recovery:"
 echo "  Sessions auto-saved every 1 minute via tmux-continuum"
