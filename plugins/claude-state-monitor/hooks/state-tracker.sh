@@ -98,7 +98,24 @@ if [[ -n "$CWD" ]]; then
     # Direct tmux update for real-time feedback
     MAPPING_FILE="$PANE_MAPPING_DIR/by-cwd/$CWD_SAFE"
 
-    # Auto-create mapping if it doesn't exist (for panes not created via para-llm)
+    # If no exact mapping, check if CWD is a subdirectory of a known env
+    # (handles multi-repo envs where Claude works in repo subdirectories)
+    if [[ ! -f "$MAPPING_FILE" && -n "${PARA_LLM_ROOT:-}" ]]; then
+        ENVS_PREFIX="$PARA_LLM_ROOT/envs/"
+        if [[ "$CWD" == "$ENVS_PREFIX"* ]]; then
+            # Extract env name (first path component after envs/)
+            ENV_RELATIVE="${CWD#$ENVS_PREFIX}"
+            ENV_NAME="${ENV_RELATIVE%%/*}"
+            ENV_ROOT="$ENVS_PREFIX$ENV_NAME"
+            ENV_SAFE=$(echo "$ENV_ROOT" | sed 's|/|_|g' | sed 's|^_||')
+            PARENT_MAPPING="$PANE_MAPPING_DIR/by-cwd/$ENV_SAFE"
+            if [[ -f "$PARENT_MAPPING" ]]; then
+                MAPPING_FILE="$PARENT_MAPPING"
+            fi
+        fi
+    fi
+
+    # Auto-create mapping if still not found (for panes not created via para-llm)
     if [[ ! -f "$MAPPING_FILE" ]]; then
         # Try to detect pane ID from tmux (find pane with matching CWD)
         DETECTED_PANE=$(tmux list-panes -a -F '#{pane_id}|#{pane_current_path}' 2>/dev/null | grep "|${CWD}$" | head -1 | cut -d'|' -f1)
@@ -119,6 +136,13 @@ MAPEOF
     if [[ -f "$MAPPING_FILE" ]]; then
         # Read pane mapping (expected format: KEY=VALUE lines)
         PANE_ID=$(grep '^PANE_ID=' "$MAPPING_FILE" | cut -d'=' -f2-)
+
+        # Verify pane still exists (clean up stale mappings)
+        if ! tmux list-panes -a -F '#{pane_id}' 2>/dev/null | grep -qxF "$PANE_ID"; then
+            rm -f "$MAPPING_FILE"
+            exit 0
+        fi
+
         PROJECT=$(grep '^PROJECT=' "$MAPPING_FILE" | cut -d'=' -f2-)
         BRANCH=$(grep '^BRANCH=' "$MAPPING_FILE" | cut -d'=' -f2-)
 
@@ -149,11 +173,9 @@ MAPEOF
             tmux set-option -p -t "$PANE_ID" -u pane-border-style 2>/dev/null || true
         fi
 
-        # Write display file for pane-border-format (with color codes)
+        # Set pane display option directly (instant update, no file/cache delay)
         DISPLAY_STRING="#[fg=$COLOR]$LABEL | $PROJECT | $BRANCH#[default]"
-        SAFE_PANE_ID="${PANE_ID//\%/}"
-        mkdir -p "$DISPLAY_DIR"
-        echo "$DISPLAY_STRING" > "$DISPLAY_DIR/$SAFE_PANE_ID"
+        tmux set-option -p -t "$PANE_ID" @pane_display "$DISPLAY_STRING" 2>/dev/null || true
     fi
 fi
 
