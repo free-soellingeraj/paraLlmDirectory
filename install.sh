@@ -295,7 +295,7 @@ set -g status-right-length 120
 
 # Pane border titles (shows Claude state per pane)
 set -g pane-border-status top
-set -g pane-border-format '#{?pane_active,#[reverse],} #{window_index}: #($SCRIPT_DIR/plugins/claude-state-monitor/get-pane-display.sh #{pane_id}) #{?pane_active,#[noreverse],}'
+set -g pane-border-format '#{?pane_active,#[reverse],} #{window_index}: #{@pane_display} #{?pane_active,#[noreverse],}'
 # end para-llm-directory
 EOF
 echo "Added bindings to ~/.tmux.conf"

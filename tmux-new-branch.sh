@@ -37,7 +37,7 @@ create_feature_window() {
         # Add to state file so it can be restored later
         local session_name
         session_name=$(tmux display-message -p '#{session_name}')
-        local state_file="/tmp/tmux-command-center-state-${session_name}"
+        local state_file="$PARA_LLM_ROOT/recovery/command-center-state-${session_name}"
         echo "$new_pane_id|$branch_name|new|$project_name" >> "$state_file"
 
         # Join pane to command center
@@ -46,11 +46,8 @@ create_feature_window() {
         # Reapply tiled layout
         tmux select-layout -t "$COMMAND_CENTER" tiled
 
-        # Initialize display file for the new pane
-        local safe_id="${new_pane_id//\%/}"
-        local display_dir="$PARA_LLM_ROOT/recovery/pane-display"
-        mkdir -p "$display_dir"
-        echo "#[fg=green]No Claude | $project_name | $branch_name#[default]" > "$display_dir/$safe_id"
+        # Initialize pane display option
+        tmux set-option -p -t "$new_pane_id" @pane_display "#[fg=green]No Claude | $project_name | $branch_name#[default]" 2>/dev/null || true
 
         # Start state monitor for the new pane
         local monitor_script
