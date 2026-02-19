@@ -28,7 +28,11 @@ ENVS_DIR="$PARA_LLM_ROOT/envs"
 # Use defaults if CODE_DIR not set
 CODE_DIR="${CODE_DIR:-$DEFAULT_CODE_DIR}"
 
+# Credential proxy defaults
+CRED_PROXY_ENABLED="${CRED_PROXY_ENABLED:-0}"
+
 # Export for child processes
 export PARA_LLM_ROOT
 export CODE_DIR
 export ENVS_DIR
+export CRED_PROXY_ENABLED
