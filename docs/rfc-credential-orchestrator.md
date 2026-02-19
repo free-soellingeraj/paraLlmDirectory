@@ -46,6 +46,271 @@ v2 composes existing, maintained tools:
   │    └───────────────────────────────────────────┘
 ```
 
+## Data Flow Diagrams
+
+### Scenario 1: Agent calls a private REST API (e.g., `curl api.internal.example.com`)
+
+The agent's HTTP request is intercepted by Secretless Broker, which injects the auth header. The agent never sees the secret.
+
+```
+ Agent (Claude Code)                 Secretless Broker               Secret Backend          API Server
+ ─────────────────                   ─────────────────               ──────────────          ──────────
+       │                                    │                              │                      │
+       │  curl api.internal.example.com     │                              │                      │
+       │  (via HTTP_PROXY=localhost:18080)   │                              │                      │
+       │                                    │                              │                      │
+       │ ── GET /data ──────────────────▶   │                              │                      │
+       │    (no auth header)                │                              │                      │
+       │                                    │  match: host=api.internal.*  │                      │
+       │                                    │                              │                      │
+       │                                    │ ── get secret ───────────▶   │                      │
+       │                                    │    "api-internal-token"      │                      │
+       │                                    │                              │                      │
+       │                                    │ ◀── "sk-abc123..." ─────────│                      │
+       │                                    │    (stays in broker memory)  │                      │
+       │                                    │                              │                      │
+       │                                    │ ── GET /data ────────────────────────────────────▶  │
+       │                                    │    Authorization: Bearer sk-abc123...               │
+       │                                    │                              │                      │
+       │                                    │ ◀── 200 OK + JSON ──────────────────────────────── │
+       │                                    │                              │                      │
+       │ ◀── 200 OK + JSON ────────────────│                              │                      │
+       │    (auth header stripped)          │                              │                      │
+       │                                    │                              │                      │
+
+ Secret exposure: NONE in agent process. Secret lives only in Secretless Broker memory.
+ Agent sees: HTTP_PROXY=http://127.0.0.1:18080 (not a secret)
+```
+
+### Scenario 2: Agent does `git push` to a private GitHub repo
+
+Git invokes the credential helper as a subprocess. The secret passes through a pipe directly from the helper to git — the agent process never touches it.
+
+```
+ Agent (Claude Code)         git                credential-1password        1Password Vault
+ ─────────────────          ───                 ────────────────────        ───────────────
+       │                      │                         │                         │
+       │  git push origin     │                         │                         │
+       │ ─────────────────▶   │                         │                         │
+       │                      │                         │                         │
+       │                      │  needs auth for         │                         │
+       │                      │  github.com             │                         │
+       │                      │                         │                         │
+       │                      │ ── spawn helper ──────▶ │                         │
+       │                      │    stdin: host=github   │                         │
+       │                      │                         │                         │
+       │                      │                         │ ── op get item ──────▶  │
+       │                      │                         │    "GitHub PAT"         │
+       │                      │                         │                         │
+       │                      │                         │ ◀── ghp_xxxx... ──────  │
+       │                      │                         │                         │
+       │                      │ ◀── stdout pipe ──────  │                         │
+       │                      │    username=x-token     │                         │
+       │                      │    password=ghp_xxxx    │                         │
+       │                      │                         │                         │
+       │                      │ ── HTTPS push ──────────────────────────────────▶ GitHub
+       │                      │    Authorization: Basic base64(x-token:ghp_xxxx)
+       │                      │                         │                         │
+       │ ◀── push complete ── │                         │                         │
+       │    "branch pushed"   │                         │                         │
+       │                      │                         │                         │
+
+ Secret exposure: NONE in agent process.
+ - Secret flows: 1Password → credential helper → pipe → git process → HTTPS to GitHub
+ - Agent process only sees "git push" output (branch names, commit hashes)
+ - Credential helper is a subprocess of git, NOT of the agent
+```
+
+### Scenario 3: Agent does `docker pull` from a private registry (e.g., ghcr.io)
+
+Docker invokes its credential helper. Same pattern as git — secret never enters the agent's process.
+
+```
+ Agent (Claude Code)         docker              docker-credential-gcloud     GCP IAM
+ ─────────────────          ──────              ────────────────────────     ───────
+       │                      │                         │                       │
+       │  docker pull         │                         │                       │
+       │  ghcr.io/org/img     │                         │                       │
+       │ ─────────────────▶   │                         │                       │
+       │                      │                         │                       │
+       │                      │  needs auth for         │                       │
+       │                      │  ghcr.io                │                       │
+       │                      │                         │                       │
+       │                      │ ── spawn helper ──────▶ │                       │
+       │                      │    stdin: "ghcr.io"     │                       │
+       │                      │                         │                       │
+       │                      │                         │ ── get access token ▶ │
+       │                      │                         │                       │
+       │                      │                         │ ◀── token ─────────── │
+       │                      │                         │                       │
+       │                      │ ◀── JSON on stdout ──── │                       │
+       │                      │    {"Username":"_token", │                       │
+       │                      │     "Secret":"ya29..."} │                       │
+       │                      │                         │                       │
+       │                      │ ── pull with auth ──────────────────────────▶  Registry
+       │                      │                         │                       │
+       │ ◀── pull complete ── │                         │                       │
+       │    "image pulled"    │                         │                       │
+       │                      │                         │                       │
+
+ Secret exposure: NONE in agent process.
+ - Docker credential helper protocol: docker spawns helper, reads JSON from stdout
+ - Agent only sees pull progress and layer digests
+```
+
+### Scenario 4: Agent runs `gcloud` or `gh` CLI commands
+
+These CLIs manage their own OAuth tokens natively. No proxy or helper needed — tokens live in the CLI's config directory, which the agent has no reason to read.
+
+```
+ Agent (Claude Code)         gcloud CLI             GCP OAuth          GCP API
+ ─────────────────          ──────────             ─────────          ───────
+       │                      │                       │                  │
+       │  gcloud storage ls   │                       │                  │
+       │ ─────────────────▶   │                       │                  │
+       │                      │                       │                  │
+       │                      │  reads refresh token  │                  │
+       │                      │  from ~/.config/gcloud │                  │
+       │                      │  (file agent can't     │                  │
+       │                      │   read per denylist)   │                  │
+       │                      │                       │                  │
+       │                      │ ── refresh token ───▶  │                  │
+       │                      │                       │                  │
+       │                      │ ◀── access token ────  │                  │
+       │                      │    (in gcloud memory)  │                  │
+       │                      │                       │                  │
+       │                      │ ── API call + Bearer token ───────────▶  │
+       │                      │                       │                  │
+       │                      │ ◀── response ────────────────────────── │
+       │                      │                       │                  │
+       │ ◀── bucket listing ──│                       │                  │
+       │    "gs://bucket-a"   │                       │                  │
+       │    "gs://bucket-b"   │                       │                  │
+       │                      │                       │                  │
+
+ Secret exposure: NONE in agent process.
+ - Refresh token: in ~/.config/gcloud/ (blocked by .claude/settings.json denylist)
+ - Access token: in gcloud process memory only (not in agent env vars)
+ - Agent sees: command output (bucket names, resource listings, etc.)
+
+ Same pattern applies to:
+ - gh (GitHub CLI): token in ~/.config/gh/, reads/refreshes automatically
+ - az (Azure CLI): token in ~/.azure/, reads/refreshes automatically
+```
+
+### Scenario 5: Agent calls Anthropic API (passthrough — no credential injection)
+
+Some hosts should bypass the proxy entirely. Secretless Broker's passthrough list ensures these requests go direct.
+
+```
+ Agent (Claude Code)                 Secretless Broker               api.anthropic.com
+ ─────────────────                   ─────────────────               ─────────────────
+       │                                    │                              │
+       │  curl api.anthropic.com/messages   │                              │
+       │  (via HTTP_PROXY=localhost:18080)   │                              │
+       │                                    │                              │
+       │ ── POST /messages ─────────────▶   │                              │
+       │    (with agent's own API key)      │                              │
+       │                                    │                              │
+       │                                    │  passthrough: *.anthropic.com│
+       │                                    │  → forward WITHOUT injection │
+       │                                    │                              │
+       │                                    │ ── POST /messages (unchanged) ─────────────────▶ │
+       │                                    │                              │                    │
+       │                                    │ ◀── 200 OK ──────────────────────────────────── │
+       │                                    │                              │
+       │ ◀── 200 OK ───────────────────────│                              │
+       │                                    │                              │
+
+ No credential injection. Request passes through unmodified.
+ Passthrough list prevents accidental injection of wrong credentials.
+```
+
+### Scenario 6: Auth failure — agent gets a 401, user needs to fix config
+
+When a credential is expired or misconfigured, the agent sees the 401 and reports it. It does NOT try to fix auth itself.
+
+```
+ Agent (Claude Code)                 Secretless Broker               Secret Backend          API Server
+ ─────────────────                   ─────────────────               ──────────────          ──────────
+       │                                    │                              │                      │
+       │  curl api.internal.example.com     │                              │                      │
+       │ ── GET /data ──────────────────▶   │                              │                      │
+       │                                    │                              │                      │
+       │                                    │ ── get secret ───────────▶   │                      │
+       │                                    │                              │                      │
+       │                                    │ ◀── "expired-token" ────────│                      │
+       │                                    │                              │                      │
+       │                                    │ ── GET /data + expired token ────────────────────▶ │
+       │                                    │                              │                      │
+       │                                    │ ◀── 401 Unauthorized ───────────────────────────── │
+       │                                    │                              │                      │
+       │ ◀── 401 Unauthorized ─────────────│                              │                      │
+       │                                    │                              │                      │
+       │                                    │                              │                      │
+       │  "I'm getting a 401 from                                                                │
+       │   api.internal.example.com.                                                             │
+       │   The credential config may                                                             │
+       │   need updating."                                                                       │
+       │                                    │                              │                      │
+       │  (Agent does NOT attempt to                                                             │
+       │   fix auth — per CLAUDE.md                                                              │
+       │   instructions, it reports                                                              │
+       │   the issue to the user)                                                                │
+
+ Fail-safe behavior: agent cannot silently bypass auth.
+ Auth failures are visible and reported, not swallowed.
+```
+
+### Summary: Where Secrets Live
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│                        Agent Process (Claude Code)                    │
+│                                                                      │
+│  Sees:                          Never sees:                          │
+│  • HTTP_PROXY=localhost:18080   • API tokens                         │
+│  • Command output               • OAuth refresh tokens               │
+│  • HTTP status codes            • PATs / passwords                   │
+│  • File contents (code)         • Service account keys               │
+│  • Git branch names             • ~/.config/gcloud/*                 │
+│                                 • ~/.config/gh/*                     │
+│                                 • ~/.docker/config.json secrets      │
+│                                                                      │
+│  Enforced by:                                                        │
+│  • Denylist in .claude/settings.json                                 │
+│  • CLAUDE.md instructions                                            │
+│  • Secrets only exist in other processes' memory                     │
+│  • Credential helpers are subprocesses of tools, not of agent        │
+└──────────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────┐  ┌──────────────────────────┐
+│ Secretless Broker Process │  │ Credential Helper Process │
+│                          │  │ (spawned by git/docker)   │
+│  Has in memory:          │  │                          │
+│  • API tokens from vault │  │  Has in memory:          │
+│  • Injection rules       │  │  • PAT / registry token  │
+│  • TLS certificates      │  │  • Passed via stdout     │
+│                          │  │    pipe to parent tool   │
+│  Writes to disk: NOTHING │  │                          │
+│  Env vars: NOTHING       │  │  Writes to disk: NOTHING │
+└──────────────────────────┘  └──────────────────────────┘
+
+┌──────────────────────────┐
+│ CLI Tools (gcloud/gh/az) │
+│                          │
+│  Has in memory:          │
+│  • Access tokens         │
+│  • Refresh tokens        │
+│                          │
+│  On disk (protected):    │
+│  • ~/.config/gcloud/     │
+│  • ~/.config/gh/         │
+│  • ~/.azure/             │
+│  (blocked by denylist)   │
+└──────────────────────────┘
+```
+
 ## Component Breakdown
 
 ### 1. HTTP Proxy — Secretless Broker
