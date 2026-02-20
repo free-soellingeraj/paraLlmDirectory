@@ -31,7 +31,7 @@ if command -v whisper-cli &>/dev/null; then
 elif command -v whisper-cpp &>/dev/null; then
     WHISPER_BIN="whisper-cpp"
 else
-    echo "Error: whisper-cli not found. Install with: brew install whisper-cpp" >&2
+    echo "Error: whisper-cli not found. Install whisper-cpp with your package manager (e.g., brew install whisper-cpp / apt install whisper-cpp)" >&2
     exit 1
 fi
 

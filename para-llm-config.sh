@@ -7,7 +7,7 @@ set -u
 BOOTSTRAP_FILE="$HOME/.para-llm-root"
 
 # Default values (used if no bootstrap/config exists)
-DEFAULT_CODE_DIR="$HOME/code"
+DEFAULT_CODE_DIR="$(pwd)"
 DEFAULT_PARA_LLM_ROOT="$DEFAULT_CODE_DIR/.para-llm-directory"
 
 # Read PARA_LLM_ROOT from bootstrap pointer

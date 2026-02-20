@@ -13,6 +13,28 @@ for arg in "$@"; do
     esac
 done
 
+detect_package_manager() {
+    if command -v brew &>/dev/null; then echo "brew"
+    elif command -v apt-get &>/dev/null; then echo "apt"
+    elif command -v dnf &>/dev/null; then echo "dnf"
+    elif command -v pacman &>/dev/null; then echo "pacman"
+    elif command -v apk &>/dev/null; then echo "apk"
+    else echo "unknown"
+    fi
+}
+
+pkg_install() {
+    local pkg="$1"
+    case "$(detect_package_manager)" in
+        brew)   brew install "$pkg" ;;
+        apt)    sudo apt-get install -y "$pkg" ;;
+        dnf)    sudo dnf install -y "$pkg" ;;
+        pacman) sudo pacman -S --noconfirm "$pkg" ;;
+        apk)    sudo apk add "$pkg" ;;
+        *)      echo "Unknown package manager. Please install '$pkg' manually." >&2; return 1 ;;
+    esac
+}
+
 echo "Installing para-llm-directory..."
 echo ""
 
@@ -40,13 +62,13 @@ fi
 
 # Prompt for directories if not already set
 if [[ -z "$CODE_DIR" ]]; then
-    DEFAULT_CODE_DIR="$HOME/code"
+    DEFAULT_CODE_DIR="$(pwd)"
     if [[ "$NON_INTERACTIVE" == true ]]; then
         CODE_DIR="$DEFAULT_CODE_DIR"
         echo "Using default base repos directory: $CODE_DIR"
     else
         echo "Where are your base git repositories located?"
-        echo "(This is where you keep your main project checkouts)"
+        echo "(Default is the current directory)"
         echo ""
         read -r -p "Base repos directory [$DEFAULT_CODE_DIR]: " CODE_DIR
         CODE_DIR="${CODE_DIR:-$DEFAULT_CODE_DIR}"
@@ -119,7 +141,7 @@ else
     echo "  Adds Ctrl+b a to dictate into the active pane using whisper.cpp"
     echo "  Runs fully offline - no API keys or cloud calls"
     echo ""
-    echo "  Dependencies (installed via homebrew):"
+    echo "  Dependencies (installed via your package manager):"
     echo "    sox          ~3 MB   (audio recording)"
     echo "    whisper-cpp  ~5 MB   (speech recognition engine)"
     echo "    whisper model ~142 MB (ggml-base.en, auto-downloaded on first use)"
@@ -137,7 +159,7 @@ if [[ "$STT_ENABLED" == true ]]; then
     # Check/install sox
     if ! command -v rec &>/dev/null; then
         echo "  Installing sox (audio recording)..."
-        brew install sox 2>/dev/null || echo "  Warning: Failed to install sox. Install manually: brew install sox"
+        pkg_install sox 2>/dev/null || echo "  Warning: Failed to install sox. Install with your package manager."
     else
         echo "  sox already installed"
     fi
@@ -145,7 +167,7 @@ if [[ "$STT_ENABLED" == true ]]; then
     # Check/install whisper-cpp
     if ! command -v whisper-cli &>/dev/null && ! command -v whisper-cpp &>/dev/null; then
         echo "  Installing whisper-cpp (speech recognition)..."
-        brew install whisper-cpp 2>/dev/null || echo "  Warning: Failed to install whisper-cpp. Install manually: brew install whisper-cpp"
+        pkg_install whisper-cpp 2>/dev/null || echo "  Warning: Failed to install whisper-cpp. Install with your package manager."
     else
         echo "  whisper-cpp already installed"
     fi
@@ -178,8 +200,8 @@ echo ""
 
 # Check for fzf
 if ! command -v fzf &> /dev/null; then
-    echo "fzf not found. Installing via homebrew..."
-    brew install fzf
+    echo "fzf not found. Installing..."
+    pkg_install fzf
 fi
 
 # Make scripts executable

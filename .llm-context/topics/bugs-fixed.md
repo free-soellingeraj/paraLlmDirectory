@@ -113,6 +113,22 @@ Log of bugs encountered and fixed in the para-llm-directory project. Each entry 
 **Fix**: Modified `state-detector.sh` to create the pane mapping file when it starts monitoring a pane. The mapping is indexed by the pane's working directory (CWD) so that `state-tracker.sh` can look up which tmux pane corresponds to the CWD that Claude reports in its hook input.
 **Files**: `plugins/claude-state-monitor/state-detector.sh:27-47` (new create_pane_mapping function), `plugins/claude-state-monitor/state-detector.sh:166-173` (cleanup)
 
+### BUG-014: Default CODE_DIR uses ~/code instead of current directory
+**Date**: 2026-02-20
+**Symptom**: First install defaults `CODE_DIR` to `~/code` instead of the directory the user is currently in, forcing users to manually type their preferred path.
+**Cause**: `DEFAULT_CODE_DIR` was hardcoded to `$HOME/code` in both `install.sh` and `para-llm-config.sh`.
+**Fix**: Changed `DEFAULT_CODE_DIR` to `$(pwd)` so the installer defaults to wherever the user runs it from.
+**Files**: `install.sh:43`, `para-llm-config.sh:10`
+**Issue**: #43
+
+### BUG-015: Tool only supports macOS (brew) for dependency installation
+**Date**: 2026-02-20
+**Symptom**: Linux users cannot install dependencies (fzf, sox, whisper-cpp) because the installer only uses `brew install`.
+**Cause**: All package installation commands were hardcoded to use Homebrew (`brew install`).
+**Fix**: Added `detect_package_manager()` and `pkg_install()` functions that support brew, apt, dnf, pacman, and apk. Replaced all `brew install` calls with `pkg_install`. Updated error messages in STT plugin scripts to suggest generic package manager usage instead of brew-specific commands.
+**Files**: `install.sh:16-37` (new functions), `install.sh:140,148,182` (replaced calls), `plugins/stt/toggle-stt.sh:22,26`, `plugins/stt/transcribe.sh:34`
+**Issue**: #44
+
 ---
 
 ## Known Bug-Prone Areas
