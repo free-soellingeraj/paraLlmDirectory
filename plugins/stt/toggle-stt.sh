@@ -19,11 +19,11 @@ mkdir -p "$STT_DIR"
 # Check dependencies
 check_deps() {
     if ! command -v rec &>/dev/null; then
-        tmux display-message "STT Error: 'rec' not found. Install with: brew install sox"
+        tmux display-message "STT Error: 'rec' not found. Install sox with your package manager (e.g., brew install sox / apt install sox)"
         exit 1
     fi
     if ! command -v whisper-cli &>/dev/null && ! command -v whisper-cpp &>/dev/null; then
-        tmux display-message "STT Error: whisper-cli not found. Install with: brew install whisper-cpp"
+        tmux display-message "STT Error: whisper-cli not found. Install whisper-cpp with your package manager (e.g., brew install whisper-cpp / apt install whisper-cpp)"
         exit 1
     fi
 }
