@@ -217,6 +217,17 @@ main() {
                     fi
                 fi
 
+                # Stop credential proxy if running
+                if [[ -f "$ENV_DIR/.credential-proxy.pid" ]]; then
+                    local orchestrator="$SCRIPT_DIR/plugins/credential-proxy/orchestrator.sh"
+                    if [[ ! -x "$orchestrator" ]]; then
+                        orchestrator="$PARA_LLM_ROOT/plugins/credential-proxy/orchestrator.sh"
+                    fi
+                    if [[ -x "$orchestrator" ]]; then
+                        "$orchestrator" stop --env-dir "$ENV_DIR" 2>/dev/null || true
+                    fi
+                fi
+
                 # Delete the environment
                 echo "Deleting $ENV_DIR..."
                 if rm -rf "$ENV_DIR"; then
