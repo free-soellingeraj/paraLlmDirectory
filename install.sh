@@ -84,6 +84,7 @@ mkdir -p "$PARA_LLM_ROOT/recovery/pane-display"
 mkdir -p "$PARA_LLM_ROOT/scripts"
 mkdir -p "$PARA_LLM_ROOT/tmux-plugins"
 mkdir -p "$PARA_LLM_ROOT/plugins"
+mkdir -p "$PARA_LLM_ROOT/remotes"
 
 # Write bootstrap pointer
 echo "$PARA_LLM_ROOT" > "$BOOTSTRAP_FILE"
@@ -169,6 +170,14 @@ STT_ENABLED=0
 EOF
 fi
 
+# Add remote save config
+cat >> "$PARA_LLM_ROOT/config" << 'EOF'
+
+# Remote save (push state to remote on each save cycle)
+# Disable via Ctrl+b t > Disable automatic updates, or set manually
+REMOTE_SAVE_ENABLED=1
+EOF
+
 echo "Configuration saved:"
 echo "  Bootstrap pointer: $BOOTSTRAP_FILE"
 echo "  Config: $PARA_LLM_ROOT/config"
@@ -197,6 +206,10 @@ if [[ -d "$SCRIPT_DIR/plugins/claude-state-monitor" ]]; then
 fi
 if [[ -d "$SCRIPT_DIR/plugins/stt" ]]; then
     chmod +x "$SCRIPT_DIR/plugins/stt/"*.sh 2>/dev/null || true
+fi
+if [[ -d "$SCRIPT_DIR/plugins/remote-save" ]]; then
+    chmod +x "$SCRIPT_DIR/plugins/remote-save/"*.sh 2>/dev/null || true
+    chmod +x "$SCRIPT_DIR/plugins/remote-save/backends/"*.sh 2>/dev/null || true
 fi
 
 # Make recovery scripts executable
@@ -335,6 +348,9 @@ bind-key v run-shell "$SCRIPT_DIR/tmux-command-center.sh"
 # Ctrl+b b: Toggle broadcast mode (type in all panes at once)
 bind-key b set-window-option synchronize-panes \; display-message "Toggled broadcast mode"
 
+# Ctrl+b t: Remote management menu (add/remove/test/toggle remotes)
+bind-key t display-popup -E -w 60% -h 60% "$SCRIPT_DIR/plugins/remote-save/remote-manage.sh"
+
 EOF
 
 # Conditionally add STT binding
@@ -360,8 +376,8 @@ run-shell $PARA_LLM_ROOT/tmux-plugins/tmux-continuum/continuum.tmux
 # Recovery prompt on tmux start
 set-hook -g session-created 'run-shell -b "sleep 1 && $PARA_LLM_ROOT/scripts/para-llm-recovery-prompt.sh"'
 
-# Ctrl+b R: Manual restore trigger
-bind-key R run-shell '$PARA_LLM_ROOT/scripts/para-llm-restore.sh'
+# Ctrl+b r: Manual restore (local sessions)
+bind-key r run-shell '$PARA_LLM_ROOT/scripts/para-llm-restore.sh'
 
 # Claude Code status in status line (shows aggregate state)
 # Appends to existing status-right, preserving user customizations
@@ -407,14 +423,16 @@ echo "    envs/          - Feature branch environments"
 echo "    recovery/      - Session state + resurrect saves"
 echo "    scripts/       - Recovery scripts"
 echo "    tmux-plugins/  - tmux-resurrect + tmux-continuum"
-echo "    plugins/       - Claude state monitor hooks"
+echo "    plugins/       - Claude state monitor hooks, remote save"
+echo "    remotes/       - Remote save backend configs"
 echo ""
 echo "Keybindings:"
 echo "  Ctrl+b c  - Create/resume feature branch"
 echo "  Ctrl+b k  - Cleanup feature branch"
 echo "  Ctrl+b v  - Command Center (tiled view of all envs)"
 echo "  Ctrl+b b  - Toggle broadcast mode (type in all panes)"
-echo "  Ctrl+b R  - Manual restore Claude sessions"
+echo "  Ctrl+b t  - Remote management (add/test/toggle remotes)"
+echo "  Ctrl+b r  - Manual restore Claude sessions"
 if [[ "$STT_ENABLED" == true ]]; then
 echo "  Ctrl+b a  - Toggle speech-to-text recording"
 fi

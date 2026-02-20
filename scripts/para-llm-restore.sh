@@ -28,7 +28,7 @@ fi
 
 # Read saved state entries (skip comments and header)
 declare -A SAVED_ENTRIES
-while IFS='|' read -r win_name pane_path project branch had_claude; do
+while IFS='|' read -r win_name pane_path project branch had_claude git_remote; do
     # Skip comments and header
     [[ "$win_name" =~ ^# ]] && continue
     [[ "$win_name" == "window_name" ]] && continue

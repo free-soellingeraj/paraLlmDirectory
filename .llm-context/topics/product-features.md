@@ -221,6 +221,59 @@ STATUS_LINE_EMOJI=1
 
 ---
 
+### 9. Remote Workspace Save/Restore
+
+Periodically pushes workspace state to a remote storage backend so it can be restored on a fresh instance.
+
+**What gets saved**: Session state file (window names, projects, branches, git remote URLs) + config (~1KB total)
+**What does NOT get saved**: Cloned git repos (too large). On restore, repos are re-cloned from their git remotes.
+
+**Trigger**: Automatic, piggybacking on existing 1-minute tmux-resurrect save cycle (when enabled).
+
+**Remote Management** (`Ctrl+b t`):
+- Add/remove SSH remotes
+- Select active remote
+- Test connection
+- Toggle remote save on/off
+
+**Remote Restore**:
+- On tmux start with no local state: offered "Pull & Restore from remote"
+- On tmux start with local state: offered "Restore (remote)" alongside local restore
+- Full restore: pulls state, clones repos from git remotes, creates tmux windows, launches Claude
+
+**State Format** (6 columns):
+```
+window_name|pane_path|project|branch|had_claude|git_remote
+```
+
+**Remote Config** (`$PARA_LLM_ROOT/remotes/<name>`):
+```bash
+REMOTE_BACKEND="ssh"
+REMOTE_HOST="user@host"
+REMOTE_DIR="/home/user/.para-llm-remote"
+REMOTE_SSH_KEY=""
+```
+
+**Configuration** (in `$PARA_LLM_ROOT/config`):
+```bash
+REMOTE_SAVE_ENABLED=1  # On by default, disable via Ctrl+b t menu
+```
+
+**Plugin Structure**:
+```
+plugins/remote-save/
+├── remote-save.sh           # Push state to active remote (called by save hook)
+├── remote-pull.sh           # Pull state from remote
+├── remote-restore-full.sh   # Full restore: pull + clone + windows + Claude
+├── remote-manage.sh         # fzf UI for managing remotes
+└── backends/
+    └── ssh.sh               # SSH/rsync backend
+```
+
+**File**: `plugins/remote-save/`
+
+---
+
 ## Key Bindings Summary
 
 | Binding | Action |
@@ -228,6 +281,8 @@ STATUS_LINE_EMOJI=1
 | `Ctrl+b c` | Create/resume feature environment |
 | `Ctrl+b k` | Cleanup feature environment |
 | `Ctrl+b v` | Command Center (tiled view) |
+| `Ctrl+b t` | Remote management menu |
+| `Ctrl+b r` | Manual restore Claude sessions |
 
 ---
 
