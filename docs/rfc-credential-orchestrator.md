@@ -1,445 +1,518 @@
-# RFC: Credential Orchestrator Plugin for para-llm-directory (v2 — Compose Existing Tools)
+# RFC: Credential Orchestrator Plugin for para-llm-directory (v3 — Vault Ephemeral Credentials)
 
 ## Context
 
 Autonomous Claude Code agents running in para-llm tmux panes need to interact with authenticated services (APIs, git remotes, Docker registries, cloud CLIs). Today there's no credential management — agents either can't authenticate or would need raw secrets exposed in their environment.
 
-**Goal**: Transparent credential orchestration where agents **never see raw secret values**.
+**Goal**: Agents get working credentials with minimal complexity and strong security properties.
 
-## What Changed (v1 → v2)
+## Evolution: v1 → v2 → v3
 
-v1 proposed building everything from scratch: custom mitmproxy addon, custom git/docker credential helpers, custom provider plugin system, custom YAML config format. That's a large surface area to maintain.
+| Version | Approach | Code we write | Complexity |
+|---------|----------|---------------|------------|
+| v1 | Build everything from scratch (custom mitmproxy addon, custom credential helpers, custom provider plugins) | ~1,900 lines, 18 files | Very high |
+| v2 | Compose existing tools (Secretless Broker, credential-1password, git-credential-oauth) | ~200 lines, 4 files | Medium |
+| **v3** | **Vault generates ephemeral credentials, injected as env vars. No proxy, no custom helpers.** | **~150 lines, 3 files** | **Low** |
 
-v2 composes existing, maintained tools:
+### Why v3?
 
-| Concern | v1 (build from scratch) | v2 (compose existing tools) |
-|---------|------------------------|----------------------------|
-| HTTP proxy | Custom mitmproxy addon + proxy-manager.sh | **Secretless Broker** (CyberArk, 366 stars, production-grade) |
-| Git credentials | Custom `para-llm-git-credential.sh` | **credential-1password** or **git-credential-oauth** (existing helpers) |
-| Docker credentials | Custom `docker-credential-para-llm.sh` | **credential-1password** or native `docker-credential-gcloud` |
-| Secret backend | Custom provider plugin system (3 scripts) | **1Password CLI** / **gcloud CLI** / **Vault** (use directly) |
-| OAuth flows | Custom setup-oauth.sh + verify-oauth.sh | Just run `gcloud auth login`, `gh auth login` directly (they manage their own tokens) |
-| Config format | Custom credentials.yaml + yq dependency | Secretless Broker's native `secretless.yml` + existing tool configs |
-| CA management | Custom generate-ca.sh + trust-ca.sh | Secretless Broker handles its own TLS termination |
-| Our code | ~1,900 lines across 18 new files | ~200 lines: thin orchestrator + install script |
+v1 and v2 both try to prevent the agent from ever *seeing* a secret. This requires interposing on every credential channel (HTTP proxy, credential helper pipes, file permissions, denylists). That's a lot of moving parts.
+
+v3 asks a different question: **does it matter if the agent sees a credential that expires in 1 hour and is scoped to minimum permissions?**
+
+| Threat | Long-lived credential | Ephemeral (1h TTL, scoped) |
+|--------|----------------------|---------------------------|
+| Agent exfiltrates credential | Permanent unauthorized access | Useless after expiry |
+| Credential appears in logs | Permanent risk | Already expired |
+| Agent shares cred with external system | Long-term access | Brief window, auto-expires |
+| Credential committed to code | Permanent risk | Expired before review |
+| Lateral movement | Depends on scope | Tightly scoped IAM role |
+
+For developer-facing AI agents in trusted environments, **ephemeral + scoped** is sufficient security for v1 of this feature. The proxy/credential-helper architecture (v2) remains available as a hardening layer for higher-risk deployments later.
 
 ## Architecture Overview
 
 ```
-  Agent's tmux pane (Claude Code)
+  Orchestrator (runs before agent session)
   │
-  │  HTTP requests              CLI commands
-  │  ───────────┐              ─────────────┐
-  │             │                           │
-  │    ┌────────▼──────────┐    ┌───────────▼───────────────┐
-  │    │ Secretless Broker │    │  Existing credential       │
-  │    │ (CyberArk)        │    │  helpers / native auth     │
-  │    │ - header injection │    │  - git-credential-oauth    │
-  │    │ - per host/path    │    │  - credential-1password    │
-  │    │ - secrets in       │    │  - docker-credential-gcloud│
-  │    │   process memory   │    │  - gcloud auth (native)    │
-  │    └────────┬──────────┘    │  - gh auth (native)        │
-  │             │               └───────────┬───────────────┘
-  │    ┌────────▼───────────────────────────▼──────┐
-  │    │           Secret Backend (pick one)        │
-  │    │  1Password | GCP Secret Manager | Vault    │
-  │    └───────────────────────────────────────────┘
+  │  1. Authenticate to Vault
+  │  2. Generate ephemeral credentials
+  │  3. Inject as env vars into tmux pane
+  │  4. Launch Claude Code
+  │
+  ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│  Agent's tmux pane (Claude Code)                                     │
+│                                                                      │
+│  Environment:                                                        │
+│    GITHUB_TOKEN=ghs_xxxx         (1h TTL, repo:read + repo:write)    │
+│    GCP_ACCESS_TOKEN=ya29.xxxx    (1h TTL, storage.objectViewer)      │
+│    AWS_ACCESS_KEY_ID=AKIA...     (1h TTL, s3:GetObject only)         │
+│    AWS_SECRET_ACCESS_KEY=xxxx    (1h TTL)                            │
+│    DOCKER_TOKEN=dckr_xxxx        (1h TTL, pull-only)                 │
+│                                                                      │
+│  Agent uses these normally. They expire automatically.               │
+└──────────────────────────────────────────────────────────────────────┘
+  │
+  │  Session ends (Ctrl+b k or env cleanup)
+  │
+  ▼
+  Orchestrator revokes all Vault leases immediately
+  (credentials invalid even before TTL expiry)
 ```
 
 ## Data Flow Diagrams
 
-### Scenario 1: Agent calls a private REST API (e.g., `curl api.internal.example.com`)
-
-The agent's HTTP request is intercepted by Secretless Broker, which injects the auth header. The agent never sees the secret.
+### Scenario 1: Session startup — Vault issues ephemeral credentials
 
 ```
- Agent (Claude Code)                 Secretless Broker               Secret Backend          API Server
- ─────────────────                   ─────────────────               ──────────────          ──────────
-       │                                    │                              │                      │
-       │  curl api.internal.example.com     │                              │                      │
-       │  (via HTTP_PROXY=localhost:18080)   │                              │                      │
-       │                                    │                              │                      │
-       │ ── GET /data ──────────────────▶   │                              │                      │
-       │    (no auth header)                │                              │                      │
-       │                                    │  match: host=api.internal.*  │                      │
-       │                                    │                              │                      │
-       │                                    │ ── get secret ───────────▶   │                      │
-       │                                    │    "api-internal-token"      │                      │
-       │                                    │                              │                      │
-       │                                    │ ◀── "sk-abc123..." ─────────│                      │
-       │                                    │    (stays in broker memory)  │                      │
-       │                                    │                              │                      │
-       │                                    │ ── GET /data ────────────────────────────────────▶  │
-       │                                    │    Authorization: Bearer sk-abc123...               │
-       │                                    │                              │                      │
-       │                                    │ ◀── 200 OK + JSON ──────────────────────────────── │
-       │                                    │                              │                      │
-       │ ◀── 200 OK + JSON ────────────────│                              │                      │
-       │    (auth header stripped)          │                              │                      │
-       │                                    │                              │                      │
+ Orchestrator                  Vault Server               Cloud Providers
+ (tmux-new-branch.sh)         ────────────               ───────────────
+       │                            │                           │
+       │  vault login               │                           │
+       │  (AppRole / OIDC)          │                           │
+       │ ──────────────────────▶    │                           │
+       │                            │                           │
+       │ ◀── vault token ─────────  │                           │
+       │                            │                           │
+       │  vault read                │                           │
+       │  gcp/token/agent-role      │                           │
+       │ ──────────────────────▶    │                           │
+       │                            │ ── create OAuth token ──▶ │ (GCP IAM)
+       │                            │ ◀── ya29.xxxx (1h TTL) ── │
+       │ ◀── token + lease_id ────  │                           │
+       │                            │                           │
+       │  vault read                │                           │
+       │  github/token              │                           │
+       │ ──────────────────────▶    │                           │
+       │                            │ ── create install token ▶ │ (GitHub App)
+       │                            │ ◀── ghs_xxxx (1h TTL) ──  │
+       │ ◀── token + lease_id ────  │                           │
+       │                            │                           │
+       │  vault read                │                           │
+       │  aws/creds/agent-role      │                           │
+       │ ──────────────────────▶    │                           │
+       │                            │ ── STS AssumeRole ──────▶ │ (AWS IAM)
+       │                            │ ◀── temp creds (1h) ────  │
+       │ ◀── creds + lease_id ───   │                           │
+       │                            │                           │
+       │                            │                           │
+       │  Save lease IDs to         │                           │
+       │  $ENV_DIR/.vault-leases    │                           │
+       │                            │                           │
+       │  Inject into tmux pane:    │                           │
+       │  export GCP_ACCESS_TOKEN=ya29.xxxx                     │
+       │  export GITHUB_TOKEN=ghs_xxxx                          │
+       │  export AWS_ACCESS_KEY_ID=AKIA...                      │
+       │  export AWS_SECRET_ACCESS_KEY=xxxx                     │
+       │                            │                           │
+       │  Launch Claude Code        │                           │
+       │                            │                           │
 
- Secret exposure: NONE in agent process. Secret lives only in Secretless Broker memory.
- Agent sees: HTTP_PROXY=http://127.0.0.1:18080 (not a secret)
+ All credentials have 1h TTL. Vault tracks leases for early revocation.
+ Orchestrator saves lease IDs so cleanup can revoke them immediately.
 ```
 
-### Scenario 2: Agent does `git push` to a private GitHub repo
-
-Git invokes the credential helper as a subprocess. The secret passes through a pipe directly from the helper to git — the agent process never touches it.
+### Scenario 2: Agent makes an API call with ephemeral credentials
 
 ```
- Agent (Claude Code)         git                credential-1password        1Password Vault
- ─────────────────          ───                 ────────────────────        ───────────────
-       │                      │                         │                         │
-       │  git push origin     │                         │                         │
-       │ ─────────────────▶   │                         │                         │
-       │                      │                         │                         │
-       │                      │  needs auth for         │                         │
-       │                      │  github.com             │                         │
-       │                      │                         │                         │
-       │                      │ ── spawn helper ──────▶ │                         │
-       │                      │    stdin: host=github   │                         │
-       │                      │                         │                         │
-       │                      │                         │ ── op get item ──────▶  │
-       │                      │                         │    "GitHub PAT"         │
-       │                      │                         │                         │
-       │                      │                         │ ◀── ghp_xxxx... ──────  │
-       │                      │                         │                         │
-       │                      │ ◀── stdout pipe ──────  │                         │
-       │                      │    username=x-token     │                         │
-       │                      │    password=ghp_xxxx    │                         │
-       │                      │                         │                         │
-       │                      │ ── HTTPS push ──────────────────────────────────▶ GitHub
-       │                      │    Authorization: Basic base64(x-token:ghp_xxxx)
-       │                      │                         │                         │
-       │ ◀── push complete ── │                         │                         │
-       │    "branch pushed"   │                         │                         │
-       │                      │                         │                         │
+ Agent (Claude Code)                                           API Server
+ ─────────────────                                             ──────────
+       │                                                            │
+       │  curl -H "Authorization: Bearer $GCP_ACCESS_TOKEN" \       │
+       │       https://storage.googleapis.com/bucket/object         │
+       │ ──────────────────────────────────────────────────────▶    │
+       │                                                            │
+       │    Token ya29.xxxx is valid (issued <1h ago)               │
+       │    IAM role allows storage.objectViewer only               │
+       │                                                            │
+       │ ◀── 200 OK + object contents ────────────────────────────  │
+       │                                                            │
 
- Secret exposure: NONE in agent process.
- - Secret flows: 1Password → credential helper → pipe → git process → HTTPS to GitHub
- - Agent process only sees "git push" output (branch names, commit hashes)
- - Credential helper is a subprocess of git, NOT of the agent
+ No proxy. No interception. Agent uses the credential directly.
+ Security relies on: short TTL + scoped IAM permissions.
 ```
 
-### Scenario 3: Agent does `docker pull` from a private registry (e.g., ghcr.io)
-
-Docker invokes its credential helper. Same pattern as git — secret never enters the agent's process.
+### Scenario 3: Agent does `git push` with ephemeral GitHub token
 
 ```
- Agent (Claude Code)         docker              docker-credential-gcloud     GCP IAM
- ─────────────────          ──────              ────────────────────────     ───────
-       │                      │                         │                       │
-       │  docker pull         │                         │                       │
-       │  ghcr.io/org/img     │                         │                       │
-       │ ─────────────────▶   │                         │                       │
-       │                      │                         │                       │
-       │                      │  needs auth for         │                       │
-       │                      │  ghcr.io                │                       │
-       │                      │                         │                       │
-       │                      │ ── spawn helper ──────▶ │                       │
-       │                      │    stdin: "ghcr.io"     │                       │
-       │                      │                         │                       │
-       │                      │                         │ ── get access token ▶ │
-       │                      │                         │                       │
-       │                      │                         │ ◀── token ─────────── │
-       │                      │                         │                       │
-       │                      │ ◀── JSON on stdout ──── │                       │
-       │                      │    {"Username":"_token", │                       │
-       │                      │     "Secret":"ya29..."} │                       │
-       │                      │                         │                       │
-       │                      │ ── pull with auth ──────────────────────────▶  Registry
-       │                      │                         │                       │
-       │ ◀── pull complete ── │                         │                       │
-       │    "image pulled"    │                         │                       │
-       │                      │                         │                       │
+ Agent (Claude Code)                                       GitHub
+ ─────────────────                                         ──────
+       │                                                      │
+       │  GITHUB_TOKEN is set in environment                  │
+       │  (git automatically uses it via credential helper    │
+       │   or GIT_ASKPASS, or agent sets header directly)     │
+       │                                                      │
+       │  git push origin feature-branch                      │
+       │ ─────────────────────────────────────────────────▶   │
+       │    Authorization: Basic base64(x-token:ghs_xxxx)     │
+       │                                                      │
+       │    Token ghs_xxxx is valid:                          │
+       │    - GitHub App installation token                   │
+       │    - Scoped to: contents:write, pull_requests:write  │
+       │    - Expires in: 47 minutes                          │
+       │                                                      │
+       │ ◀── push accepted ──────────────────────────────────  │
+       │                                                      │
 
- Secret exposure: NONE in agent process.
- - Docker credential helper protocol: docker spawns helper, reads JSON from stdout
- - Agent only sees pull progress and layer digests
+ If agent runs for >1h and token expires mid-session:
+ - git push fails with 401
+ - Agent reports failure to user
+ - User can re-run credential injection or extend session
 ```
 
-### Scenario 4: Agent runs `gcloud` or `gh` CLI commands
-
-These CLIs manage their own OAuth tokens natively. No proxy or helper needed — tokens live in the CLI's config directory, which the agent has no reason to read.
+### Scenario 4: Agent runs `gcloud` / `gh` CLI with ephemeral credentials
 
 ```
- Agent (Claude Code)         gcloud CLI             GCP OAuth          GCP API
- ─────────────────          ──────────             ─────────          ───────
-       │                      │                       │                  │
-       │  gcloud storage ls   │                       │                  │
-       │ ─────────────────▶   │                       │                  │
-       │                      │                       │                  │
-       │                      │  reads refresh token  │                  │
-       │                      │  from ~/.config/gcloud │                  │
-       │                      │  (file agent can't     │                  │
-       │                      │   read per denylist)   │                  │
-       │                      │                       │                  │
-       │                      │ ── refresh token ───▶  │                  │
-       │                      │                       │                  │
-       │                      │ ◀── access token ────  │                  │
-       │                      │    (in gcloud memory)  │                  │
-       │                      │                       │                  │
-       │                      │ ── API call + Bearer token ───────────▶  │
-       │                      │                       │                  │
-       │                      │ ◀── response ────────────────────────── │
-       │                      │                       │                  │
-       │ ◀── bucket listing ──│                       │                  │
-       │    "gs://bucket-a"   │                       │                  │
-       │    "gs://bucket-b"   │                       │                  │
-       │                      │                       │                  │
+ Agent (Claude Code)         gcloud CLI                        GCP API
+ ─────────────────          ──────────                         ───────
+       │                      │                                    │
+       │  Environment has:    │                                    │
+       │  GCP_ACCESS_TOKEN    │                                    │
+       │  (or GOOGLE_APPLICATION_CREDENTIALS                       │
+       │   pointing to temp SA key file)                           │
+       │                      │                                    │
+       │  gcloud storage ls   │                                    │
+       │ ─────────────────▶   │                                    │
+       │                      │                                    │
+       │                      │  Uses GCP_ACCESS_TOKEN from env    │
+       │                      │  (no need for refresh token)       │
+       │                      │                                    │
+       │                      │ ── API call + Bearer ya29.xxxx ─▶  │
+       │                      │                                    │
+       │                      │ ◀── bucket listing ────────────── │
+       │                      │                                    │
+       │ ◀── gs://bucket-a ── │                                    │
+       │    gs://bucket-b     │                                    │
+       │                      │                                    │
 
- Secret exposure: NONE in agent process.
- - Refresh token: in ~/.config/gcloud/ (blocked by .claude/settings.json denylist)
- - Access token: in gcloud process memory only (not in agent env vars)
- - Agent sees: command output (bucket names, resource listings, etc.)
+ gcloud, gsutil, bq, etc. all respect the GCP_ACCESS_TOKEN env var.
+ No gcloud auth login needed. No refresh token on disk.
+ Token expires in 1h — gcloud will get a 401 after that.
 
- Same pattern applies to:
- - gh (GitHub CLI): token in ~/.config/gh/, reads/refreshes automatically
- - az (Azure CLI): token in ~/.azure/, reads/refreshes automatically
+ For gh CLI:
+ - GITHUB_TOKEN env var is natively supported
+ - gh uses it for all API calls automatically
+ - No gh auth login needed
 ```
 
-### Scenario 5: Agent calls Anthropic API (passthrough — no credential injection)
-
-Some hosts should bypass the proxy entirely. Secretless Broker's passthrough list ensures these requests go direct.
+### Scenario 5: Agent does `docker pull` with ephemeral registry token
 
 ```
- Agent (Claude Code)                 Secretless Broker               api.anthropic.com
- ─────────────────                   ─────────────────               ─────────────────
-       │                                    │                              │
-       │  curl api.anthropic.com/messages   │                              │
-       │  (via HTTP_PROXY=localhost:18080)   │                              │
-       │                                    │                              │
-       │ ── POST /messages ─────────────▶   │                              │
-       │    (with agent's own API key)      │                              │
-       │                                    │                              │
-       │                                    │  passthrough: *.anthropic.com│
-       │                                    │  → forward WITHOUT injection │
-       │                                    │                              │
-       │                                    │ ── POST /messages (unchanged) ─────────────────▶ │
-       │                                    │                              │                    │
-       │                                    │ ◀── 200 OK ──────────────────────────────────── │
-       │                                    │                              │
-       │ ◀── 200 OK ───────────────────────│                              │
-       │                                    │                              │
+ Agent (Claude Code)         docker CLI                        Registry
+ ─────────────────          ──────────                         ────────
+       │                      │                                    │
+       │  docker pull         │                                    │
+       │  us-docker.pkg.dev/  │                                    │
+       │  project/repo/img    │                                    │
+       │ ─────────────────▶   │                                    │
+       │                      │                                    │
+       │                      │  Checks ~/.docker/config.json      │
+       │                      │  credHelpers → docker-credential-  │
+       │                      │  gcloud (uses GCP_ACCESS_TOKEN)    │
+       │                      │                                    │
+       │                      │ ── pull + Bearer ya29.xxxx ─────▶  │
+       │                      │                                    │
+       │                      │ ◀── image layers ────────────────  │
+       │                      │                                    │
+       │ ◀── image pulled ──  │                                    │
+       │                      │                                    │
 
- No credential injection. Request passes through unmodified.
- Passthrough list prevents accidental injection of wrong credentials.
+ docker-credential-gcloud reads GCP_ACCESS_TOKEN from environment.
+ Same ephemeral token used for both gcloud CLI and Docker registry.
+ No separate Docker token needed for GCP registries.
+
+ For non-GCP registries (Docker Hub, GHCR):
+ - DOCKER_TOKEN injected as env var
+ - Simple GIT_ASKPASS-style helper reads from env
+ - Or: docker login with ephemeral token at session start
 ```
 
-### Scenario 6: Auth failure — agent gets a 401, user needs to fix config
-
-When a credential is expired or misconfigured, the agent sees the 401 and reports it. It does NOT try to fix auth itself.
+### Scenario 6: Session cleanup — immediate lease revocation
 
 ```
- Agent (Claude Code)                 Secretless Broker               Secret Backend          API Server
- ─────────────────                   ─────────────────               ──────────────          ──────────
-       │                                    │                              │                      │
-       │  curl api.internal.example.com     │                              │                      │
-       │ ── GET /data ──────────────────▶   │                              │                      │
-       │                                    │                              │                      │
-       │                                    │ ── get secret ───────────▶   │                      │
-       │                                    │                              │                      │
-       │                                    │ ◀── "expired-token" ────────│                      │
-       │                                    │                              │                      │
-       │                                    │ ── GET /data + expired token ────────────────────▶ │
-       │                                    │                              │                      │
-       │                                    │ ◀── 401 Unauthorized ───────────────────────────── │
-       │                                    │                              │                      │
-       │ ◀── 401 Unauthorized ─────────────│                              │                      │
-       │                                    │                              │                      │
-       │                                    │                              │                      │
-       │  "I'm getting a 401 from                                                                │
-       │   api.internal.example.com.                                                             │
-       │   The credential config may                                                             │
-       │   need updating."                                                                       │
-       │                                    │                              │                      │
-       │  (Agent does NOT attempt to                                                             │
-       │   fix auth — per CLAUDE.md                                                              │
-       │   instructions, it reports                                                              │
-       │   the issue to the user)                                                                │
+ Orchestrator                  Vault Server               Cloud Providers
+ (tmux-cleanup-branch.sh)     ────────────               ───────────────
+       │                            │                           │
+       │  Read lease IDs from       │                           │
+       │  $ENV_DIR/.vault-leases    │                           │
+       │                            │                           │
+       │  vault lease revoke        │                           │
+       │  <gcp-lease-id>            │                           │
+       │ ──────────────────────▶    │                           │
+       │                            │ ── revoke token ────────▶ │ (GCP IAM)
+       │                            │                           │
+       │  vault lease revoke        │                           │
+       │  <github-lease-id>         │                           │
+       │ ──────────────────────▶    │                           │
+       │                            │ ── revoke token ────────▶ │ (GitHub)
+       │                            │                           │
+       │  vault lease revoke        │                           │
+       │  <aws-lease-id>            │                           │
+       │ ──────────────────────▶    │                           │
+       │                            │ ── revoke creds ────────▶ │ (AWS IAM)
+       │                            │                           │
+       │  rm $ENV_DIR/.vault-leases │                           │
+       │  rm -rf $ENV_DIR           │                           │
+       │                            │                           │
 
- Fail-safe behavior: agent cannot silently bypass auth.
- Auth failures are visible and reported, not swallowed.
+ Credentials are invalidated IMMEDIATELY on cleanup.
+ Even if TTL was 1 hour, revocation makes them useless in seconds.
+ If cleanup crashes, TTL expiry is the safety net.
 ```
 
-### Summary: Where Secrets Live
+### Scenario 7: Credential expires mid-session (TTL exceeded)
+
+```
+ Agent (Claude Code)                                           API Server
+ ─────────────────                                             ──────────
+       │                                                            │
+       │  (60+ minutes into session)                                │
+       │                                                            │
+       │  curl -H "Authorization: Bearer $GCP_ACCESS_TOKEN" \       │
+       │       https://storage.googleapis.com/bucket/object         │
+       │ ──────────────────────────────────────────────────────▶    │
+       │                                                            │
+       │    Token ya29.xxxx has EXPIRED                              │
+       │                                                            │
+       │ ◀── 401 Unauthorized ─────────────────────────────────────  │
+       │                                                            │
+       │                                                            │
+       │  Agent (per CLAUDE.md):                                    │
+       │  "I'm getting a 401 from GCP Storage.                     │
+       │   My credentials may have expired.                         │
+       │   Please refresh them or extend the session."              │
+       │                                                            │
+
+ This is the expected failure mode. The user can:
+ 1. Re-run the orchestrator to get fresh credentials
+ 2. Or configure longer TTLs in Vault
+ 3. Or use Vault Agent for auto-renewal (advanced setup)
+```
+
+### Summary: Where Credentials Live in v3
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
 │                        Agent Process (Claude Code)                    │
 │                                                                      │
-│  Sees:                          Never sees:                          │
-│  • HTTP_PROXY=localhost:18080   • API tokens                         │
-│  • Command output               • OAuth refresh tokens               │
-│  • HTTP status codes            • PATs / passwords                   │
-│  • File contents (code)         • Service account keys               │
-│  • Git branch names             • ~/.config/gcloud/*                 │
-│                                 • ~/.config/gh/*                     │
-│                                 • ~/.docker/config.json secrets      │
+│  HAS (as env vars):                Properties:                       │
+│  • GITHUB_TOKEN=ghs_xxxx          • Expires in ≤1h                  │
+│  • GCP_ACCESS_TOKEN=ya29.xxxx     • Scoped to minimum IAM role      │
+│  • AWS_ACCESS_KEY_ID=AKIA...      • Unique to this session          │
+│  • AWS_SECRET_ACCESS_KEY=xxxx     • Revoked immediately on cleanup  │
+│  • DOCKER_TOKEN=dckr_xxxx         • Audited by Vault                │
 │                                                                      │
-│  Enforced by:                                                        │
-│  • Denylist in .claude/settings.json                                 │
-│  • CLAUDE.md instructions                                            │
-│  • Secrets only exist in other processes' memory                     │
-│  • Credential helpers are subprocesses of tools, not of agent        │
+│  CANNOT DO (even with the credential):                               │
+│  • Access resources outside IAM scope                                │
+│  • Use credential after session ends (revoked)                       │
+│  • Use credential after TTL (expired)                                │
+│  • Escalate permissions (scoped IAM role)                            │
+│                                                                      │
+│  Acceptable risk:                                                    │
+│  • Agent CAN see credential values (they're env vars)               │
+│  • Agent COULD exfiltrate them (but they expire quickly)             │
+│  • A leaked credential is useless after cleanup/expiry               │
 └──────────────────────────────────────────────────────────────────────┘
 
-┌──────────────────────────┐  ┌──────────────────────────┐
-│ Secretless Broker Process │  │ Credential Helper Process │
-│                          │  │ (spawned by git/docker)   │
-│  Has in memory:          │  │                          │
-│  • API tokens from vault │  │  Has in memory:          │
-│  • Injection rules       │  │  • PAT / registry token  │
-│  • TLS certificates      │  │  • Passed via stdout     │
-│                          │  │    pipe to parent tool   │
-│  Writes to disk: NOTHING │  │                          │
-│  Env vars: NOTHING       │  │  Writes to disk: NOTHING │
-└──────────────────────────┘  └──────────────────────────┘
+┌──────────────────────────────────────────────────┐
+│  Vault Server (self-hosted or HCP)               │
+│                                                  │
+│  Manages:                                        │
+│  • Dynamic secret generation per session         │
+│  • Lease tracking + TTL enforcement              │
+│  • Early revocation on session cleanup           │
+│  • Audit log of every credential issued          │
+│                                                  │
+│  Vault Secrets Engines in use:                   │
+│  • gcp/    → OAuth access tokens                 │
+│  • github/ → App installation tokens             │
+│  • aws/    → STS session credentials             │
+│  • database/ → ephemeral DB user/pass (optional) │
+│  • ssh/    → signed certificates (optional)      │
+└──────────────────────────────────────────────────┘
 
-┌──────────────────────────┐
-│ CLI Tools (gcloud/gh/az) │
-│                          │
-│  Has in memory:          │
-│  • Access tokens         │
-│  • Refresh tokens        │
-│                          │
-│  On disk (protected):    │
-│  • ~/.config/gcloud/     │
-│  • ~/.config/gh/         │
-│  • ~/.azure/             │
-│  (blocked by denylist)   │
-└──────────────────────────┘
+┌──────────────────────────────────────────────────┐
+│  Lease File: $ENV_DIR/.vault-leases              │
+│                                                  │
+│  gcp/token/agent-role:lease_abc123               │
+│  github/token:lease_def456                       │
+│  aws/creds/agent-role:lease_ghi789               │
+│                                                  │
+│  Used by cleanup to revoke all session creds.    │
+│  Deleted when environment is torn down.          │
+└──────────────────────────────────────────────────┘
 ```
 
-## Component Breakdown
+### Comparison: v2 (proxy) vs v3 (ephemeral) data flow
 
-### 1. HTTP Proxy — Secretless Broker
+```
+v2: Agent → HTTP Proxy → (inject secret) → API Server
+    Agent never sees secret. Requires proxy process + config + CA trust.
 
-[CyberArk Secretless Broker](https://github.com/cyberark/secretless-broker) is a production-grade connection broker that:
-- Intercepts HTTP(S) traffic via `HTTP_PROXY` / `HTTPS_PROXY`
-- Injects credentials from configurable backends (vault, env, file, keychain)
-- Keeps secrets only in its own process memory
-- Written in Go, single binary, actively maintained
+v3: Orchestrator → Vault → (get ephemeral cred) → env var → Agent → API Server
+    Agent sees credential, but it expires in 1h and is scoped.
+    No proxy. No interception. No CA. Just env vars.
 
-**Config** (`secretless.yml`):
-```yaml
-version: 2
-services:
-  internal-api:
-    protocol: http
-    listenOn: tcp://0.0.0.0:18080
-    credentials:
-      api-token:
-        from: vault
-        get: secret/data/internal-api-token#value
-    config:
-      authenticationStrategy: header
-      headers:
-        Authorization: "Bearer {{ .api-token }}"
-      match:
-        - host: "api.internal.example.com"
-
-  thirdparty:
-    protocol: http
-    listenOn: tcp://0.0.0.0:18080
-    credentials:
-      api-key:
-        from: vault
-        get: secret/data/thirdparty-key#value
-    config:
-      authenticationStrategy: header
-      headers:
-        X-API-Key: "{{ .api-key }}"
-      match:
-        - host: "api.thirdparty.com"
-          pathPrefix: "/v2/"
+v2 is more secure (agent never sees secret).
+v3 is far simpler (no proxy, no credential helpers, no CA management).
+v3 is sufficient for trusted developer environments.
+v2 is better for untrusted/multi-tenant/production-access scenarios.
 ```
 
-**What we write**: Just a `secretless-manager.sh` (~50 lines) to start/stop Secretless Broker per environment and set `HTTP_PROXY`.
+## Prerequisites
 
-### 2. Git Credentials — Existing Helpers
+### Vault Server
 
-Multiple mature options exist:
+One of:
+- **HCP Vault** (HashiCorp cloud, managed) — simplest to get started
+- **Self-hosted Vault** (single binary, `vault server -dev` for testing)
+- **Vault in Docker** — `docker run -d --name vault -p 8200:8200 hashicorp/vault`
 
-**Option A: git-credential-oauth** (if using GitHub/GitLab OAuth)
-- `brew install git-credential-oauth`
-- Handles OAuth device flow automatically
-- No PATs needed
+### Vault Secrets Engines (configure once per org)
 
-**Option B: credential-1password** (if using 1Password)
-- [github.com/tlowerison/credential-1password](https://github.com/tlowerison/credential-1password)
-- Works as both git and docker credential helper
-- Reads from 1Password vault
+| Engine | Setup | What it needs |
+|--------|-------|---------------|
+| `gcp` | `vault secrets enable gcp` + configure GCP service account | GCP project with IAM admin |
+| `github` | Install [vault-plugin-secrets-github](https://github.com/martinbaillie/vault-plugin-secrets-github) + configure GitHub App | GitHub App with desired permissions |
+| `aws` | `vault secrets enable aws` + configure IAM user with STS permissions | AWS account with IAM admin |
+| `database` | `vault secrets enable database` + configure connection | Database connection string |
 
-**Option C: git-credential-store with `op run`** (1Password CLI)
-- `op run --env-file=.env -- git push` injects credentials into subprocess
+### Vault Auth Method (how the orchestrator authenticates to Vault)
 
-**What we write**: Nothing. We configure the user's chosen helper during install.
+Recommended: **AppRole** for automated orchestration
+```bash
+vault auth enable approle
+vault write auth/approle/role/para-llm-agent \
+    token_ttl=2h \
+    token_max_ttl=4h \
+    policies="agent-creds"
+```
 
-### 3. Docker Credentials — Existing Helpers
+Policy `agent-creds`:
+```hcl
+path "gcp/token/agent-role" {
+  capabilities = ["read"]
+}
+path "github/token" {
+  capabilities = ["read"]
+}
+path "aws/creds/agent-role" {
+  capabilities = ["read"]
+}
+path "sys/leases/revoke" {
+  capabilities = ["update"]
+}
+```
 
-- **docker-credential-gcloud** — built into gcloud SDK, handles GCR/GAR natively
-- **credential-1password** — same tool as git, also implements docker credential helper protocol
-- **docker-credential-ecr-login** — AWS ECR native helper
-
-**What we write**: Nothing. We configure `~/.docker/config.json` during install.
-
-### 4. Cloud CLIs — Native Auth (Already Solved)
-
-These tools already handle their own credential lifecycle:
-
-- **gcloud**: `gcloud auth login` → stores refresh token in `~/.config/gcloud/`. Optionally add SA impersonation via `gcloud config set auth/impersonate_service_account`.
-- **gh**: `gh auth login` → stores OAuth token in `~/.config/gh/`. Automatic refresh.
-- **az**: `az login` → stores token in `~/.azure/`. Automatic refresh.
-
-**What we write**: Nothing. We prompt during install, verify during env creation.
-
-### 5. Agent Isolation — Denylist + CLAUDE.md
-
-Same as v1, this is just config:
-- `.claude/settings.json` deny rules prevent agent from reading credential files
-- CLAUDE.md snippet tells agent auth is handled transparently
-- File permissions (0600) on any config files
-
-## Plugin Directory Structure (Dramatically Simpler)
+## Plugin Directory Structure
 
 ```
 plugins/credential-auth/
 ├── README.md
-├── orchestrator.sh              # Start/stop/status all credential services (~100 lines)
-├── install-credential-auth.sh   # Install + configure third-party tools (~100 lines)
-├── config/
-│   ├── secretless.example.yml   # Example Secretless Broker config
-│   └── claude-md-snippet.md     # CLAUDE.md template for agent awareness
-└── verify-auth.sh               # Check all auth tools are working (~50 lines)
+├── credential-auth.sh           # Generate creds + inject into pane (~80 lines)
+├── credential-cleanup.sh        # Revoke leases on session end (~30 lines)
+├── install-credential-auth.sh   # Install + configure Vault connection (~80 lines)
+└── config/
+    ├── vault-policy.example.hcl # Example Vault policy for agent credentials
+    └── claude-md-snippet.md     # CLAUDE.md template for agent awareness
 ```
 
-**4 files we write** vs. 18 in v1.
+**3 scripts + 2 config files.** That's it.
 
-## Installation Flow
+## Configuration
 
+Stored in `$PARA_LLM_ROOT/config` (same as other para-llm settings):
+
+```bash
+# Credential auth settings
+CRED_AUTH_ENABLED=1
+VAULT_ADDR=https://vault.example.com:8200
+# VAULT_ROLE_ID and VAULT_SECRET_ID stored in macOS Keychain (not in config file)
+# Or: VAULT_TOKEN for dev/testing
+
+# Which engines to use (space-separated)
+CRED_AUTH_ENGINES="gcp github aws"
+
+# Engine-specific settings
+CRED_AUTH_GCP_ROLE="agent-role"
+CRED_AUTH_GITHUB_ORG="my-org"
+CRED_AUTH_AWS_ROLE="agent-role"
+
+# TTL override (default: use Vault role defaults)
+# CRED_AUTH_TTL="1h"
 ```
-1. "Install credential auth plugin?"
 
-2. Choose secret backend:
-   a) 1Password   → brew install 1password-cli, op signin
-   b) GCP         → ensure gcloud installed + authenticated
-   c) HashiCorp   → ensure vault CLI installed + authenticated
+## Core Script: `credential-auth.sh`
 
-3. Choose HTTP proxy (if needed):
-   → brew install secretless-broker  (or skip if no API auth needed)
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+# Generate ephemeral credentials from Vault and output env var exports.
+# Usage: credential-auth.sh <env-dir>
+# Outputs: export statements to stdout (eval'd or sent to tmux pane)
+# Side effect: writes lease IDs to <env-dir>/.vault-leases
 
-4. Set up CLI auth:
-   → gcloud auth login (if gcloud installed)
-   → gh auth login (if gh installed)
-   → Configure git credential helper (git-credential-oauth or credential-1password)
-   → Configure docker credential helper (native or credential-1password)
+ENV_DIR="${1:?Usage: credential-auth.sh <env-dir>}"
+LEASE_FILE="$ENV_DIR/.vault-leases"
+> "$LEASE_FILE"  # truncate
 
-5. Generate secretless.yml from template (if HTTP proxy enabled)
+# Authenticate to Vault (AppRole)
+if [[ -n "${VAULT_TOKEN:-}" ]]; then
+    : # Already authenticated
+elif [[ -n "${VAULT_ROLE_ID:-}" ]]; then
+    export VAULT_TOKEN=$(vault write -field=token auth/approle/login \
+        role_id="$VAULT_ROLE_ID" secret_id="$VAULT_SECRET_ID")
+fi
 
-6. Add denylist rules to .claude/settings.json
+# GCP access token
+if [[ " $CRED_AUTH_ENGINES " == *" gcp "* ]]; then
+    RESULT=$(vault read -format=json "gcp/token/${CRED_AUTH_GCP_ROLE}")
+    echo "export GCP_ACCESS_TOKEN=$(echo "$RESULT" | jq -r '.data.token')"
+    echo "export CLOUDSDK_AUTH_ACCESS_TOKEN=$(echo "$RESULT" | jq -r '.data.token')"
+    echo "$RESULT" | jq -r '.lease_id' >> "$LEASE_FILE"
+fi
 
-7. Save CRED_AUTH_ENABLED=1 to config
+# GitHub token
+if [[ " $CRED_AUTH_ENGINES " == *" github "* ]]; then
+    RESULT=$(vault read -format=json "github/token" org_name="$CRED_AUTH_GITHUB_ORG")
+    echo "export GITHUB_TOKEN=$(echo "$RESULT" | jq -r '.data.token')"
+    echo "$RESULT" | jq -r '.lease_id' >> "$LEASE_FILE"
+fi
+
+# AWS credentials
+if [[ " $CRED_AUTH_ENGINES " == *" aws "* ]]; then
+    RESULT=$(vault read -format=json "aws/creds/${CRED_AUTH_AWS_ROLE}")
+    echo "export AWS_ACCESS_KEY_ID=$(echo "$RESULT" | jq -r '.data.access_key')"
+    echo "export AWS_SECRET_ACCESS_KEY=$(echo "$RESULT" | jq -r '.data.secret_key')"
+    echo "export AWS_SESSION_TOKEN=$(echo "$RESULT" | jq -r '.data.security_token')"
+    echo "$RESULT" | jq -r '.lease_id' >> "$LEASE_FILE"
+fi
+
+chmod 600 "$LEASE_FILE"
+```
+
+## Core Script: `credential-cleanup.sh`
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+# Revoke all Vault leases for a session.
+# Usage: credential-cleanup.sh <env-dir>
+
+ENV_DIR="${1:?Usage: credential-cleanup.sh <env-dir>}"
+LEASE_FILE="$ENV_DIR/.vault-leases"
+
+if [[ ! -f "$LEASE_FILE" ]]; then
+    exit 0
+fi
+
+while IFS= read -r lease_id; do
+    [[ -z "$lease_id" ]] && continue
+    vault lease revoke "$lease_id" 2>/dev/null || true
+done < "$LEASE_FILE"
+
+rm -f "$LEASE_FILE"
 ```
 
 ## Environment Lifecycle Integration
@@ -448,73 +521,100 @@ plugins/credential-auth/
 
 ```bash
 if [[ "${CRED_AUTH_ENABLED:-0}" == "1" ]]; then
-    # 1. Verify auth is healthy (non-blocking)
-    "$PLUGIN_DIR/verify-auth.sh" --quiet || echo "Warning: auth needs refresh"
+    PLUGIN_DIR="$SCRIPT_DIR/plugins/credential-auth"
 
-    # 2. Start Secretless Broker for this env (if configured)
-    if [[ -f "$SECRETLESS_CONFIG" ]]; then
-        PROXY_PORT=$("$PLUGIN_DIR/orchestrator.sh" start --env-dir "$ENV_DIR")
-        tmux send-keys "export HTTP_PROXY=http://127.0.0.1:$PROXY_PORT" Enter
-        tmux send-keys "export HTTPS_PROXY=http://127.0.0.1:$PROXY_PORT" Enter
+    # Generate ephemeral credentials and inject into pane
+    ENV_EXPORTS=$("$PLUGIN_DIR/credential-auth.sh" "$ENV_DIR" 2>/dev/null) || {
+        echo "Warning: credential generation failed" >&2
+    }
+
+    if [[ -n "${ENV_EXPORTS:-}" ]]; then
+        while IFS= read -r line; do
+            [[ -n "$line" ]] && tmux send-keys "$line" Enter
+        done <<< "$ENV_EXPORTS"
     fi
-
-    # 3. Inject CLAUDE.md snippet
-    "$PLUGIN_DIR/orchestrator.sh" inject-claude-md "$PROJECT_DIR"
 fi
 ```
 
 ### On `tmux-cleanup-branch.sh` (cleanup):
 
 ```bash
-if [[ -f "$ENV_DIR/.secretless.pid" ]]; then
-    "$PLUGIN_DIR/orchestrator.sh" stop --env-dir "$ENV_DIR"
+if [[ -f "$ENV_DIR/.vault-leases" ]]; then
+    PLUGIN_DIR="${SCRIPT_DIR:-$INSTALL_DIR}/plugins/credential-auth"
+    "$PLUGIN_DIR/credential-cleanup.sh" "$ENV_DIR" 2>/dev/null || true
 fi
 ```
 
-## What We're NOT Building
+## CLAUDE.md Snippet
 
-| Thing | Why not |
-|-------|---------|
-| Custom mitmproxy addon (credential-inject.py) | Secretless Broker does this better |
-| Custom CA generation + trust | Secretless Broker handles TLS |
-| Custom provider plugin system | Use backends directly (1Password CLI, gcloud, vault) |
-| Custom YAML config format + yq dependency | Use Secretless Broker's native config |
-| Custom git credential helper | Use git-credential-oauth or credential-1password |
-| Custom docker credential helper | Use credential-1password or docker-credential-gcloud |
-| Custom OAuth flow scripts | CLIs manage their own tokens |
-| Secret caching layer | Secretless Broker has its own caching |
+```markdown
+## Authenticated Services
 
-## Trade-offs
+This environment has temporary credentials for external services.
+They are set as environment variables and expire after ~1 hour.
 
-**Pros of v2:**
-- ~90% less code to maintain
-- Battle-tested tools (CyberArk, 1Password, Google) handle the hard parts
-- Each tool has its own docs, community, and update cycle
-- Faster to implement and ship
+### What this means for you
+- **Use tools normally** — git, docker, gcloud, gh, curl all work with the provided credentials
+- **Do NOT** run auth commands (gcloud auth, gh auth, docker login) — credentials are pre-set
+- **Do NOT** hardcode credentials in files — use the environment variables
+- If you get a 401/403, tell the user — credentials may have expired
+- Credentials are automatically revoked when this session ends
+```
 
-**Cons of v2:**
-- More external dependencies to install (secretless-broker, credential helpers)
-- Less unified config (Secretless Broker has its own YAML, git/docker have separate configs)
-- User chooses a secret backend upfront (less flexible than v1's pluggable providers)
-- Secretless Broker is a Go binary (~30MB) vs. mitmproxy (Python, already common)
+## Installation Flow
+
+```
+1. "Install credential auth plugin?"
+   → Requires: Vault CLI (brew install vault), jq
+
+2. Configure Vault connection:
+   → VAULT_ADDR (Vault server URL)
+   → Auth method: AppRole (store role_id/secret_id in Keychain)
+   → Or: VAULT_TOKEN for dev/testing
+
+3. Configure engines (which services need credentials):
+   → GCP: role name for gcp/token/
+   → GitHub: org name for github/token
+   → AWS: role name for aws/creds/
+   → (only configure what you need)
+
+4. Test credential generation:
+   → Run credential-auth.sh, verify tokens are issued
+
+5. Save CRED_AUTH_ENABLED=1 to config
+```
+
+## When to Upgrade to v2 (Proxy Architecture)
+
+v3 is sufficient when:
+- Agents run in a trusted developer environment
+- Credentials are scoped to non-destructive permissions
+- 1-hour exposure window is acceptable
+
+Consider upgrading to v2 (Secretless Broker proxy) when:
+- Agents need write access to production systems
+- Running in multi-tenant or untrusted environments
+- Regulatory requirements mandate request-level audit trails
+- You need operation-level filtering beyond IAM scoping
+- Zero-trust: agent must NEVER see any credential value
 
 ## Verification
 
-1. **Secretless Broker starts**: `orchestrator.sh start` → `curl -x http://localhost:$PORT http://httpbin.org/get` works
-2. **Header injection**: Configure a test rule, verify via `curl -x ... http://httpbin.org/headers`
-3. **Git auth**: `git clone` from private repo succeeds without prompting
-4. **Docker auth**: `docker pull` from private registry succeeds
-5. **CLI auth**: `gcloud`, `gh` commands work without re-authentication
-6. **Agent isolation**: Claude Code cannot `cat` credential files (denylist blocks it)
-7. **Full lifecycle**: Create env → proxy starts → agent works → cleanup → proxy stops
+1. **Vault connectivity**: `vault status` returns sealed=false
+2. **Credential generation**: `credential-auth.sh /tmp/test` outputs valid export statements
+3. **GCP token works**: `curl -H "Authorization: Bearer $GCP_ACCESS_TOKEN" https://storage.googleapis.com/...`
+4. **GitHub token works**: `GITHUB_TOKEN=<token> gh repo list`
+5. **AWS creds work**: `aws sts get-caller-identity`
+6. **Lease revocation**: `credential-cleanup.sh /tmp/test` → tokens become invalid
+7. **TTL expiry**: Wait >1h → tokens expire naturally
+8. **Full lifecycle**: Create env → creds injected → agent works → cleanup → creds revoked
 
 ## Implementation Sequence
 
-1. Write `install-credential-auth.sh` (interactive installer, ~100 lines)
-2. Write `orchestrator.sh` (start/stop Secretless Broker + CLAUDE.md injection, ~100 lines)
-3. Write `verify-auth.sh` (check all configured tools, ~50 lines)
-4. Create `secretless.example.yml` and `claude-md-snippet.md`
-5. Integrate with `tmux-new-branch.sh` (proxy start + env var injection)
-6. Integrate with `tmux-cleanup-branch.sh` (proxy stop)
-7. Update `.claude/settings.json` denylist template
-8. Add install section to `install.sh`
+1. Write `credential-auth.sh` (generate creds, ~80 lines)
+2. Write `credential-cleanup.sh` (revoke leases, ~30 lines)
+3. Write `install-credential-auth.sh` (install + configure, ~80 lines)
+4. Create `vault-policy.example.hcl` and `claude-md-snippet.md`
+5. Integrate with `tmux-new-branch.sh` (inject creds before Claude launch)
+6. Integrate with `tmux-cleanup-branch.sh` (revoke on cleanup)
+7. Add install section to `install.sh`
