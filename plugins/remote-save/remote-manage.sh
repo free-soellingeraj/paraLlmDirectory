@@ -2,6 +2,17 @@
 # remote-manage.sh - fzf-based menu for managing remote save backends
 # Launched via Ctrl+b t (tmux display-popup)
 
+# Source user profile for PATH (fzf may be installed in ~/.fzf/bin)
+# tmux display-popup runs non-interactive shell, so .bashrc isn't loaded
+# NOTE: set -u must come AFTER sourcing, as bashrc may reference unset variables
+if [[ -f "$HOME/.bashrc" ]]; then
+    source "$HOME/.bashrc" 2>/dev/null || true
+elif [[ -f "$HOME/.bash_profile" ]]; then
+    source "$HOME/.bash_profile" 2>/dev/null || true
+elif [[ -f "$HOME/.profile" ]]; then
+    source "$HOME/.profile" 2>/dev/null || true
+fi
+
 set -u
 
 # Read PARA_LLM_ROOT from bootstrap pointer
@@ -22,6 +33,50 @@ fi
 mkdir -p "$REMOTES_DIR"
 
 # --- Helper functions ---
+
+# Read a line of input with Escape-to-go-back support
+# Usage: read_input "prompt: " [default]
+# Returns 0 on success (result in REPLY), 1 on Escape (go back)
+read_input() {
+    local prompt="$1"
+    local default="${2:-}"
+    REPLY=""
+
+    printf "%s" "$prompt"
+
+    while true; do
+        IFS= read -r -s -n 1 ch
+
+        # Escape key (ASCII 27)
+        if [[ "$ch" == $'\e' ]]; then
+            # Consume any trailing escape sequence chars (arrow keys, etc.)
+            read -r -s -n 2 -t 0.1 _ 2>/dev/null || true
+            echo ""
+            return 1
+        fi
+
+        # Enter key
+        if [[ "$ch" == "" ]]; then
+            echo ""
+            if [[ -z "$REPLY" && -n "$default" ]]; then
+                REPLY="$default"
+            fi
+            return 0
+        fi
+
+        # Backspace (ASCII 127 or 8)
+        if [[ "$ch" == $'\177' || "$ch" == $'\b' ]]; then
+            if [[ -n "$REPLY" ]]; then
+                REPLY="${REPLY%?}"
+                printf '\b \b'
+            fi
+            continue
+        fi
+
+        REPLY+="$ch"
+        printf "%s" "$ch"
+    done
+}
 
 get_active_remote() {
     if [[ -f "$ACTIVE_FILE" ]]; then
@@ -72,10 +127,11 @@ action_add() {
             1)
                 # Step 1: Remote name
                 echo ""
-                echo "Add new remote"
+                echo "Add new remote  (Esc to go back)"
                 echo "=============="
                 echo ""
-                read -r -p "Remote name (e.g., my-server) [← empty to go back]: " REMOTE_NAME
+                read_input "Remote name (e.g., my-server): " || return
+                REMOTE_NAME="$REPLY"
                 [[ -z "$REMOTE_NAME" ]] && return
                 # Sanitize
                 REMOTE_NAME=$(echo "$REMOTE_NAME" | sed 's/[^a-zA-Z0-9_-]//g')
@@ -178,18 +234,23 @@ action_add() {
                     echo "From your local machine, connect with:"
                     echo "  ssh -R <port>:localhost:22 <this-host>"
                     echo ""
-                    read -r -p "Press Enter to go back..."
+                    read -r -p "Press Enter or Esc to go back..."
                     step=2; continue
                 fi
 
                 # Detect active reverse tunnels
+                # Reverse tunnels show up as localhost-bound listeners on non-standard ports
+                # Try multiple methods since permissions vary (sshd runs as root)
                 local REVERSE_TUNNELS=""
-                if command -v lsof &>/dev/null; then
+                if command -v ss &>/dev/null; then
+                    # ss works without root for listing ports; filter localhost listeners
+                    # excluding well-known ports (22, 80, 443, etc.)
+                    REVERSE_TUNNELS=$(ss -tln 2>/dev/null | grep -E '127\.0\.0\.1:|::1\]:' | \
+                        awk '{ split($4, a, ":"); print a[length(a)] }' | \
+                        sort -un | grep -v '^22$' | awk '$1 > 1023')
+                elif command -v lsof &>/dev/null; then
                     REVERSE_TUNNELS=$(lsof -i -n -P 2>/dev/null | grep "sshd" | grep "LISTEN" | \
                         awk '{ print $9 }' | sed 's/.*://' | sort -un | grep -v "^22$")
-                elif command -v ss &>/dev/null; then
-                    REVERSE_TUNNELS=$(ss -tlnp 2>/dev/null | grep "sshd" | \
-                        awk '{ print $4 }' | sed 's/.*://' | sort -un | grep -v "^22$")
                 fi
 
                 if [[ -z "$REVERSE_TUNNELS" ]]; then
@@ -203,7 +264,7 @@ action_add() {
                     echo "Example:"
                     echo "  ssh -R 2222:localhost:22 $(whoami)@$(hostname)"
                     echo ""
-                    read -r -p "Press Enter to go back..."
+                    read -r -p "Press Enter or Esc to go back..."
                     step=2; continue
                 fi
 
@@ -218,31 +279,24 @@ action_add() {
                 REMOTE_HOST="localhost"
                 REMOTE_SSH_PORT="$TUNNEL_PORT"
 
-                read -r -p "Username on originating machine [$(whoami)] [← empty to go back]: " TUNNEL_USER
-                if [[ "$TUNNEL_USER" == "" ]]; then
-                    # Empty means accept default, not go back - use a sentinel
-                    TUNNEL_USER="$(whoami)"
-                fi
-                if [[ "$TUNNEL_USER" != "$(whoami)" ]]; then
-                    REMOTE_HOST="${TUNNEL_USER}@localhost"
-                fi
-
-                echo "  Using: ssh -p $REMOTE_SSH_PORT $REMOTE_HOST"
+                echo "  Using: ssh -p $REMOTE_SSH_PORT localhost"
                 step=6
                 ;;
             5)
                 # Step 5: Manual entry
                 echo ""
-                read -r -p "SSH host (e.g., user@host) [← empty to go back]: " REMOTE_HOST
+                read_input "SSH host (e.g., user@host): " || { step=2; continue; }
+                REMOTE_HOST="$REPLY"
                 if [[ -z "$REMOTE_HOST" ]]; then
                     step=2; continue
                 fi
 
-                read -r -p "SSH port [22]: " REMOTE_SSH_PORT
-                REMOTE_SSH_PORT="${REMOTE_SSH_PORT:-}"
+                read_input "SSH port [22]: " "22" || { step=2; continue; }
+                REMOTE_SSH_PORT="$REPLY"
                 [[ "$REMOTE_SSH_PORT" == "22" ]] && REMOTE_SSH_PORT=""
 
-                read -r -p "SSH key path (optional, leave empty for default): " REMOTE_SSH_KEY
+                read_input "SSH key path (optional, Enter to skip): " || { step=2; continue; }
+                REMOTE_SSH_KEY="$REPLY"
                 step=6
                 ;;
             6)
@@ -253,13 +307,9 @@ action_add() {
                 fi
 
                 echo ""
-                read -r -p "Remote directory [/home/${REMOTE_USER}/.para-llm-remote] [← 'back' to go back]: " REMOTE_DIR
-                if [[ "$REMOTE_DIR" == "back" ]]; then
-                    REMOTE_DIR=""
-                    # Go back to the connection type step
-                    step=2; continue
-                fi
-                REMOTE_DIR="${REMOTE_DIR:-/home/${REMOTE_USER}/.para-llm-remote}"
+                local default_dir="/home/${REMOTE_USER}/.para-llm-remote"
+                read_input "Remote directory [$default_dir]: " "$default_dir" || { step=2; continue; }
+                REMOTE_DIR="$REPLY"
                 step=7
                 ;;
             7)
@@ -308,7 +358,8 @@ REMOTE_EOF
                 fi
 
                 # Offer to test
-                read -r -p "Test connection now? [Y/n]: " test_choice
+                read_input "Test connection now? [Y/n]: " "y" || return
+                test_choice="$REPLY"
                 if [[ ! "$test_choice" =~ ^[Nn] ]]; then
                     action_test "$REMOTE_NAME"
                 fi
