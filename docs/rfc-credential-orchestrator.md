@@ -1,620 +1,575 @@
-# RFC: Credential Orchestrator Plugin for para-llm-directory (v3 — Vault Ephemeral Credentials)
+# RFC: Credential Manager Plugin for para-llm-directory (v4 — secret-mgr + secure-exec + age)
 
 ## Context
 
 Autonomous Claude Code agents running in para-llm tmux panes need to interact with authenticated services (APIs, git remotes, Docker registries, cloud CLIs). Today there's no credential management — agents either can't authenticate or would need raw secrets exposed in their environment.
 
-**Goal**: Agents get working credentials with minimal complexity and strong security properties.
+**Goal**: Agents get working credentials with minimal complexity, strong security properties, and **the agent never has direct access to the credential store or decryption tools**.
 
-## Evolution: v1 → v2 → v3
+## Evolution: v1 → v2 → v3 → v4
 
-| Version | Approach | Code we write | Complexity |
-|---------|----------|---------------|------------|
-| v1 | Build everything from scratch (custom mitmproxy addon, custom credential helpers, custom provider plugins) | ~1,900 lines, 18 files | Very high |
-| v2 | Compose existing tools (Secretless Broker, credential-1password, git-credential-oauth) | ~200 lines, 4 files | Medium |
-| **v3** | **Vault generates ephemeral credentials, injected as env vars. No proxy, no custom helpers.** | **~150 lines, 3 files** | **Low** |
+| Version | Approach | Code we write | Complexity | Agent sees secrets? |
+|---------|----------|---------------|------------|---------------------|
+| v1 | Build everything from scratch (custom mitmproxy addon, custom credential helpers) | ~1,900 lines, 18 files | Very high | No |
+| v2 | Compose existing tools (Secretless Broker, credential-1password) | ~200 lines, 4 files | Medium | No |
+| v3 | Vault generates ephemeral credentials, injected as env vars | ~150 lines, 3 files | Low | Yes (ephemeral) |
+| **v4** | **`secret-mgr` + `secure-exec` + `age` encryption. Agent blocked from credential tools at 4 layers.** | **~400 lines, 12 files** | **Low-Medium** | **No** |
 
-### Why v3?
+### Why v4?
 
-v1 and v2 both try to prevent the agent from ever *seeing* a secret. This requires interposing on every credential channel (HTTP proxy, credential helper pipes, file permissions, denylists). That's a lot of moving parts.
+v3 relies on Vault (a heavyweight server dependency) and exposes ephemeral credentials as env vars the agent can read. v4 asks: **can we get the same security properties without a server, using only local tools, and without the agent ever seeing a credential?**
 
-v3 asks a different question: **does it matter if the agent sees a credential that expires in 1 hour and is scoped to minimum permissions?**
+| Concern | v3 (Vault ephemeral) | v4 (secret-mgr + secure-exec) |
+|---------|----------------------|-------------------------------|
+| Infrastructure | Vault server required | None — just `age` binary |
+| Cross-platform | Vault runs everywhere | `age` is a single static binary (mac/linux/windows) |
+| Agent sees credentials | Yes (env vars) | No (injected at exec time, not in agent's env) |
+| Credential storage | Vault server | `age`-encrypted files on disk |
+| OAuth support | Vault secrets engines | Delegates to native CLIs (`gh`, `gcloud`, `aws`) |
+| Offline capable | No (needs Vault server) | Yes |
+| Setup complexity | High (Vault + secrets engines + policies) | Low (install `age`, register services) |
 
-| Threat | Long-lived credential | Ephemeral (1h TTL, scoped) |
-|--------|----------------------|---------------------------|
-| Agent exfiltrates credential | Permanent unauthorized access | Useless after expiry |
-| Credential appears in logs | Permanent risk | Already expired |
-| Agent shares cred with external system | Long-term access | Brief window, auto-expires |
-| Credential committed to code | Permanent risk | Expired before review |
-| Lateral movement | Depends on scope | Tightly scoped IAM role |
-
-For developer-facing AI agents in trusted environments, **ephemeral + scoped** is sufficient security for v1 of this feature. The proxy/credential-helper architecture (v2) remains available as a hardening layer for higher-risk deployments later.
+Key design principles:
+- **Light touch**: Claude uses its existing knowledge of `gh`, `curl`, `gcloud`, etc. The wrapper just prefixes the command.
+- **Compose existing tools**: `age` for encryption, native CLIs for OAuth, shell for orchestration.
+- **Defense in depth**: 4 layers prevent agent access to credential tools.
+- **Cross-platform**: Works on macOS, Linux, and Windows (WSL) with no OS-specific keychain dependencies.
 
 ## Architecture Overview
 
 ```
-  Orchestrator (runs before agent session)
-  │
-  │  1. Authenticate to Vault
-  │  2. Generate ephemeral credentials
-  │  3. Inject as env vars into tmux pane
-  │  4. Launch Claude Code
-  │
-  ▼
-┌──────────────────────────────────────────────────────────────────────┐
-│  Agent's tmux pane (Claude Code)                                     │
-│                                                                      │
-│  Environment:                                                        │
-│    GITHUB_TOKEN=ghs_xxxx         (1h TTL, repo:read + repo:write)    │
-│    GCP_ACCESS_TOKEN=ya29.xxxx    (1h TTL, storage.objectViewer)      │
-│    AWS_ACCESS_KEY_ID=AKIA...     (1h TTL, s3:GetObject only)         │
-│    AWS_SECRET_ACCESS_KEY=xxxx    (1h TTL)                            │
-│    DOCKER_TOKEN=dckr_xxxx        (1h TTL, pull-only)                 │
-│                                                                      │
-│  Agent uses these normally. They expire automatically.               │
-└──────────────────────────────────────────────────────────────────────┘
-  │
-  │  Session ends (Ctrl+b k or env cleanup)
-  │
-  ▼
-  Orchestrator revokes all Vault leases immediately
-  (credentials invalid even before TTL expiry)
+Human (direct)              Claude Code (agent)
+     │                            │
+ secret-mgr                   secure-exec
+ (BLOCKED x4)                 (ALLOWED)
+     │                            │
+     ▼                            ▼
+ age-encrypted              calls secret-mgr internally
+ credential files                 │
+ (0600 perms)                injects cred as env var
+                                  │
+                             exec gh/curl/gcloud/etc.
+```
+
+### How `secure-exec` works
+
+```
+Claude runs:  secure-exec gh pr list
+
+  secure-exec                   secret-mgr                    age
+  ───────────                   ──────────                    ───
+       │                             │                          │
+       │  Lookup: "gh" matches       │                          │
+       │  github.conf (COMMANDS=gh)  │                          │
+       │                             │                          │
+       │  secret-mgr get github      │                          │
+       │ ──────────────────────────▶ │                          │
+       │                             │  age -d -i key.txt       │
+       │                             │  registry/github.age     │
+       │                             │ ────────────────────────▶│
+       │                             │ ◀── ghp_xxx ────────────│
+       │ ◀── ghp_xxx ────────────── │                          │
+       │                             │                          │
+       │  export GH_TOKEN=ghp_xxx   │                          │
+       │  exec gh pr list            │                          │
+       │                             │                          │
+
+Claude only sees: the output of "gh pr list".
+Claude never sees: ghp_xxx, secret-mgr, age, or the key file.
+```
+
+## Security Model — Four Layers of Agent Isolation
+
+The agent (Claude Code) runs as the same OS user as the human. Since traditional Unix permissions can't distinguish them, we use **4 independent layers**:
+
+### Layer 1: Claude deny rules (`.claude/settings.json`)
+
+```json
+{
+  "deny": [
+    "Bash(secret-mgr*)",
+    "Bash(*secret-mgr*)",
+    "Bash(*/secret-mgr.sh*)",
+    "Bash(age *)",
+    "Bash(*age -d*)",
+    "Bash(*age -e*)",
+    "Bash(*age --decrypt*)",
+    "Bash(*age --encrypt*)",
+    "Bash(*.age*)"
+  ]
+}
+```
+
+**What it stops**: Claude from requesting to run these commands.
+
+### Layer 2: PreToolUse hook (belt-and-suspenders)
+
+`hooks/deny-secret-mgr.sh` reads tool input JSON from stdin. If the command contains `secret-mgr` or `age`, it outputs `{"decision": "block", "reason": "Direct credential access not permitted"}`.
+
+**What it stops**: Attempts that slip through deny rule patterns.
+
+### Layer 3: Not on PATH
+
+`secret-mgr` and `age` are installed to a non-standard directory (`$PLUGIN_DIR/.bin/`) that is **not** added to the agent's PATH. Only `secure-exec` is added to PATH. `secure-exec` references `secret-mgr` and `age` by absolute path internally.
+
+**What it stops**: Claude from discovering or executing the binaries by name.
+
+### Layer 4: Passphrase-protected age identity (cryptographic enforcement)
+
+The `age` identity file (`key.txt`) is encrypted with a passphrase. The passphrase is:
+- Generated at session start (random 32-byte hex)
+- Written to a file descriptor or tmpfile with 0600 permissions
+- Passed to `secure-exec` via an environment variable (`_SECURE_EXEC_PASSPHRASE`) that is **set only in the `secure-exec` wrapper's process context**, not exported to the agent's shell environment
+
+Even if Claude somehow finds the `age` binary AND the encrypted identity file, it cannot decrypt without the passphrase.
+
+**What it stops**: Actual credential decryption even if all other layers fail.
+
+### Layer Summary
+
+| Layer | Type | What it blocks | Bypass requires |
+|-------|------|----------------|-----------------|
+| 1. Deny rules | Config | Claude requesting the command | Pattern not in deny list |
+| 2. PreToolUse hook | Runtime | Commands that match patterns | Hook disabled or bypassed |
+| 3. Off PATH | Filesystem | Discovery by name | Knowing the absolute path |
+| 4. Passphrase-protected key | Cryptographic | Decryption of stored credentials | Knowing the session passphrase |
+
+## File Structure
+
+```
+plugins/credential-mgr/
+├── secret-mgr.sh                  # Human-only credential manager
+├── secure-exec.sh                 # Transparent auth wrapper (Claude uses this)
+├── install-credential-mgr.sh      # Installer
+├── lib/
+│   ├── store.sh                   # Read/write age-encrypted credential files
+│   └── inject.sh                  # Credential injection strategies (env-var, flag)
+├── services.d/
+│   ├── github.sh                  # GitHub: GH_TOKEN env var
+│   ├── gcloud.sh                  # GCP: CLOUDSDK_AUTH_ACCESS_TOKEN
+│   ├── aws.sh                     # AWS: AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY
+│   └── docker.sh                  # Docker: DOCKER_TOKEN
+├── config/
+│   ├── hooks-config.json          # PreToolUse hook config
+│   └── claude-md-snippet.md       # CLAUDE.md injection for agent awareness
+└── hooks/
+    └── deny-secret-mgr.sh         # Hook script that blocks secret-mgr + age access
+```
+
+Runtime data (created by installer/registration):
+```
+$PARA_LLM_ROOT/plugins/credential-mgr/
+├── .bin/                          # 0700 — age binary lives here (OFF PATH)
+│   └── age                        # age binary (downloaded by installer)
+├── .keys/                         # 0700 — age identity
+│   └── key.txt.age                # Passphrase-protected age identity
+└── registry/                      # 0700 directory
+    ├── github.conf                # 0600, shell-sourceable metadata
+    ├── github.age                 # 0600, age-encrypted token
+    ├── gcloud.conf
+    ├── gcloud.age
+    └── ...
+```
+
+## Data Model — Service Registration
+
+Each service has two files:
+
+### Metadata file (`registry/<service>.conf`) — shell-sourceable, not secret
+```bash
+# registry/github.conf
+SERVICE_NAME="github"
+AUTH_METHOD="env-var"              # env-var | flag
+INJECT_ENV="GH_TOKEN"             # env var name (for env-var method)
+INJECT_FLAG=""                     # CLI flag like --token (for flag method)
+CREDENTIAL_SOURCE="static"        # static | cli
+CLI_COMMAND=""                     # e.g., "gh auth token" (for cli source)
+TOKEN_FILE="github.age"           # age-encrypted file (for static source)
+CREATED_AT="2026-02-24T..."
+LAST_ROTATED="2026-02-24T..."
+COMMANDS="gh,git"                  # comma-separated commands this service handles
+```
+
+### Credential file (`registry/<service>.age`) — age-encrypted
+Contains the raw token, encrypted with the age identity's public key.
+
+### Credential sources
+
+| Source | How it works | Use case |
+|--------|-------------|----------|
+| `static` | Token stored in age-encrypted file | API tokens, PATs, static secrets |
+| `cli` | Runs a native CLI command to get a live token | `gh auth token`, `gcloud auth print-access-token`, `aws sts get-session-token` |
+
+The `cli` source delegates OAuth entirely to the native tool. Those tools already handle:
+- OAuth device flows
+- Token refresh
+- Secure storage (in their own credential stores)
+- Cross-platform support
+
+We don't reimplement OAuth — we call the tool that already does it.
+
+## CLI Designs
+
+### `secret-mgr --help`
+```
+secret-mgr - Credential manager for para-llm-directory
+
+Usage:
+  secret-mgr register <service>       Register a new service interactively
+  secret-mgr set <service> <token>    Set/update a token (or --stdin)
+  secret-mgr get <service>            Decrypt and print credential to stdout
+  secret-mgr list                     List registered services
+  secret-mgr remove <service>         Remove a service and its encrypted data
+  secret-mgr status                   Show services with health info
+  secret-mgr import-env <VAR> <svc>   Import from existing env var
+  secret-mgr init-keys                Generate age identity (interactive)
+
+Options:
+  --help       Show this help
+  --quiet      Suppress non-essential output
+```
+
+### `secure-exec --help`
+```
+secure-exec - Run commands with transparent credential injection
+
+Usage:
+  secure-exec <command> [args...]     Execute command with credentials
+  secure-exec --list-services         List available services
+  secure-exec --help                  Show this help
+
+Examples:
+  secure-exec gh pr list
+  secure-exec curl -s https://api.github.com/user
+  secure-exec gcloud storage ls
+```
+
+### `secure-exec` core logic (pseudocode)
+```bash
+main() {
+    CMD="$1"; shift
+    PASSPHRASE="${_SECURE_EXEC_PASSPHRASE:?Session passphrase not set}"
+    AGE_BIN="$PLUGIN_DIR/.bin/age"
+
+    for conf in "$REGISTRY_DIR"/*.conf; do
+        source "$conf"
+        if matches "$CMD" "$COMMANDS"; then
+            case "$CREDENTIAL_SOURCE" in
+                static)
+                    TOKEN=$(echo "$PASSPHRASE" | \
+                        "$AGE_BIN" -d -i "$KEYS_DIR/key.txt.age" \
+                        "$REGISTRY_DIR/$TOKEN_FILE")
+                    ;;
+                cli)
+                    TOKEN=$(eval "$CLI_COMMAND")
+                    ;;
+            esac
+            case "$AUTH_METHOD" in
+                env-var) export "$INJECT_ENV"="$TOKEN" ;;
+                flag)    set -- "$INJECT_FLAG" "$TOKEN" "$@" ;;
+            esac
+        fi
+    done
+    exec "$CMD" "$@"
+}
+```
+
+## Session Lifecycle — Passphrase Management
+
+### Session start (`tmux-new-branch.sh`)
+
+```bash
+if [[ "${CRED_MGR_ENABLED:-0}" == "1" ]]; then
+    # Generate session passphrase (random, never touches disk as plaintext
+    # beyond the secure tmpfile)
+    SESSION_PASSPHRASE=$(openssl rand -hex 32)
+
+    # Write to a tmpfile readable only by current user
+    PASSPHRASE_FILE="$ENV_DIR/.session-passphrase"
+    echo "$SESSION_PASSPHRASE" > "$PASSPHRASE_FILE"
+    chmod 0600 "$PASSPHRASE_FILE"
+
+    # secure-exec reads this file; the var is NOT exported to Claude's env
+    # Instead, secure-exec.sh reads PASSPHRASE_FILE directly
+    PLUGIN_DIR="$SCRIPT_DIR/plugins/credential-mgr"
+
+    # Only add secure-exec to PATH (not secret-mgr, not .bin/)
+    tmux send-keys "export PATH=\"$PLUGIN_DIR:\$PATH\"" Enter
+
+    # Set the passphrase file location for secure-exec
+    # This env var is benign — it just points to a file.
+    # The file requires the age key to be useful, and the age key
+    # requires the passphrase to decrypt. Circular dependency
+    # prevents exploitation.
+    tmux send-keys "export _SECURE_EXEC_PASSFILE=\"$PASSPHRASE_FILE\"" Enter
+fi
+```
+
+### Session end (`tmux-cleanup-branch.sh`)
+
+```bash
+# Destroy session passphrase
+rm -f "$ENV_DIR/.session-passphrase"
+```
+
+## Integration Points
+
+### `install.sh`
+Replace the credential-proxy section with credential-mgr:
+- Prompt user to install credential manager plugin
+- Run `install-credential-mgr.sh` which:
+  - Downloads `age` binary to `$PLUGIN_DIR/.bin/` (0700)
+  - Generates age identity with passphrase protection
+  - Creates registry directory (0700)
+  - Merges deny rules into `.claude/settings.json`
+  - Merges PreToolUse hook into global Claude settings (`~/.claude/settings.json`)
+  - Optionally walks through registering first service (GitHub)
+  - Saves `CRED_MGR_ENABLED=1` to config
+
+### `tmux-new-branch.sh`
+Replace `start_credential_proxy()` with `start_credential_mgr()`:
+- Generates session passphrase
+- Adds `secure-exec` (only) to PATH in the tmux pane
+- Sets `_SECURE_EXEC_PASSFILE` env var
+- Injects CLAUDE.md snippet into the project's CLAUDE.md
+
+### `install.sh` chmod section
+Add chmod for credential-mgr plugin scripts.
+
+## CLAUDE.md Snippet (injected into projects)
+
+```markdown
+## Authenticated Services (secure-exec)
+Use `secure-exec` to run commands that need authentication:
+  secure-exec gh pr list
+  secure-exec curl -s https://api.github.com/user
+Run `secure-exec --list-services` to see available services.
+Do NOT attempt to use `secret-mgr`, `age`, or read credentials directly.
 ```
 
 ## Data Flow Diagrams
 
-### Scenario 1: Session startup — Vault issues ephemeral credentials
+### Scenario 1: Human registers a service
 
 ```
- Orchestrator                  Vault Server               Cloud Providers
- (tmux-new-branch.sh)         ────────────               ───────────────
-       │                            │                           │
-       │  vault login               │                           │
-       │  (AppRole / OIDC)          │                           │
-       │ ──────────────────────▶    │                           │
-       │                            │                           │
-       │ ◀── vault token ─────────  │                           │
-       │                            │                           │
-       │  vault read                │                           │
-       │  gcp/token/agent-role      │                           │
-       │ ──────────────────────▶    │                           │
-       │                            │ ── create OAuth token ──▶ │ (GCP IAM)
-       │                            │ ◀── ya29.xxxx (1h TTL) ── │
-       │ ◀── token + lease_id ────  │                           │
-       │                            │                           │
-       │  vault read                │                           │
-       │  github/token              │                           │
-       │ ──────────────────────▶    │                           │
-       │                            │ ── create install token ▶ │ (GitHub App)
-       │                            │ ◀── ghs_xxxx (1h TTL) ──  │
-       │ ◀── token + lease_id ────  │                           │
-       │                            │                           │
-       │  vault read                │                           │
-       │  aws/creds/agent-role      │                           │
-       │ ──────────────────────▶    │                           │
-       │                            │ ── STS AssumeRole ──────▶ │ (AWS IAM)
-       │                            │ ◀── temp creds (1h) ────  │
-       │ ◀── creds + lease_id ───   │                           │
-       │                            │                           │
-       │                            │                           │
-       │  Save lease IDs to         │                           │
-       │  $ENV_DIR/.vault-leases    │                           │
-       │                            │                           │
-       │  Inject into tmux pane:    │                           │
-       │  export GCP_ACCESS_TOKEN=ya29.xxxx                     │
-       │  export GITHUB_TOKEN=ghs_xxxx                          │
-       │  export AWS_ACCESS_KEY_ID=AKIA...                      │
-       │  export AWS_SECRET_ACCESS_KEY=xxxx                     │
-       │                            │                           │
-       │  Launch Claude Code        │                           │
-       │                            │                           │
+ Human                      secret-mgr                      age
+ ─────                      ──────────                      ───
+   │                             │                            │
+   │  secret-mgr register       │                            │
+   │  github                     │                            │
+   │ ──────────────────────────▶│                            │
+   │                             │                            │
+   │ ◀── "Enter token:"         │                            │
+   │ ── ghp_abc123 ───────────▶ │                            │
+   │                             │  age -e -R key.pub         │
+   │                             │  > registry/github.age     │
+   │                             │ ──────────────────────────▶│
+   │                             │                            │
+   │                             │  Write github.conf         │
+   │                             │  (SERVICE_NAME, COMMANDS,  │
+   │                             │   AUTH_METHOD, etc.)        │
+   │                             │                            │
+   │ ◀── "github registered"    │                            │
+   │                             │                            │
 
- All credentials have 1h TTL. Vault tracks leases for early revocation.
- Orchestrator saves lease IDs so cleanup can revoke them immediately.
+Token is encrypted at rest. Plaintext never stored on disk.
 ```
 
-### Scenario 2: Agent makes an API call with ephemeral credentials
+### Scenario 2: Agent runs `secure-exec gh pr list`
 
 ```
- Agent (Claude Code)                                           API Server
- ─────────────────                                             ──────────
-       │                                                            │
-       │  curl -H "Authorization: Bearer $GCP_ACCESS_TOKEN" \       │
-       │       https://storage.googleapis.com/bucket/object         │
-       │ ──────────────────────────────────────────────────────▶    │
-       │                                                            │
-       │    Token ya29.xxxx is valid (issued <1h ago)               │
-       │    IAM role allows storage.objectViewer only               │
-       │                                                            │
-       │ ◀── 200 OK + object contents ────────────────────────────  │
-       │                                                            │
+ Agent (Claude Code)        secure-exec              secret-mgr         age
+ ─────────────────         ────────────             ──────────         ───
+   │                            │                        │               │
+   │  secure-exec gh pr list    │                        │               │
+   │ ─────────────────────────▶│                        │               │
+   │                            │                        │               │
+   │                            │  Match: "gh" →         │               │
+   │                            │  github.conf           │               │
+   │                            │                        │               │
+   │                            │  Read passphrase from   │               │
+   │                            │  _SECURE_EXEC_PASSFILE  │               │
+   │                            │                        │               │
+   │                            │  secret-mgr get github  │               │
+   │                            │ ──────────────────────▶│               │
+   │                            │                        │  age -d ...   │
+   │                            │                        │ ─────────────▶│
+   │                            │                        │ ◀── ghp_xxx ─│
+   │                            │ ◀── ghp_xxx ─────────  │               │
+   │                            │                        │               │
+   │                            │  export GH_TOKEN=ghp_xxx               │
+   │                            │  exec gh pr list       │               │
+   │                            │                        │               │
+   │ ◀── (output of gh pr list) │                        │               │
+   │                            │                        │               │
 
- No proxy. No interception. Agent uses the credential directly.
- Security relies on: short TTL + scoped IAM permissions.
+Agent sees: list of PRs.
+Agent never sees: the token value.
 ```
 
-### Scenario 3: Agent does `git push` with ephemeral GitHub token
+### Scenario 3: Agent runs `secure-exec gcloud storage ls` (CLI credential source)
 
 ```
- Agent (Claude Code)                                       GitHub
- ─────────────────                                         ──────
-       │                                                      │
-       │  GITHUB_TOKEN is set in environment                  │
-       │  (git automatically uses it via credential helper    │
-       │   or GIT_ASKPASS, or agent sets header directly)     │
-       │                                                      │
-       │  git push origin feature-branch                      │
-       │ ─────────────────────────────────────────────────▶   │
-       │    Authorization: Basic base64(x-token:ghs_xxxx)     │
-       │                                                      │
-       │    Token ghs_xxxx is valid:                          │
-       │    - GitHub App installation token                   │
-       │    - Scoped to: contents:write, pull_requests:write  │
-       │    - Expires in: 47 minutes                          │
-       │                                                      │
-       │ ◀── push accepted ──────────────────────────────────  │
-       │                                                      │
+ Agent (Claude Code)        secure-exec              gcloud CLI
+ ─────────────────         ────────────             ──────────
+   │                            │                        │
+   │  secure-exec gcloud        │                        │
+   │  storage ls                │                        │
+   │ ─────────────────────────▶│                        │
+   │                            │                        │
+   │                            │  Match: "gcloud" →     │
+   │                            │  gcloud.conf           │
+   │                            │  CREDENTIAL_SOURCE=cli │
+   │                            │  CLI_COMMAND="gcloud   │
+   │                            │    auth print-access-  │
+   │                            │    token"              │
+   │                            │                        │
+   │                            │  gcloud auth           │
+   │                            │  print-access-token    │
+   │                            │ ──────────────────────▶│
+   │                            │ ◀── ya29.xxxx ────────│
+   │                            │                        │
+   │                            │  export CLOUDSDK_AUTH_ACCESS_TOKEN=ya29.xxxx
+   │                            │  exec gcloud storage ls
+   │                            │
+   │ ◀── (bucket listing)       │
+   │                            │
 
- If agent runs for >1h and token expires mid-session:
- - git push fails with 401
- - Agent reports failure to user
- - User can re-run credential injection or extend session
+OAuth handled entirely by gcloud's own credential store.
+No age encryption needed — gcloud manages its own tokens.
 ```
 
-### Scenario 4: Agent runs `gcloud` / `gh` CLI with ephemeral credentials
+### Scenario 4: Agent tries to access credentials directly (BLOCKED)
 
 ```
- Agent (Claude Code)         gcloud CLI                        GCP API
- ─────────────────          ──────────                         ───────
-       │                      │                                    │
-       │  Environment has:    │                                    │
-       │  GCP_ACCESS_TOKEN    │                                    │
-       │  (or GOOGLE_APPLICATION_CREDENTIALS                       │
-       │   pointing to temp SA key file)                           │
-       │                      │                                    │
-       │  gcloud storage ls   │                                    │
-       │ ─────────────────▶   │                                    │
-       │                      │                                    │
-       │                      │  Uses GCP_ACCESS_TOKEN from env    │
-       │                      │  (no need for refresh token)       │
-       │                      │                                    │
-       │                      │ ── API call + Bearer ya29.xxxx ─▶  │
-       │                      │                                    │
-       │                      │ ◀── bucket listing ────────────── │
-       │                      │                                    │
-       │ ◀── gs://bucket-a ── │                                    │
-       │    gs://bucket-b     │                                    │
-       │                      │                                    │
+ Agent (Claude Code)        Claude Code Runtime
+ ─────────────────         ──────────────────
+   │                            │
+   │  Bash: secret-mgr get     │
+   │  github                    │
+   │ ─────────────────────────▶│
+   │                            │
+   │  Layer 1: deny rule        │
+   │  matches "secret-mgr*"    │
+   │ ◀── BLOCKED ──────────────│
+   │                            │
+   │  (Or if deny rule missed:) │
+   │                            │
+   │  Layer 2: PreToolUse hook  │
+   │  sees "secret-mgr" in cmd │
+   │ ◀── BLOCKED ──────────────│
+   │                            │
+   │  (Or if hook missed:)      │
+   │                            │
+   │  Layer 3: "secret-mgr"    │
+   │  is not on PATH            │
+   │ ◀── "command not found" ──│
+   │                            │
+   │  (Or if agent finds path:) │
+   │                            │
+   │  Layer 4: age identity     │
+   │  requires passphrase that  │
+   │  agent doesn't have        │
+   │ ◀── decryption failed ────│
+   │                            │
 
- gcloud, gsutil, bq, etc. all respect the GCP_ACCESS_TOKEN env var.
- No gcloud auth login needed. No refresh token on disk.
- Token expires in 1h — gcloud will get a 401 after that.
-
- For gh CLI:
- - GITHUB_TOKEN env var is natively supported
- - gh uses it for all API calls automatically
- - No gh auth login needed
-```
-
-### Scenario 5: Agent does `docker pull` with ephemeral registry token
-
-```
- Agent (Claude Code)         docker CLI                        Registry
- ─────────────────          ──────────                         ────────
-       │                      │                                    │
-       │  docker pull         │                                    │
-       │  us-docker.pkg.dev/  │                                    │
-       │  project/repo/img    │                                    │
-       │ ─────────────────▶   │                                    │
-       │                      │                                    │
-       │                      │  Checks ~/.docker/config.json      │
-       │                      │  credHelpers → docker-credential-  │
-       │                      │  gcloud (uses GCP_ACCESS_TOKEN)    │
-       │                      │                                    │
-       │                      │ ── pull + Bearer ya29.xxxx ─────▶  │
-       │                      │                                    │
-       │                      │ ◀── image layers ────────────────  │
-       │                      │                                    │
-       │ ◀── image pulled ──  │                                    │
-       │                      │                                    │
-
- docker-credential-gcloud reads GCP_ACCESS_TOKEN from environment.
- Same ephemeral token used for both gcloud CLI and Docker registry.
- No separate Docker token needed for GCP registries.
-
- For non-GCP registries (Docker Hub, GHCR):
- - DOCKER_TOKEN injected as env var
- - Simple GIT_ASKPASS-style helper reads from env
- - Or: docker login with ephemeral token at session start
-```
-
-### Scenario 6: Session cleanup — immediate lease revocation
-
-```
- Orchestrator                  Vault Server               Cloud Providers
- (tmux-cleanup-branch.sh)     ────────────               ───────────────
-       │                            │                           │
-       │  Read lease IDs from       │                           │
-       │  $ENV_DIR/.vault-leases    │                           │
-       │                            │                           │
-       │  vault lease revoke        │                           │
-       │  <gcp-lease-id>            │                           │
-       │ ──────────────────────▶    │                           │
-       │                            │ ── revoke token ────────▶ │ (GCP IAM)
-       │                            │                           │
-       │  vault lease revoke        │                           │
-       │  <github-lease-id>         │                           │
-       │ ──────────────────────▶    │                           │
-       │                            │ ── revoke token ────────▶ │ (GitHub)
-       │                            │                           │
-       │  vault lease revoke        │                           │
-       │  <aws-lease-id>            │                           │
-       │ ──────────────────────▶    │                           │
-       │                            │ ── revoke creds ────────▶ │ (AWS IAM)
-       │                            │                           │
-       │  rm $ENV_DIR/.vault-leases │                           │
-       │  rm -rf $ENV_DIR           │                           │
-       │                            │                           │
-
- Credentials are invalidated IMMEDIATELY on cleanup.
- Even if TTL was 1 hour, revocation makes them useless in seconds.
- If cleanup crashes, TTL expiry is the safety net.
-```
-
-### Scenario 7: Credential expires mid-session (TTL exceeded)
-
-```
- Agent (Claude Code)                                           API Server
- ─────────────────                                             ──────────
-       │                                                            │
-       │  (60+ minutes into session)                                │
-       │                                                            │
-       │  curl -H "Authorization: Bearer $GCP_ACCESS_TOKEN" \       │
-       │       https://storage.googleapis.com/bucket/object         │
-       │ ──────────────────────────────────────────────────────▶    │
-       │                                                            │
-       │    Token ya29.xxxx has EXPIRED                              │
-       │                                                            │
-       │ ◀── 401 Unauthorized ─────────────────────────────────────  │
-       │                                                            │
-       │                                                            │
-       │  Agent (per CLAUDE.md):                                    │
-       │  "I'm getting a 401 from GCP Storage.                     │
-       │   My credentials may have expired.                         │
-       │   Please refresh them or extend the session."              │
-       │                                                            │
-
- This is the expected failure mode. The user can:
- 1. Re-run the orchestrator to get fresh credentials
- 2. Or configure longer TTLs in Vault
- 3. Or use Vault Agent for auto-renewal (advanced setup)
-```
-
-### Summary: Where Credentials Live in v3
-
-```
-┌──────────────────────────────────────────────────────────────────────┐
-│                        Agent Process (Claude Code)                    │
-│                                                                      │
-│  HAS (as env vars):                Properties:                       │
-│  • GITHUB_TOKEN=ghs_xxxx          • Expires in ≤1h                  │
-│  • GCP_ACCESS_TOKEN=ya29.xxxx     • Scoped to minimum IAM role      │
-│  • AWS_ACCESS_KEY_ID=AKIA...      • Unique to this session          │
-│  • AWS_SECRET_ACCESS_KEY=xxxx     • Revoked immediately on cleanup  │
-│  • DOCKER_TOKEN=dckr_xxxx         • Audited by Vault                │
-│                                                                      │
-│  CANNOT DO (even with the credential):                               │
-│  • Access resources outside IAM scope                                │
-│  • Use credential after session ends (revoked)                       │
-│  • Use credential after TTL (expired)                                │
-│  • Escalate permissions (scoped IAM role)                            │
-│                                                                      │
-│  Acceptable risk:                                                    │
-│  • Agent CAN see credential values (they're env vars)               │
-│  • Agent COULD exfiltrate them (but they expire quickly)             │
-│  • A leaked credential is useless after cleanup/expiry               │
-└──────────────────────────────────────────────────────────────────────┘
-
-┌──────────────────────────────────────────────────┐
-│  Vault Server (self-hosted or HCP)               │
-│                                                  │
-│  Manages:                                        │
-│  • Dynamic secret generation per session         │
-│  • Lease tracking + TTL enforcement              │
-│  • Early revocation on session cleanup           │
-│  • Audit log of every credential issued          │
-│                                                  │
-│  Vault Secrets Engines in use:                   │
-│  • gcp/    → OAuth access tokens                 │
-│  • github/ → App installation tokens             │
-│  • aws/    → STS session credentials             │
-│  • database/ → ephemeral DB user/pass (optional) │
-│  • ssh/    → signed certificates (optional)      │
-└──────────────────────────────────────────────────┘
-
-┌──────────────────────────────────────────────────┐
-│  Lease File: $ENV_DIR/.vault-leases              │
-│                                                  │
-│  gcp/token/agent-role:lease_abc123               │
-│  github/token:lease_def456                       │
-│  aws/creds/agent-role:lease_ghi789               │
-│                                                  │
-│  Used by cleanup to revoke all session creds.    │
-│  Deleted when environment is torn down.          │
-└──────────────────────────────────────────────────┘
-```
-
-### Comparison: v2 (proxy) vs v3 (ephemeral) data flow
-
-```
-v2: Agent → HTTP Proxy → (inject secret) → API Server
-    Agent never sees secret. Requires proxy process + config + CA trust.
-
-v3: Orchestrator → Vault → (get ephemeral cred) → env var → Agent → API Server
-    Agent sees credential, but it expires in 1h and is scoped.
-    No proxy. No interception. No CA. Just env vars.
-
-v2 is more secure (agent never sees secret).
-v3 is far simpler (no proxy, no credential helpers, no CA management).
-v3 is sufficient for trusted developer environments.
-v2 is better for untrusted/multi-tenant/production-access scenarios.
+Four independent layers. Each sufficient on its own.
 ```
 
 ## Prerequisites
 
-### Vault Server
+- **`age`** — Single static binary (~5MB). No runtime dependencies. Cross-platform (mac/linux/windows).
+  - Install: `brew install age` / `apt install age` / download from [github.com/FiloSottile/age](https://github.com/FiloSottile/age)
+  - The installer downloads it automatically to `$PLUGIN_DIR/.bin/`
+- **`jq`** — For JSON parsing in hooks (commonly pre-installed)
+- **`openssl`** — For session passphrase generation (pre-installed on all platforms)
 
-One of:
-- **HCP Vault** (HashiCorp cloud, managed) — simplest to get started
-- **Self-hosted Vault** (single binary, `vault server -dev` for testing)
-- **Vault in Docker** — `docker run -d --name vault -p 8200:8200 hashicorp/vault`
-
-### Vault Secrets Engines (configure once per org)
-
-| Engine | Setup | What it needs |
-|--------|-------|---------------|
-| `gcp` | `vault secrets enable gcp` + configure GCP service account | GCP project with IAM admin |
-| `github` | Install [vault-plugin-secrets-github](https://github.com/martinbaillie/vault-plugin-secrets-github) + configure GitHub App | GitHub App with desired permissions |
-| `aws` | `vault secrets enable aws` + configure IAM user with STS permissions | AWS account with IAM admin |
-| `database` | `vault secrets enable database` + configure connection | Database connection string |
-
-### Vault Auth Method (how the orchestrator authenticates to Vault)
-
-Recommended: **AppRole** for automated orchestration
-```bash
-vault auth enable approle
-vault write auth/approle/role/para-llm-agent \
-    token_ttl=2h \
-    token_max_ttl=4h \
-    policies="agent-creds"
-```
-
-Policy `agent-creds`:
-```hcl
-path "gcp/token/agent-role" {
-  capabilities = ["read"]
-}
-path "github/token" {
-  capabilities = ["read"]
-}
-path "aws/creds/agent-role" {
-  capabilities = ["read"]
-}
-path "sys/leases/revoke" {
-  capabilities = ["update"]
-}
-```
-
-## Plugin Directory Structure
-
-```
-plugins/credential-auth/
-├── README.md
-├── credential-auth.sh           # Generate creds + inject into pane (~80 lines)
-├── credential-cleanup.sh        # Revoke leases on session end (~30 lines)
-├── install-credential-auth.sh   # Install + configure Vault connection (~80 lines)
-└── config/
-    ├── vault-policy.example.hcl # Example Vault policy for agent credentials
-    └── claude-md-snippet.md     # CLAUDE.md template for agent awareness
-```
-
-**3 scripts + 2 config files.** That's it.
+No server infrastructure. No Vault. No cloud dependencies.
 
 ## Configuration
 
 Stored in `$PARA_LLM_ROOT/config` (same as other para-llm settings):
 
 ```bash
-# Credential auth settings
-CRED_AUTH_ENABLED=1
-VAULT_ADDR=https://vault.example.com:8200
-# VAULT_ROLE_ID and VAULT_SECRET_ID stored in macOS Keychain (not in config file)
-# Or: VAULT_TOKEN for dev/testing
-
-# Which engines to use (space-separated)
-CRED_AUTH_ENGINES="gcp github aws"
-
-# Engine-specific settings
-CRED_AUTH_GCP_ROLE="agent-role"
-CRED_AUTH_GITHUB_ORG="my-org"
-CRED_AUTH_AWS_ROLE="agent-role"
-
-# TTL override (default: use Vault role defaults)
-# CRED_AUTH_TTL="1h"
+# Credential manager settings
+CRED_MGR_ENABLED=1
+CRED_MGR_PLUGIN_DIR="$INSTALL_DIR/plugins/credential-mgr"
 ```
 
-## Core Script: `credential-auth.sh`
+Per-service configuration lives in the registry `.conf` files (see Data Model above).
 
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
-# Generate ephemeral credentials from Vault and output env var exports.
-# Usage: credential-auth.sh <env-dir>
-# Outputs: export statements to stdout (eval'd or sent to tmux pane)
-# Side effect: writes lease IDs to <env-dir>/.vault-leases
-
-ENV_DIR="${1:?Usage: credential-auth.sh <env-dir>}"
-LEASE_FILE="$ENV_DIR/.vault-leases"
-> "$LEASE_FILE"  # truncate
-
-# Authenticate to Vault (AppRole)
-if [[ -n "${VAULT_TOKEN:-}" ]]; then
-    : # Already authenticated
-elif [[ -n "${VAULT_ROLE_ID:-}" ]]; then
-    export VAULT_TOKEN=$(vault write -field=token auth/approle/login \
-        role_id="$VAULT_ROLE_ID" secret_id="$VAULT_SECRET_ID")
-fi
-
-# GCP access token
-if [[ " $CRED_AUTH_ENGINES " == *" gcp "* ]]; then
-    RESULT=$(vault read -format=json "gcp/token/${CRED_AUTH_GCP_ROLE}")
-    echo "export GCP_ACCESS_TOKEN=$(echo "$RESULT" | jq -r '.data.token')"
-    echo "export CLOUDSDK_AUTH_ACCESS_TOKEN=$(echo "$RESULT" | jq -r '.data.token')"
-    echo "$RESULT" | jq -r '.lease_id' >> "$LEASE_FILE"
-fi
-
-# GitHub token
-if [[ " $CRED_AUTH_ENGINES " == *" github "* ]]; then
-    RESULT=$(vault read -format=json "github/token" org_name="$CRED_AUTH_GITHUB_ORG")
-    echo "export GITHUB_TOKEN=$(echo "$RESULT" | jq -r '.data.token')"
-    echo "$RESULT" | jq -r '.lease_id' >> "$LEASE_FILE"
-fi
-
-# AWS credentials
-if [[ " $CRED_AUTH_ENGINES " == *" aws "* ]]; then
-    RESULT=$(vault read -format=json "aws/creds/${CRED_AUTH_AWS_ROLE}")
-    echo "export AWS_ACCESS_KEY_ID=$(echo "$RESULT" | jq -r '.data.access_key')"
-    echo "export AWS_SECRET_ACCESS_KEY=$(echo "$RESULT" | jq -r '.data.secret_key')"
-    echo "export AWS_SESSION_TOKEN=$(echo "$RESULT" | jq -r '.data.security_token')"
-    echo "$RESULT" | jq -r '.lease_id' >> "$LEASE_FILE"
-fi
-
-chmod 600 "$LEASE_FILE"
-```
-
-## Core Script: `credential-cleanup.sh`
-
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
-# Revoke all Vault leases for a session.
-# Usage: credential-cleanup.sh <env-dir>
-
-ENV_DIR="${1:?Usage: credential-cleanup.sh <env-dir>}"
-LEASE_FILE="$ENV_DIR/.vault-leases"
-
-if [[ ! -f "$LEASE_FILE" ]]; then
-    exit 0
-fi
-
-while IFS= read -r lease_id; do
-    [[ -z "$lease_id" ]] && continue
-    vault lease revoke "$lease_id" 2>/dev/null || true
-done < "$LEASE_FILE"
-
-rm -f "$LEASE_FILE"
-```
-
-## Environment Lifecycle Integration
-
-### On `tmux-new-branch.sh` (create/resume):
-
-```bash
-if [[ "${CRED_AUTH_ENABLED:-0}" == "1" ]]; then
-    PLUGIN_DIR="$SCRIPT_DIR/plugins/credential-auth"
-
-    # Generate ephemeral credentials and inject into pane
-    ENV_EXPORTS=$("$PLUGIN_DIR/credential-auth.sh" "$ENV_DIR" 2>/dev/null) || {
-        echo "Warning: credential generation failed" >&2
-    }
-
-    if [[ -n "${ENV_EXPORTS:-}" ]]; then
-        while IFS= read -r line; do
-            [[ -n "$line" ]] && tmux send-keys "$line" Enter
-        done <<< "$ENV_EXPORTS"
-    fi
-fi
-```
-
-### On `tmux-cleanup-branch.sh` (cleanup):
-
-```bash
-if [[ -f "$ENV_DIR/.vault-leases" ]]; then
-    PLUGIN_DIR="${SCRIPT_DIR:-$INSTALL_DIR}/plugins/credential-auth"
-    "$PLUGIN_DIR/credential-cleanup.sh" "$ENV_DIR" 2>/dev/null || true
-fi
-```
-
-## CLAUDE.md Snippet
-
-```markdown
-## Authenticated Services
-
-This environment has temporary credentials for external services.
-They are set as environment variables and expire after ~1 hour.
-
-### What this means for you
-- **Use tools normally** — git, docker, gcloud, gh, curl all work with the provided credentials
-- **Do NOT** run auth commands (gcloud auth, gh auth, docker login) — credentials are pre-set
-- **Do NOT** hardcode credentials in files — use the environment variables
-- If you get a 401/403, tell the user — credentials may have expired
-- Credentials are automatically revoked when this session ends
-```
-
-## Installation Flow
+## Comparison: v3 (Vault) vs v4 (secret-mgr + age)
 
 ```
-1. "Install credential auth plugin?"
-   → Requires: Vault CLI (brew install vault), jq
+v3: Orchestrator → Vault Server → Cloud Provider → ephemeral cred → env var → Agent
+    Agent sees credential. Requires Vault server infrastructure.
+    Security relies on: short TTL + scoped IAM + Vault lease revocation.
 
-2. Configure Vault connection:
-   → VAULT_ADDR (Vault server URL)
-   → Auth method: AppRole (store role_id/secret_id in Keychain)
-   → Or: VAULT_TOKEN for dev/testing
+v4: Human → secret-mgr → age encrypt → disk
+    Agent → secure-exec → secret-mgr → age decrypt → env var → exec command
+    Agent never sees credential. No server infrastructure.
+    Security relies on: 4 isolation layers + age encryption + passphrase.
 
-3. Configure engines (which services need credentials):
-   → GCP: role name for gcp/token/
-   → GitHub: org name for github/token
-   → AWS: role name for aws/creds/
-   → (only configure what you need)
-
-4. Test credential generation:
-   → Run credential-auth.sh, verify tokens are issued
-
-5. Save CRED_AUTH_ENABLED=1 to config
+v3 is better when: you already run Vault, need dynamic secrets, need audit logs.
+v4 is better when: you want simplicity, offline support, no server infra, cross-platform.
+Both are valid. v4 is the default; v3 is an advanced option for orgs with Vault.
 ```
 
-## When to Upgrade to v2 (Proxy Architecture)
+## When to Use Vault (v3) Instead
 
-v3 is sufficient when:
-- Agents run in a trusted developer environment
-- Credentials are scoped to non-destructive permissions
-- 1-hour exposure window is acceptable
+v4 is sufficient when:
+- Individual developer or small team
+- Static tokens or CLI-managed OAuth
+- No centralized audit requirements
+- Want minimal infrastructure
 
-Consider upgrading to v2 (Secretless Broker proxy) when:
-- Agents need write access to production systems
-- Running in multi-tenant or untrusted environments
-- Regulatory requirements mandate request-level audit trails
-- You need operation-level filtering beyond IAM scoping
-- Zero-trust: agent must NEVER see any credential value
+Consider v3 (Vault) when:
+- Organization already runs Vault
+- Need centralized credential audit trail
+- Need dynamic/ephemeral secrets from Vault secrets engines
+- Multi-tenant environment with policy-based access
+- Regulatory requirements mandate server-side credential management
+
+## Phased Implementation
+
+### Phase 1 — MVP (this PR)
+1. Create `plugins/credential-mgr/` directory structure
+2. Implement `secret-mgr.sh`: `register`, `set`, `get`, `list`, `remove`, `status`, `import-env`, `init-keys`
+3. Implement `secure-exec.sh`: command matching, env-var injection, `--list-services`, `--help`
+4. Implement `lib/store.sh`: age encrypt/decrypt helpers
+5. Implement `lib/inject.sh`: env-var and flag injection
+6. Create `services.d/github.sh` service definition template
+7. Create `hooks/deny-secret-mgr.sh` + `config/hooks-config.json`
+8. Add deny rules to `.claude/settings.json`
+9. Create `install-credential-mgr.sh` (download age, init keys, create dirs)
+10. Update `install.sh` to replace credential-proxy with credential-mgr
+11. Update `tmux-new-branch.sh` to use `start_credential_mgr()` with session passphrase
+12. Create `config/claude-md-snippet.md`
+
+### Phase 2 — More services + flag injection (future)
+- Service definitions for gcloud, aws, docker
+- Flag-based injection method (for tools that don't use env vars)
+- `secret-mgr rotate` command for token rotation tracking
+- Config-file injection (write temp config file, clean up after exec)
+
+### Phase 3 — Vault integration as optional backend (future)
+- `CREDENTIAL_SOURCE="vault"` for dynamic secrets
+- Vault lease tracking and revocation
+- Vault AppRole authentication
+- Can coexist with static/cli sources per-service
 
 ## Verification
 
-1. **Vault connectivity**: `vault status` returns sealed=false
-2. **Credential generation**: `credential-auth.sh /tmp/test` outputs valid export statements
-3. **GCP token works**: `curl -H "Authorization: Bearer $GCP_ACCESS_TOKEN" https://storage.googleapis.com/...`
-4. **GitHub token works**: `GITHUB_TOKEN=<token> gh repo list`
-5. **AWS creds work**: `aws sts get-caller-identity`
-6. **Lease revocation**: `credential-cleanup.sh /tmp/test` → tokens become invalid
-7. **TTL expiry**: Wait >1h → tokens expire naturally
-8. **Full lifecycle**: Create env → creds injected → agent works → cleanup → creds revoked
-
-## Implementation Sequence
-
-1. Write `credential-auth.sh` (generate creds, ~80 lines)
-2. Write `credential-cleanup.sh` (revoke leases, ~30 lines)
-3. Write `install-credential-auth.sh` (install + configure, ~80 lines)
-4. Create `vault-policy.example.hcl` and `claude-md-snippet.md`
-5. Integrate with `tmux-new-branch.sh` (inject creds before Claude launch)
-6. Integrate with `tmux-cleanup-branch.sh` (revoke on cleanup)
-7. Add install section to `install.sh`
+1. `secret-mgr init-keys` → generates passphrase-protected age identity
+2. `secret-mgr register github` → interactively register GitHub
+3. `secret-mgr set github ghp_test123` → encrypts and stores token
+4. `secret-mgr get github` → decrypts and prints token
+5. `secret-mgr list` → shows github service
+6. `secure-exec gh pr list` → succeeds with injected GH_TOKEN
+7. `secure-exec --list-services` → shows github
+8. Verify agent cannot run `secret-mgr` (Layer 1: deny rules)
+9. Verify agent cannot run `age` (Layer 2: hook blocks it)
+10. Verify `secret-mgr` not on agent PATH (Layer 3)
+11. Verify age identity requires passphrase (Layer 4)
+12. Run `install.sh` and confirm credential-mgr plugin installs correctly
+13. Full lifecycle: register service → start tmux session → agent uses secure-exec → session cleanup destroys passphrase
