@@ -191,6 +191,36 @@ STT_ENABLED=0
 EOF
 fi
 
+# --- Optional: Credential proxy plugin ---
+CRED_PROXY_ENABLED=false
+if [[ "$NON_INTERACTIVE" == true ]]; then
+    echo "Skipping credential proxy plugin (non-interactive mode)"
+else
+    echo ""
+    echo "Optional: Credential Proxy plugin"
+    echo "  Provides transparent authentication for agent tools (HTTP proxy + credential helpers)"
+    echo "  Agents never see secret values - they're injected automatically"
+    echo ""
+    echo "  Dependencies (installed via homebrew/pip):"
+    echo "    mitmproxy    ~50 MB  (HTTPS interception proxy)"
+    echo "    yq           ~5 MB   (YAML processor)"
+    echo ""
+    read -r -p "Install credential proxy plugin? [y/N]: " cred_proxy_choice
+    if [[ "$cred_proxy_choice" =~ ^[Yy] ]]; then
+        CRED_PROXY_ENABLED=true
+    fi
+fi
+
+if [[ "$CRED_PROXY_ENABLED" == true ]]; then
+    "$SCRIPT_DIR/plugins/credential-proxy/install-credential-proxy.sh"
+else
+    cat >> "$PARA_LLM_ROOT/config" << 'EOF'
+
+# Credential proxy settings (disabled - re-run install.sh to enable)
+CRED_PROXY_ENABLED=0
+EOF
+fi
+
 echo "Configuration saved:"
 echo "  Bootstrap pointer: $BOOTSTRAP_FILE"
 echo "  Config: $PARA_LLM_ROOT/config"
@@ -219,6 +249,14 @@ if [[ -d "$SCRIPT_DIR/plugins/claude-state-monitor" ]]; then
 fi
 if [[ -d "$SCRIPT_DIR/plugins/stt" ]]; then
     chmod +x "$SCRIPT_DIR/plugins/stt/"*.sh 2>/dev/null || true
+fi
+if [[ -d "$SCRIPT_DIR/plugins/credential-proxy" ]]; then
+    chmod +x "$SCRIPT_DIR/plugins/credential-proxy/"*.sh 2>/dev/null || true
+    chmod +x "$SCRIPT_DIR/plugins/credential-proxy/proxy/"*.sh 2>/dev/null || true
+    chmod +x "$SCRIPT_DIR/plugins/credential-proxy/proxy/ca/"*.sh 2>/dev/null || true
+    chmod +x "$SCRIPT_DIR/plugins/credential-proxy/helpers/"*.sh 2>/dev/null || true
+    chmod +x "$SCRIPT_DIR/plugins/credential-proxy/oauth/"*.sh 2>/dev/null || true
+    chmod +x "$SCRIPT_DIR/plugins/credential-proxy/providers/"*.sh 2>/dev/null || true
 fi
 
 # Make recovery scripts executable
@@ -439,6 +477,12 @@ echo "  Ctrl+b b  - Toggle broadcast mode (type in all panes)"
 echo "  Ctrl+b R  - Manual restore Claude sessions"
 if [[ "$STT_ENABLED" == true ]]; then
 echo "  Ctrl+b a  - Toggle speech-to-text recording"
+fi
+if [[ "$CRED_PROXY_ENABLED" == true ]]; then
+echo ""
+echo "Credential Proxy:"
+echo "  Config: $PARA_LLM_ROOT/plugins/credential-proxy/credentials.yaml"
+echo "  Proxy starts automatically when creating environments"
 fi
 echo ""
 echo "Recovery:"

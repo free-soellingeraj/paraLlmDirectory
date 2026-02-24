@@ -10,6 +10,74 @@ source "$SCRIPT_DIR/para-llm-config.sh"
 # Ensure envs directory exists
 mkdir -p "$ENVS_DIR"
 
+# Credential proxy: start proxy and inject env vars before launching Claude
+# Usage: start_credential_proxy <env-dir> <project-name> <branch-name>
+start_credential_proxy() {
+    local env_dir="$1"
+    local project="$2"
+    local branch="$3"
+
+    if [[ "${CRED_PROXY_ENABLED:-0}" != "1" ]]; then
+        return
+    fi
+
+    local orchestrator="$SCRIPT_DIR/plugins/credential-proxy/orchestrator.sh"
+    if [[ ! -x "$orchestrator" ]]; then
+        orchestrator="$PARA_LLM_ROOT/plugins/credential-proxy/orchestrator.sh"
+    fi
+
+    if [[ -x "$orchestrator" ]]; then
+        # Start proxy and get env var exports
+        local env_exports
+        env_exports=$("$orchestrator" start \
+            --env-dir "$env_dir" \
+            --project "$project" \
+            --branch "$branch" 2>/dev/null) || true
+
+        # Send each export to the pane
+        if [[ -n "$env_exports" ]]; then
+            while IFS= read -r line; do
+                [[ -n "$line" ]] && tmux send-keys "$line" Enter
+            done <<< "$env_exports"
+        fi
+
+        # Inject CLAUDE.md snippet
+        local project_dir="$env_dir/$project"
+        if [[ -d "$project_dir" ]]; then
+            "$orchestrator" inject-claude-md "$project_dir" 2>/dev/null || true
+        fi
+    fi
+}
+
+# Launch Claude with credential proxy setup
+# Usage: launch_claude <env-dir> <project-name> <branch-name> [--resume] [--setup-script <script>]
+launch_claude() {
+    local env_dir="$1"
+    local project="$2"
+    local branch="$3"
+    shift 3
+
+    local resume=""
+    local setup_script=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --resume) resume=" --resume"; shift ;;
+            --setup-script) setup_script="$2"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
+
+    # Start credential proxy (sets env vars in pane)
+    start_credential_proxy "$env_dir" "$project" "$branch"
+
+    # Launch Claude (with optional setup script)
+    if [[ -n "$setup_script" ]]; then
+        tmux send-keys "./$setup_script && claude --dangerously-skip-permissions${resume}" Enter
+    else
+        tmux send-keys "claude --dangerously-skip-permissions${resume}" Enter
+    fi
+}
+
 # Check if we're currently in command center (matches cleanup script approach)
 COMMAND_CENTER="command-center"
 
@@ -312,7 +380,7 @@ main() {
                     PROJECT_NAME="$selected_env"
                     local window_name="${PROJECT_NAME} multi-repo (${REPO_COUNT})"
                     create_feature_window "$window_name" "$ENV_DIR"
-                    tmux send-keys "claude --dangerously-skip-permissions --resume" Enter
+                    launch_claude "$ENV_DIR" "$PROJECT_NAME" "$PROJECT_NAME" --resume
                     exit 0
                 else
                     # Step 3a: Select existing branch for this project
@@ -328,11 +396,10 @@ main() {
                     CLONE_DIR="${ENV_DIR}/${REPO_NAME}"
 
                     create_feature_window "$BRANCH_NAME" "$CLONE_DIR"
-                    # Run setup hook if it exists
                     if [[ -f "$CLONE_DIR/paraLlm_setup.sh" ]]; then
-                        tmux send-keys "./paraLlm_setup.sh && claude --dangerously-skip-permissions --resume" Enter
+                        launch_claude "$ENV_DIR" "$REPO_NAME" "$BRANCH_NAME" --resume --setup-script "paraLlm_setup.sh"
                     else
-                        tmux send-keys "claude --dangerously-skip-permissions --resume" Enter
+                        launch_claude "$ENV_DIR" "$REPO_NAME" "$BRANCH_NAME" --resume
                     fi
                     exit 0
                 fi
@@ -402,14 +469,14 @@ main() {
                     create_multi_repo_claude_md "$ENV_DIR" "$BRANCH_NAME" "${REPO_NAMES[@]}"
                     local window_name="${PROJECT_NAME} multi-repo (${REPO_COUNT})"
                     create_feature_window "$window_name" "$ENV_DIR"
-                    tmux send-keys "claude --dangerously-skip-permissions" Enter
+                    launch_claude "$ENV_DIR" "$PROJECT_NAME" "$BRANCH_NAME"
                 else
                     CLONE_DIR="$primary_clone_dir"
                     create_feature_window "$BRANCH_NAME" "$CLONE_DIR"
                     if [[ -f "$CLONE_DIR/paraLlm_setup.sh" ]]; then
-                        tmux send-keys "./paraLlm_setup.sh && claude --dangerously-skip-permissions" Enter
+                        launch_claude "$ENV_DIR" "$REPO_NAME" "$BRANCH_NAME" --setup-script "paraLlm_setup.sh"
                     else
-                        tmux send-keys "claude --dangerously-skip-permissions" Enter
+                        launch_claude "$ENV_DIR" "$REPO_NAME" "$BRANCH_NAME"
                     fi
                 fi
                 exit 0
@@ -449,14 +516,14 @@ main() {
                     if [[ "$IS_MULTI_REPO" == true ]]; then
                         local window_name="${PROJECT_NAME} multi-repo (${REPO_COUNT})"
                         create_feature_window "$window_name" "$ENV_DIR"
-                        tmux send-keys "claude --dangerously-skip-permissions --resume" Enter
+                        launch_claude "$ENV_DIR" "$PROJECT_NAME" "$BRANCH_NAME" --resume
                     else
                         CLONE_DIR="${ENV_DIR}/${REPO_NAME}"
                         create_feature_window "$BRANCH_NAME" "$CLONE_DIR"
                         if [[ -f "$CLONE_DIR/paraLlm_setup.sh" ]]; then
-                            tmux send-keys "./paraLlm_setup.sh && claude --dangerously-skip-permissions --resume" Enter
+                            launch_claude "$ENV_DIR" "$REPO_NAME" "$BRANCH_NAME" --resume --setup-script "paraLlm_setup.sh"
                         else
-                            tmux send-keys "claude --dangerously-skip-permissions --resume" Enter
+                            launch_claude "$ENV_DIR" "$REPO_NAME" "$BRANCH_NAME" --resume
                         fi
                     fi
                     exit 0
@@ -512,14 +579,14 @@ main() {
                     create_multi_repo_claude_md "$ENV_DIR" "$BRANCH_NAME" "${REPO_NAMES[@]}"
                     local window_name="${PROJECT_NAME} multi-repo (${REPO_COUNT})"
                     create_feature_window "$window_name" "$ENV_DIR"
-                    tmux send-keys "claude --dangerously-skip-permissions" Enter
+                    launch_claude "$ENV_DIR" "$PROJECT_NAME" "$BRANCH_NAME"
                 else
                     CLONE_DIR="$primary_clone_dir"
                     create_feature_window "$BRANCH_NAME" "$CLONE_DIR"
                     if [[ -f "$CLONE_DIR/paraLlm_setup.sh" ]]; then
-                        tmux send-keys "./paraLlm_setup.sh && claude --dangerously-skip-permissions" Enter
+                        launch_claude "$ENV_DIR" "$REPO_NAME" "$BRANCH_NAME" --setup-script "paraLlm_setup.sh"
                     else
-                        tmux send-keys "claude --dangerously-skip-permissions" Enter
+                        launch_claude "$ENV_DIR" "$REPO_NAME" "$BRANCH_NAME"
                     fi
                 fi
                 exit 0

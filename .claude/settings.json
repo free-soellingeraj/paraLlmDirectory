@@ -54,7 +54,14 @@
       "Bash(cd ..)",
       "Bash(cd ../..)",
       "Bash(cd ~)",
-      "Bash(cd /)"
+      "Bash(cd /)",
+      "Bash(cat ~/.config/gcloud/*)",
+      "Bash(cat ~/.docker/config.json)",
+      "Bash(cat ~/.npmrc)",
+      "Bash(cat ~/.kube/config)",
+      "Bash(cat *credential*)",
+      "Bash(cat *secret*)",
+      "Bash(cat *token*)"
     ]
   }
 }
