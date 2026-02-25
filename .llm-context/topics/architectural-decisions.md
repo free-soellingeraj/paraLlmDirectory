@@ -241,3 +241,34 @@ plugins/claude-state-monitor/
 - Claude Code hooks: https://code.claude.com/docs/en/hooks.md
 - Claude Code hooks guide: https://code.claude.com/docs/en/hooks-guide.md
 - Feature branch: `feature-link-visuals-to-claude-completion`
+
+---
+
+## ADR-008: Plugin-Based Remote Storage Backends
+
+**Decision**: Use a plugin-based backend system for remote workspace save/restore, with SSH/rsync as the first implementation.
+
+**Context**: para-llm-directory runs on remote systems with ephemeral storage. When instances are torn down, all local state is lost. We need to periodically push workspace state to a remote so it can be restored on a fresh instance.
+
+**Rationale**:
+- **Plugin architecture**: Each backend is a single script implementing 4 functions (`backend_push`, `backend_pull`, `backend_test`, `backend_list`). New backends (S3, GCS, etc.) can be added by dropping a script into `plugins/remote-save/backends/`.
+- **Minimal payload**: Only session-state (~1KB) and config are pushed. Git repos are NOT saved remotely - they're re-cloned from their git remote URLs on restore. This keeps the payload small and avoids storing potentially sensitive code on intermediate servers.
+- **Non-blocking**: Remote save runs backgrounded at the end of the existing 1-minute tmux-resurrect save cycle. A lock file prevents concurrent runs.
+- **Git remote URLs in state**: A 6th column (`git_remote`) was added to the session-state format so restore knows where to clone from.
+
+**Trade-off**: Uncommitted work is accepted as lost on instance teardown. This is acceptable because the workflow encourages frequent commits and pushes.
+
+**State Format**:
+```
+window_name|pane_path|project|branch|had_claude|git_remote
+```
+
+**Remote Config**:
+```
+$PARA_LLM_ROOT/remotes/
+├── .active         # Single line: active remote name
+├── my-server       # Bash variables: REMOTE_BACKEND, REMOTE_HOST, REMOTE_DIR
+└── backup-host     # Another remote config
+```
+
+**File**: `plugins/remote-save/`

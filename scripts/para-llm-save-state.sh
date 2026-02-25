@@ -10,6 +10,12 @@ if [[ ! -f "$BOOTSTRAP_FILE" ]]; then
     exit 0
 fi
 PARA_LLM_ROOT="$(cat "$BOOTSTRAP_FILE")"
+
+# Source config for INSTALL_DIR and other settings
+if [[ -f "$PARA_LLM_ROOT/config" ]]; then
+    source "$PARA_LLM_ROOT/config"
+fi
+
 ENVS_DIR="$PARA_LLM_ROOT/envs"
 
 # Ensure recovery directory exists
@@ -43,7 +49,7 @@ SESSION_NAME=$(echo "$PANE_DATA" | head -1 | cut -d'|' -f1)
     echo "# para-llm recovery state"
     echo "# saved: $TIMESTAMP"
     echo "# session: $SESSION_NAME"
-    echo "window_name|pane_path|project|branch|had_claude"
+    echo "window_name|pane_path|project|branch|had_claude|git_remote"
 
     while IFS='|' read -r sess_name win_name pane_id pane_path pane_pid; do
         # Only process panes whose path is under ENVS_DIR
@@ -85,7 +91,10 @@ SESSION_NAME=$(echo "$PANE_DATA" | head -1 | cut -d'|' -f1)
                         HAD_CLAUDE="true"
                     fi
 
-                    echo "$win_name|$pane_path|$PROJECT|$BRANCH|$HAD_CLAUDE"
+                    # Resolve git remote URL for remote restore
+                    GIT_REMOTE=$(git -C "$ENV_DIR/$PROJECT" remote get-url origin 2>/dev/null || echo "")
+
+                    echo "$win_name|$pane_path|$PROJECT|$BRANCH|$HAD_CLAUDE|$GIT_REMOTE"
                 fi
             fi
         fi
@@ -114,4 +123,10 @@ if [[ $ENTRY_COUNT -gt 0 ]]; then
     mv "$STATE_FILE.tmp" "$STATE_FILE"
 else
     rm -f "$STATE_FILE.tmp"
+fi
+
+# Trigger remote save if enabled (non-blocking, backgrounded)
+REMOTE_SAVE_SCRIPT="${INSTALL_DIR:-}/plugins/remote-save/remote-save.sh"
+if [[ -n "${INSTALL_DIR:-}" && -x "$REMOTE_SAVE_SCRIPT" ]]; then
+    "$REMOTE_SAVE_SCRIPT" &
 fi
