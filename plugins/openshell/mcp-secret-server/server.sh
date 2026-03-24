@@ -203,9 +203,10 @@ handle_tool_call() {
     local id="$1"
     local json="$2"
 
-    # Extract tool name and arguments
+    # Extract tool name - must get params.name, not arguments.name
+    # Use a two-step approach: first extract params object, then get name from it
     local tool_name
-    tool_name=$(json_get "$json" "name")
+    tool_name=$(echo "$json" | sed -n 's/.*"params"[[:space:]]*:[[:space:]]*{[[:space:]]*"name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
     local args_json
     # Extract the arguments object - everything between "arguments": { and the matching }
     args_json=$(echo "$json" | sed -n 's/.*"arguments"[[:space:]]*:[[:space:]]*\({[^}]*}\).*/\1/p')
@@ -326,7 +327,6 @@ while IFS= read -r line; do
     [[ -z "$line" ]] && continue
 
     # Extract method and id
-    local method id
     method=$(json_get "$line" "method")
     id=$(json_get_any "$line" "id")
 
