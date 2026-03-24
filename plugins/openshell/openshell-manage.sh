@@ -230,8 +230,23 @@ action_manage_secrets() {
                 [[ -z "$secret_name" ]] && continue
 
                 printf "Value: "
-                IFS= read -r -s secret_value
-                echo ""
+                secret_value=""
+                while true; do
+                    IFS= read -r -s -n 1 ch
+                    if [[ "$ch" == "" ]]; then
+                        echo ""
+                        break
+                    fi
+                    if [[ "$ch" == $'\177' || "$ch" == $'\b' ]]; then
+                        if [[ -n "$secret_value" ]]; then
+                            secret_value="${secret_value%?}"
+                            printf '\b \b'
+                        fi
+                        continue
+                    fi
+                    secret_value+="$ch"
+                    printf '*'
+                done
                 [[ -z "$secret_value" ]] && { echo "Cancelled."; continue; }
 
                 local scope

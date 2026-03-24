@@ -58,10 +58,27 @@ if secret_exists "$SECRET_NAME" "$PROJECT" "$SANDBOX_STATE"; then
     fi
 fi
 
-# Read the secret value (silent input)
+# Read the secret value (masked input - shows * per character)
 printf "  Value: "
-IFS= read -r -s secret_value
-echo ""
+secret_value=""
+while true; do
+    IFS= read -r -s -n 1 ch
+    # Enter key
+    if [[ "$ch" == "" ]]; then
+        echo ""
+        break
+    fi
+    # Backspace (ASCII 127 or 8)
+    if [[ "$ch" == $'\177' || "$ch" == $'\b' ]]; then
+        if [[ -n "$secret_value" ]]; then
+            secret_value="${secret_value%?}"
+            printf '\b \b'
+        fi
+        continue
+    fi
+    secret_value+="$ch"
+    printf '*'
+done
 
 if [[ -z "$secret_value" ]]; then
     echo ""
