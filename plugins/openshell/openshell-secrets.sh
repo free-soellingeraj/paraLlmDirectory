@@ -250,6 +250,51 @@ secret_list() {
     echo "$names" | sort -u | grep -v '^$'
 }
 
+# List all secrets with their scope (never values)
+# Usage: secret_list_with_scope [project] [sandbox-state-file]
+# Outputs: "name scope" per line (e.g., "GITHUB_TOKEN global")
+# If a secret exists in multiple scopes, shows the narrowest (task > project > global)
+secret_list_with_scope() {
+    local project="${1:-}"
+    local sandbox_state="${2:-}"
+
+    # Collect from each scope, tracking which scope each came from
+    declare -A seen
+
+    # Task (narrowest scope - wins over others)
+    if [[ -n "$sandbox_state" && -f "$sandbox_state.secrets" ]]; then
+        while IFS='=' read -r name _; do
+            [[ -z "$name" || "$name" == \#* ]] && continue
+            seen["$name"]="task"
+        done < "$sandbox_state.secrets"
+    fi
+
+    # Project
+    if [[ -n "$project" ]]; then
+        local pfile
+        pfile=$(_project_secrets_file "$project")
+        if [[ -f "$pfile" ]]; then
+            while IFS='=' read -r name _; do
+                [[ -z "$name" || "$name" == \#* ]] && continue
+                [[ -z "${seen[$name]:-}" ]] && seen["$name"]="project"
+            done < "$pfile"
+        fi
+    fi
+
+    # Global (widest scope)
+    if [[ -f "$GLOBAL_SECRETS" ]]; then
+        while IFS='=' read -r name _; do
+            [[ -z "$name" || "$name" == \#* ]] && continue
+            [[ -z "${seen[$name]:-}" ]] && seen["$name"]="global"
+        done < "$GLOBAL_SECRETS"
+    fi
+
+    # Output sorted
+    for name in $(echo "${!seen[@]}" | tr ' ' '\n' | sort); do
+        echo "$name ${seen[$name]}"
+    done
+}
+
 # Collect all secrets for a sandbox as --env flags
 # Usage: secret_collect_env_flags [project] [sandbox-state-file]
 # Outputs: --env NAME=value flags for openshell sandbox create

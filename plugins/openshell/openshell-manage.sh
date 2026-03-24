@@ -206,14 +206,14 @@ action_manage_secrets() {
         echo ""
         echo "Manage Secrets"
         echo "=============="
-        local names
-        names=$(secret_list)
-        if [[ -n "$names" ]]; then
+        local entries
+        entries=$(secret_list_with_scope)
+        if [[ -n "$entries" ]]; then
             echo "Registered secrets:"
-            while IFS= read -r name; do
+            while IFS=' ' read -r name scope; do
                 [[ -z "$name" ]] && continue
-                echo "  - $name"
-            done <<< "$names"
+                echo "  - $name ($scope)"
+            done <<< "$entries"
         else
             echo "No secrets registered."
         fi

@@ -277,25 +277,25 @@ handle_tool_call() {
             ;;
 
         list_secrets)
-            local names
-            names=$(secret_list "$CURRENT_PROJECT" "$CURRENT_SANDBOX_STATE")
-            local names_json="[]"
-            if [[ -n "$names" ]]; then
-                names_json="["
+            local entries
+            entries=$(secret_list_with_scope "$CURRENT_PROJECT" "$CURRENT_SANDBOX_STATE")
+            local entries_json="[]"
+            if [[ -n "$entries" ]]; then
+                entries_json="["
                 local first=true
-                while IFS= read -r name; do
+                while IFS=' ' read -r name scope; do
                     [[ -z "$name" ]] && continue
                     if [[ "$first" == true ]]; then
                         first=false
                     else
-                        names_json+=","
+                        entries_json+=","
                     fi
-                    names_json+="\"$(json_escape "$name")\""
-                done <<< "$names"
-                names_json+="]"
+                    entries_json+="{\"name\":\"$(json_escape "$name")\",\"scope\":\"$(json_escape "$scope")\"}"
+                done <<< "$entries"
+                entries_json+="]"
             fi
 
-            send_response "$id" "{\"content\":[{\"type\":\"text\",\"text\":\"Registered secrets: ${names_json}\"}]}"
+            send_response "$id" "{\"content\":[{\"type\":\"text\",\"text\":\"Registered secrets: ${entries_json}\"}]}"
             ;;
 
         check_secret)
