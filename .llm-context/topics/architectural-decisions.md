@@ -272,3 +272,25 @@ $PARA_LLM_ROOT/remotes/
 ```
 
 **File**: `plugins/remote-save/`
+
+---
+
+## ADR-009: OpenShell Sandbox Integration via MCP Tool Bridge
+
+**Decision**: Use an MCP server to bridge Claude's intelligence (auth error detection) with secure secret registration (tmux popup with `read -s`).
+
+**Context**: Running Claude Code in OpenShell sandboxes requires secrets (API keys, tokens) to be injected. Secret values must never flow through the LLM conversation, but the LLM is best positioned to detect when secrets are needed (parsing auth errors, knowing service-to-secret mappings).
+
+**Rationale**:
+- MCP tools are the standard way to give Claude Code custom callable tools
+- Claude handles detection and mapping (high intelligence required)
+- The MCP server spawns a tmux popup for the actual value entry (secure, non-LLM)
+- Three scope levels (task/project/global) give users control over secret persistence
+- Graceful degradation: if OpenShell is disabled or fails, standard host execution continues
+
+**Trade-offs**:
+- Requires MCP server process running alongside Claude
+- Bash-based MCP server is simpler but less robust than a Python/Node implementation
+- Tmux popup requires active tmux session (won't work in headless mode)
+
+**File**: `plugins/openshell/mcp-secret-server/`, `plugins/openshell/openshell-sandbox.sh`

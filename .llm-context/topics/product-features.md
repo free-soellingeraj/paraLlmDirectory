@@ -296,3 +296,32 @@ plugins/remote-save/
     └── ProjectName-feature/
         └── ProjectName/      # Cloned repo
 ```
+
+---
+
+### 8. OpenShell Sandbox Integration (`Ctrl+b o`)
+Optional plugin that runs Claude Code environments inside NVIDIA OpenShell sandboxes for kernel-level security isolation (Landlock, seccomp, network policies).
+
+**Sandbox creation** (integrated into `Ctrl+b c`):
+- When `OPENSHELL_ENABLED=1`, users are prompted "Run in: Host / OpenShell Sandbox" during environment creation
+- If `OPENSHELL_AUTO_SANDBOX=1`, all new environments are sandboxed automatically
+- Sandbox lifecycle is transparent: resume reconnects, cleanup destroys
+
+**Management menu** (`Ctrl+b o`):
+- List/connect/destroy sandboxes
+- View sandbox logs
+- Manage secrets (interactive `read -s`, no LLM involvement)
+- Update policies on running sandboxes
+- Gateway status
+
+**MCP Secret Registration**:
+- Claude can call `register_secret` tool when it encounters auth errors
+- Triggers a tmux popup for secure secret entry (value never touches LLM)
+- Users choose scope: this task only / this project / all projects (global)
+
+**Policy system**:
+- Resolution chain: project repo → user per-project → user default → shipped default
+- Policies control filesystem, network, and process access
+- Network policies ensure secrets can only reach intended endpoints
+
+**File**: `plugins/openshell/`

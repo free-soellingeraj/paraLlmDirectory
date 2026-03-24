@@ -173,7 +173,16 @@ write_display() {
         *)       label="$LABEL_WORKING" ;;
     esac
 
-    local display="#[fg=$color]$label | $PROJECT | $BRANCH#[default]"
+    # Check if this environment is running in an OpenShell sandbox
+    local sandbox_indicator=""
+    if [[ -n "${PARA_LLM_ROOT:-}" && -d "$PARA_LLM_ROOT/openshell/state/sandboxes" ]]; then
+        local sandbox_name="para-$(echo "${PROJECT}-${BRANCH}" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g')"
+        if [[ -f "$PARA_LLM_ROOT/openshell/state/sandboxes/$sandbox_name" ]]; then
+            sandbox_indicator=" | #[fg=cyan]sandbox#[default]"
+        fi
+    fi
+
+    local display="#[fg=$color]$label | $PROJECT | $BRANCH${sandbox_indicator}#[default]"
     tmux set-option -p -t "$PANE_ID" @pane_display "$display" 2>/dev/null || true
 }
 

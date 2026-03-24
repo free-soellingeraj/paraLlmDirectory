@@ -200,6 +200,80 @@ cat >> "$PARA_LLM_ROOT/config" << 'EOF'
 REMOTE_SAVE_ENABLED=1
 EOF
 
+# --- Optional: OpenShell sandbox plugin ---
+OPENSHELL_ENABLED_INSTALL=false
+if [[ "$NON_INTERACTIVE" == true ]]; then
+    echo "Skipping OpenShell plugin (non-interactive mode)"
+else
+    echo ""
+    echo "Optional: OpenShell sandbox isolation plugin"
+    echo "  Runs Claude Code environments inside NVIDIA OpenShell sandboxes"
+    echo "  Provides kernel-level isolation via Docker + Landlock + seccomp"
+    echo ""
+    echo "  Requirements:"
+    echo "    openshell CLI  (install via: uv tool install -U openshell)"
+    echo "    Docker         (must be running)"
+    echo ""
+    read -r -p "Install OpenShell plugin? [y/N]: " openshell_choice
+    if [[ "$openshell_choice" =~ ^[Yy] ]]; then
+        OPENSHELL_ENABLED_INSTALL=true
+    fi
+fi
+
+if [[ "$OPENSHELL_ENABLED_INSTALL" == true ]]; then
+    echo ""
+    echo "Setting up OpenShell plugin..."
+
+    # Check for openshell CLI
+    if ! command -v openshell &>/dev/null; then
+        echo "  Warning: openshell CLI not found on PATH"
+        echo "  Install with: uv tool install -U openshell"
+    else
+        echo "  openshell CLI found"
+    fi
+
+    # Check for Docker
+    if ! command -v docker &>/dev/null; then
+        echo "  Warning: Docker not found on PATH"
+    elif ! docker info &>/dev/null 2>&1; then
+        echo "  Warning: Docker is not running"
+    else
+        echo "  Docker is running"
+    fi
+
+    # Create OpenShell directories
+    mkdir -p "$PARA_LLM_ROOT/openshell/state/sandboxes"
+    mkdir -p "$PARA_LLM_ROOT/openshell/policies"
+    mkdir -p "$PARA_LLM_ROOT/openshell/secrets"
+
+    # Create global secrets file with restricted permissions
+    touch "$PARA_LLM_ROOT/openshell/.secrets"
+    chmod 600 "$PARA_LLM_ROOT/openshell/.secrets"
+
+    # Copy default policy templates
+    if [[ -d "$SCRIPT_DIR/plugins/openshell/policies" ]]; then
+        cp "$SCRIPT_DIR/plugins/openshell/policies/"*.yaml "$PARA_LLM_ROOT/openshell/policies/" 2>/dev/null || true
+        echo "  Installed default policy templates"
+    fi
+
+    # Save OpenShell config
+    cat >> "$PARA_LLM_ROOT/config" << 'EOF'
+
+# OpenShell sandbox settings
+OPENSHELL_ENABLED=1
+OPENSHELL_AUTO_SANDBOX=0
+OPENSHELL_SYNC_STRATEGY="git"
+OPENSHELL_DEFAULT_POLICY=""
+EOF
+    echo "  OpenShell plugin enabled (Ctrl+b o)"
+else
+    cat >> "$PARA_LLM_ROOT/config" << 'EOF'
+
+# OpenShell sandbox settings (disabled - re-run install.sh to enable)
+OPENSHELL_ENABLED=0
+EOF
+fi
+
 echo "Configuration saved:"
 echo "  Bootstrap pointer: $BOOTSTRAP_FILE"
 echo "  Config: $PARA_LLM_ROOT/config"
@@ -232,6 +306,11 @@ fi
 if [[ -d "$SCRIPT_DIR/plugins/remote-save" ]]; then
     chmod +x "$SCRIPT_DIR/plugins/remote-save/"*.sh 2>/dev/null || true
     chmod +x "$SCRIPT_DIR/plugins/remote-save/backends/"*.sh 2>/dev/null || true
+fi
+if [[ -d "$SCRIPT_DIR/plugins/openshell" ]]; then
+    chmod +x "$SCRIPT_DIR/plugins/openshell/"*.sh 2>/dev/null || true
+    chmod +x "$SCRIPT_DIR/plugins/openshell/para-llm-secrets" 2>/dev/null || true
+    chmod +x "$SCRIPT_DIR/plugins/openshell/mcp-secret-server/"*.sh 2>/dev/null || true
 fi
 
 # Make recovery scripts executable
@@ -320,6 +399,32 @@ if [[ -f "$HOOKS_CONFIG" ]]; then
     fi
 fi
 
+# Register MCP secret server if OpenShell is enabled
+if [[ "$OPENSHELL_ENABLED_INSTALL" == true ]]; then
+    echo ""
+    echo "Registering MCP secret server for OpenShell..."
+    MCP_SERVER_PATH="$SCRIPT_DIR/plugins/openshell/mcp-secret-server/server.sh"
+
+    if [[ -f "$CLAUDE_SETTINGS" ]] && command -v jq &>/dev/null; then
+        # Add mcpServers entry
+        MCP_CONFIG=$(cat <<MCPEOF
+{
+    "command": "$MCP_SERVER_PATH",
+    "args": ["--para-llm-root", "$PARA_LLM_ROOT"]
+}
+MCPEOF
+)
+        jq --argjson mcp "$MCP_CONFIG" '.mcpServers = (.mcpServers // {}) + {"para-llm-secrets": $mcp}' \
+            "$CLAUDE_SETTINGS" > "$CLAUDE_SETTINGS.tmp" && \
+            mv "$CLAUDE_SETTINGS.tmp" "$CLAUDE_SETTINGS"
+        echo "  Registered para-llm-secrets MCP server in $CLAUDE_SETTINGS"
+    else
+        echo "  Warning: Cannot register MCP server (jq not found or no settings file)"
+        echo "  Manually add to $CLAUDE_SETTINGS:"
+        echo "    \"mcpServers\": {\"para-llm-secrets\": {\"command\": \"$MCP_SERVER_PATH\"}}"
+    fi
+fi
+
 # Backup existing tmux.conf if it exists
 echo ""
 if [[ -f ~/.tmux.conf ]]; then
@@ -375,6 +480,15 @@ bind-key t display-popup -E -w 60% -h 60% "$SCRIPT_DIR/plugins/remote-save/remot
 
 EOF
 
+# Conditionally add OpenShell binding
+if [[ "$OPENSHELL_ENABLED_INSTALL" == true ]]; then
+cat >> ~/.tmux.conf << EOF
+
+# Ctrl+b o: OpenShell sandbox management menu
+bind-key o display-popup -E -w 60% -h 60% "$SCRIPT_DIR/plugins/openshell/openshell-manage.sh"
+EOF
+fi
+
 # Conditionally add STT binding
 if [[ "$STT_ENABLED" == true ]]; then
 cat >> ~/.tmux.conf << EOF
@@ -410,6 +524,13 @@ EOF
 if [[ "$STT_ENABLED" == true ]]; then
 cat >> ~/.tmux.conf << EOF
 set -ga status-right ' #($SCRIPT_DIR/plugins/stt/stt-status.sh)'
+EOF
+fi
+
+# Conditionally add OpenShell status
+if [[ "$OPENSHELL_ENABLED_INSTALL" == true ]]; then
+cat >> ~/.tmux.conf << EOF
+set -ga status-right ' #($SCRIPT_DIR/plugins/openshell/openshell-status.sh)'
 EOF
 fi
 
@@ -457,6 +578,9 @@ echo "  Ctrl+b t  - Remote management (add/test/toggle remotes)"
 echo "  Ctrl+b r  - Manual restore Claude sessions"
 if [[ "$STT_ENABLED" == true ]]; then
 echo "  Ctrl+b a  - Toggle speech-to-text recording"
+fi
+if [[ "$OPENSHELL_ENABLED_INSTALL" == true ]]; then
+echo "  Ctrl+b o  - OpenShell sandbox management"
 fi
 echo ""
 echo "Recovery:"

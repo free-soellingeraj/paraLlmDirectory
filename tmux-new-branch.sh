@@ -10,6 +10,101 @@ source "$SCRIPT_DIR/para-llm-config.sh"
 # Ensure envs directory exists
 mkdir -p "$ENVS_DIR"
 
+# --- OpenShell integration helper ---
+# Launches Claude either directly or inside an OpenShell sandbox
+# Usage: launch_claude_in_env <clone-dir> <env-dir> <branch-name> <project-name> [--resume] [--setup-hook]
+launch_claude_in_env() {
+    local clone_dir="$1"
+    local env_dir="$2"
+    local branch_name="$3"
+    local project_name="$4"
+    local resume_flag=""
+    local has_setup_hook=false
+
+    shift 4
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --resume) resume_flag=" --resume" ;;
+            --setup-hook) has_setup_hook=true ;;
+        esac
+        shift
+    done
+
+    local claude_cmd="claude --dangerously-skip-permissions${resume_flag}"
+
+    # Check if OpenShell is enabled
+    local openshell_enabled="${OPENSHELL_ENABLED:-0}"
+    if [[ "$openshell_enabled" != "1" ]]; then
+        # Standard host execution
+        if [[ "$has_setup_hook" == true && -f "$clone_dir/paraLlm_setup.sh" ]]; then
+            tmux send-keys "./paraLlm_setup.sh && $claude_cmd" Enter
+        else
+            tmux send-keys "$claude_cmd" Enter
+        fi
+        return
+    fi
+
+    # OpenShell enabled - decide whether to sandbox
+    local use_sandbox=false
+    local auto_sandbox="${OPENSHELL_AUTO_SANDBOX:-0}"
+
+    if [[ "$auto_sandbox" == "1" ]]; then
+        use_sandbox=true
+    else
+        # Ask user via fzf
+        local sandbox_choice
+        sandbox_choice=$(printf "Host (no sandbox)\nOpenShell Sandbox" | \
+            fzf --prompt="Run environment in: " --height=6 --no-info)
+        if [[ "$sandbox_choice" == "OpenShell Sandbox" ]]; then
+            use_sandbox=true
+        fi
+    fi
+
+    if [[ "$use_sandbox" == false ]]; then
+        # Standard host execution
+        if [[ "$has_setup_hook" == true && -f "$clone_dir/paraLlm_setup.sh" ]]; then
+            tmux send-keys "./paraLlm_setup.sh && $claude_cmd" Enter
+        else
+            tmux send-keys "$claude_cmd" Enter
+        fi
+        return
+    fi
+
+    # --- Sandbox execution ---
+    # Source sandbox helpers
+    local openshell_plugin="$SCRIPT_DIR/plugins/openshell/openshell-sandbox.sh"
+    if [[ ! -f "$openshell_plugin" ]]; then
+        echo "OpenShell plugin not found at $openshell_plugin"
+        echo "Falling back to host execution..."
+        sleep 2
+        tmux send-keys "$claude_cmd" Enter
+        return
+    fi
+    source "$openshell_plugin"
+
+    # Check if sandbox already exists (for resume)
+    if sandbox_exists "$project_name" "$branch_name"; then
+        echo "Reconnecting to existing sandbox..."
+        tmux send-keys "openshell sandbox connect $(sandbox_name_for_env "$project_name" "$branch_name")" Enter
+        return
+    fi
+
+    # Create sandbox
+    if sandbox_create "$project_name" "$branch_name" "$env_dir" "$clone_dir"; then
+        local sname
+        sname=$(sandbox_name_for_env "$project_name" "$branch_name")
+        tmux send-keys "openshell sandbox connect $sname" Enter
+    else
+        echo "Sandbox creation failed, falling back to host execution..."
+        sleep 2
+        if [[ "$has_setup_hook" == true && -f "$clone_dir/paraLlm_setup.sh" ]]; then
+            tmux send-keys "./paraLlm_setup.sh && $claude_cmd" Enter
+        else
+            tmux send-keys "$claude_cmd" Enter
+        fi
+    fi
+}
+
 # Check if we're currently in command center (matches cleanup script approach)
 COMMAND_CENTER="command-center"
 
@@ -312,7 +407,7 @@ main() {
                     PROJECT_NAME="$selected_env"
                     local window_name="${PROJECT_NAME} multi-repo (${REPO_COUNT})"
                     create_feature_window "$window_name" "$ENV_DIR"
-                    tmux send-keys "claude --dangerously-skip-permissions --resume" Enter
+                    launch_claude_in_env "$ENV_DIR" "$ENV_DIR" "$selected_env" "$PROJECT_NAME" --resume
                     exit 0
                 else
                     # Step 3a: Select existing branch for this project
@@ -328,12 +423,7 @@ main() {
                     CLONE_DIR="${ENV_DIR}/${REPO_NAME}"
 
                     create_feature_window "$BRANCH_NAME" "$CLONE_DIR"
-                    # Run setup hook if it exists
-                    if [[ -f "$CLONE_DIR/paraLlm_setup.sh" ]]; then
-                        tmux send-keys "./paraLlm_setup.sh && claude --dangerously-skip-permissions --resume" Enter
-                    else
-                        tmux send-keys "claude --dangerously-skip-permissions --resume" Enter
-                    fi
+                    launch_claude_in_env "$CLONE_DIR" "$ENV_DIR" "$BRANCH_NAME" "$REPO_NAME" --resume --setup-hook
                     exit 0
                 fi
                 ;;
@@ -402,15 +492,11 @@ main() {
                     create_multi_repo_claude_md "$ENV_DIR" "$BRANCH_NAME" "${REPO_NAMES[@]}"
                     local window_name="${PROJECT_NAME} multi-repo (${REPO_COUNT})"
                     create_feature_window "$window_name" "$ENV_DIR"
-                    tmux send-keys "claude --dangerously-skip-permissions" Enter
+                    launch_claude_in_env "$ENV_DIR" "$ENV_DIR" "$BRANCH_NAME" "$PROJECT_NAME"
                 else
                     CLONE_DIR="$primary_clone_dir"
                     create_feature_window "$BRANCH_NAME" "$CLONE_DIR"
-                    if [[ -f "$CLONE_DIR/paraLlm_setup.sh" ]]; then
-                        tmux send-keys "./paraLlm_setup.sh && claude --dangerously-skip-permissions" Enter
-                    else
-                        tmux send-keys "claude --dangerously-skip-permissions" Enter
-                    fi
+                    launch_claude_in_env "$CLONE_DIR" "$ENV_DIR" "$BRANCH_NAME" "$REPO_NAME" --setup-hook
                 fi
                 exit 0
                 ;;
@@ -449,15 +535,11 @@ main() {
                     if [[ "$IS_MULTI_REPO" == true ]]; then
                         local window_name="${PROJECT_NAME} multi-repo (${REPO_COUNT})"
                         create_feature_window "$window_name" "$ENV_DIR"
-                        tmux send-keys "claude --dangerously-skip-permissions --resume" Enter
+                        launch_claude_in_env "$ENV_DIR" "$ENV_DIR" "$BRANCH_NAME" "$PROJECT_NAME" --resume
                     else
                         CLONE_DIR="${ENV_DIR}/${REPO_NAME}"
                         create_feature_window "$BRANCH_NAME" "$CLONE_DIR"
-                        if [[ -f "$CLONE_DIR/paraLlm_setup.sh" ]]; then
-                            tmux send-keys "./paraLlm_setup.sh && claude --dangerously-skip-permissions --resume" Enter
-                        else
-                            tmux send-keys "claude --dangerously-skip-permissions --resume" Enter
-                        fi
+                        launch_claude_in_env "$CLONE_DIR" "$ENV_DIR" "$BRANCH_NAME" "$REPO_NAME" --resume --setup-hook
                     fi
                     exit 0
                 fi
@@ -512,15 +594,11 @@ main() {
                     create_multi_repo_claude_md "$ENV_DIR" "$BRANCH_NAME" "${REPO_NAMES[@]}"
                     local window_name="${PROJECT_NAME} multi-repo (${REPO_COUNT})"
                     create_feature_window "$window_name" "$ENV_DIR"
-                    tmux send-keys "claude --dangerously-skip-permissions" Enter
+                    launch_claude_in_env "$ENV_DIR" "$ENV_DIR" "$BRANCH_NAME" "$PROJECT_NAME"
                 else
                     CLONE_DIR="$primary_clone_dir"
                     create_feature_window "$BRANCH_NAME" "$CLONE_DIR"
-                    if [[ -f "$CLONE_DIR/paraLlm_setup.sh" ]]; then
-                        tmux send-keys "./paraLlm_setup.sh && claude --dangerously-skip-permissions" Enter
-                    else
-                        tmux send-keys "claude --dangerously-skip-permissions" Enter
-                    fi
+                    launch_claude_in_env "$CLONE_DIR" "$ENV_DIR" "$BRANCH_NAME" "$REPO_NAME" --setup-hook
                 fi
                 exit 0
                 ;;
