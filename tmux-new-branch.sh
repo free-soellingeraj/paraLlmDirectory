@@ -32,10 +32,20 @@ launch_claude_in_env() {
 
     local claude_cmd="claude --dangerously-skip-permissions${resume_flag}"
 
-    # Check if OpenShell is enabled
+    # Check if OpenShell is enabled and available
     local openshell_enabled="${OPENSHELL_ENABLED:-0}"
-    if [[ "$openshell_enabled" != "1" ]]; then
-        # Standard host execution
+    local openshell_plugin="$SCRIPT_DIR/plugins/openshell/openshell-sandbox.sh"
+    local openshell_ready=false
+
+    if [[ "$openshell_enabled" == "1" && -f "$openshell_plugin" ]]; then
+        source "$openshell_plugin"
+        if openshell_available && docker_available; then
+            openshell_ready=true
+        fi
+    fi
+
+    if [[ "$openshell_ready" != true ]]; then
+        # OpenShell not enabled or not available - standard host execution
         if [[ "$has_setup_hook" == true && -f "$clone_dir/paraLlm_setup.sh" ]]; then
             tmux send-keys "./paraLlm_setup.sh && $claude_cmd" Enter
         else
@@ -44,7 +54,7 @@ launch_claude_in_env() {
         return
     fi
 
-    # OpenShell enabled - decide whether to sandbox
+    # OpenShell available - decide whether to sandbox
     local use_sandbox=false
     local auto_sandbox="${OPENSHELL_AUTO_SANDBOX:-0}"
 
@@ -71,16 +81,6 @@ launch_claude_in_env() {
     fi
 
     # --- Sandbox execution ---
-    # Source sandbox helpers
-    local openshell_plugin="$SCRIPT_DIR/plugins/openshell/openshell-sandbox.sh"
-    if [[ ! -f "$openshell_plugin" ]]; then
-        echo "OpenShell plugin not found at $openshell_plugin"
-        echo "Falling back to host execution..."
-        sleep 2
-        tmux send-keys "$claude_cmd" Enter
-        return
-    fi
-    source "$openshell_plugin"
 
     # Check if sandbox already exists (for resume)
     if sandbox_exists "$project_name" "$branch_name"; then
@@ -95,8 +95,8 @@ launch_claude_in_env() {
         sname=$(sandbox_name_for_env "$project_name" "$branch_name")
         tmux send-keys "openshell sandbox connect $sname" Enter
     else
-        echo "Sandbox creation failed, falling back to host execution..."
-        sleep 2
+        echo "Sandbox creation failed. Starting on host instead..."
+        sleep 1
         if [[ "$has_setup_hook" == true && -f "$clone_dir/paraLlm_setup.sh" ]]; then
             tmux send-keys "./paraLlm_setup.sh && $claude_cmd" Enter
         else
