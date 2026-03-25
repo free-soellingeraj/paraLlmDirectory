@@ -244,15 +244,17 @@ if [[ "$OPENSHELL_ENABLED_INSTALL" == true ]]; then
     # Create OpenShell directories
     mkdir -p "$PARA_LLM_ROOT/openshell/state/sandboxes"
     mkdir -p "$PARA_LLM_ROOT/openshell/policies"
+    mkdir -p "$PARA_LLM_ROOT/openshell/secrets"
+    chmod 700 "$PARA_LLM_ROOT/openshell/secrets"
 
     # Check for OS keychain availability
     if [[ "$(uname)" == "Darwin" ]] && command -v security &>/dev/null; then
-        echo "  Keychain: macOS Keychain (secrets stored securely)"
+        echo "  Secrets: macOS Keychain (encrypted at rest)"
     elif command -v secret-tool &>/dev/null; then
-        echo "  Keychain: Linux Secret Service (secrets stored securely)"
+        echo "  Secrets: Linux Secret Service (encrypted at rest)"
     else
-        echo "  Warning: No OS keychain found (macOS security / Linux secret-tool)"
-        echo "  Secrets will not be stored persistently. Install secret-tool or use macOS."
+        echo "  Secrets: file-based fallback (chmod 600 in $PARA_LLM_ROOT/openshell/secrets/)"
+        echo "  For encrypted storage, install libsecret (secret-tool) or use macOS"
     fi
 
     # Copy default policy templates

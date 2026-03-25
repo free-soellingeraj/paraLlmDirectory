@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # openshell-secrets.sh - Secret storage helpers for OpenShell plugin
-# Uses OS keychain (macOS Keychain / Linux secret-tool) for persistent secrets.
-# Task-scoped secrets use temporary files (cleaned up on sandbox destroy).
+# Uses OS keychain (macOS Keychain / Linux secret-tool) when available.
+# Falls back to chmod 600 files when no keychain is present.
+# Task-scoped secrets always use temporary files (cleaned up on sandbox destroy).
 # Secret values NEVER flow through the LLM - only through read -s prompts.
 
 set -u
@@ -20,17 +21,102 @@ OPENSHELL_DIR="$PARA_LLM_ROOT/openshell"
 # Keychain service prefix for all para-llm secrets
 _KEYCHAIN_SERVICE="para-llm-openshell"
 
-# --- Keychain backend ---
+# File-based fallback directory (chmod 600 files, used when no keychain available)
+_FILE_SECRETS_DIR="$OPENSHELL_DIR/secrets"
 
-# Detect which keychain backend is available
-# Returns: "macos" | "linux" | "none"
-_detect_keychain() {
+# --- Backend detection ---
+
+# Detect which secret storage backend is available
+# Returns: "macos" | "linux" | "file"
+_detect_backend() {
     if [[ "$(uname)" == "Darwin" ]] && command -v security &>/dev/null; then
         echo "macos"
     elif command -v secret-tool &>/dev/null; then
         echo "linux"
     else
-        echo "none"
+        echo "file"
+    fi
+}
+
+# --- File-based fallback backend ---
+# Used on systems without OS keychain (servers, WSL, minimal distros)
+# Stores secrets in $PARA_LLM_ROOT/openshell/secrets/ with chmod 600
+
+_file_secrets_path() {
+    local scope="$1"
+    local project="${2:-}"
+    case "$scope" in
+        global)  echo "$_FILE_SECRETS_DIR/.global.secrets" ;;
+        project) echo "$_FILE_SECRETS_DIR/${project}.secrets" ;;
+    esac
+}
+
+_file_ensure_dir() {
+    mkdir -p "$_FILE_SECRETS_DIR"
+    chmod 700 "$_FILE_SECRETS_DIR"
+}
+
+_file_store() {
+    local name="$1"
+    local value="$2"
+    local scope="$3"
+    local project="${4:-}"
+    _file_ensure_dir
+    local file
+    file=$(_file_secrets_path "$scope" "$project")
+
+    # Remove existing entry
+    if [[ -f "$file" ]]; then
+        local tmp="${file}.tmp"
+        grep -v "^${name}=" "$file" > "$tmp" 2>/dev/null || true
+        mv "$tmp" "$file"
+    fi
+
+    echo "${name}=${value}" >> "$file"
+    chmod 600 "$file"
+}
+
+_file_get() {
+    local name="$1"
+    local scope="$2"
+    local project="${3:-}"
+    local file
+    file=$(_file_secrets_path "$scope" "$project")
+    if [[ -f "$file" ]]; then
+        grep "^${name}=" "$file" 2>/dev/null | head -1 | cut -d'=' -f2-
+    fi
+}
+
+_file_exists() {
+    local name="$1"
+    local scope="$2"
+    local project="${3:-}"
+    local file
+    file=$(_file_secrets_path "$scope" "$project")
+    [[ -f "$file" ]] && grep -q "^${name}=" "$file" 2>/dev/null
+}
+
+_file_remove() {
+    local name="$1"
+    local scope="$2"
+    local project="${3:-}"
+    local file
+    file=$(_file_secrets_path "$scope" "$project")
+    if [[ -f "$file" ]]; then
+        local tmp="${file}.tmp"
+        grep -v "^${name}=" "$file" > "$tmp" 2>/dev/null || true
+        mv "$tmp" "$file"
+        chmod 600 "$file"
+    fi
+}
+
+_file_list() {
+    local scope="$1"
+    local project="${2:-}"
+    local file
+    file=$(_file_secrets_path "$scope" "$project")
+    if [[ -f "$file" ]]; then
+        grep -v '^#' "$file" 2>/dev/null | grep '=' | cut -d'=' -f1
     fi
 }
 
@@ -56,7 +142,7 @@ _keychain_store() {
     local service
     service=$(_keychain_service_name "$scope" "$project")
     local backend
-    backend=$(_detect_keychain)
+    backend=$(_detect_backend)
 
     case "$backend" in
         macos)
@@ -71,14 +157,14 @@ _keychain_store() {
                 service "$service" account "$name" 2>/dev/null
             return $?
             ;;
-        none)
-            echo "WARN: No keychain available, cannot store secret securely" >&2
-            return 1
+        file)
+            _file_store "$name" "$value" "$scope" "$project"
+            return $?
             ;;
     esac
 }
 
-# Retrieve a secret from the OS keychain
+# Retrieve a secret
 # Usage: _keychain_get <name> <scope> [project]
 # Outputs: the secret value
 _keychain_get() {
@@ -88,7 +174,7 @@ _keychain_get() {
     local service
     service=$(_keychain_service_name "$scope" "$project")
     local backend
-    backend=$(_detect_keychain)
+    backend=$(_detect_backend)
 
     case "$backend" in
         macos)
@@ -99,13 +185,14 @@ _keychain_get() {
             secret-tool lookup service "$service" account "$name" 2>/dev/null
             return $?
             ;;
-        none)
-            return 1
+        file)
+            _file_get "$name" "$scope" "$project"
+            return $?
             ;;
     esac
 }
 
-# Check if a secret exists in the OS keychain
+# Check if a secret exists
 # Usage: _keychain_exists <name> <scope> [project]
 _keychain_exists() {
     local name="$1"
@@ -114,7 +201,7 @@ _keychain_exists() {
     local service
     service=$(_keychain_service_name "$scope" "$project")
     local backend
-    backend=$(_detect_keychain)
+    backend=$(_detect_backend)
 
     case "$backend" in
         macos)
@@ -125,13 +212,14 @@ _keychain_exists() {
             secret-tool lookup service "$service" account "$name" &>/dev/null
             return $?
             ;;
-        none)
-            return 1
+        file)
+            _file_exists "$name" "$scope" "$project"
+            return $?
             ;;
     esac
 }
 
-# Remove a secret from the OS keychain
+# Remove a secret
 # Usage: _keychain_remove <name> <scope> [project]
 _keychain_remove() {
     local name="$1"
@@ -140,7 +228,7 @@ _keychain_remove() {
     local service
     service=$(_keychain_service_name "$scope" "$project")
     local backend
-    backend=$(_detect_keychain)
+    backend=$(_detect_backend)
 
     case "$backend" in
         macos)
@@ -151,8 +239,9 @@ _keychain_remove() {
             secret-tool clear service "$service" account "$name" &>/dev/null
             return $?
             ;;
-        none)
-            return 1
+        file)
+            _file_remove "$name" "$scope" "$project"
+            return $?
             ;;
     esac
 }
@@ -166,7 +255,7 @@ _keychain_list() {
     local service
     service=$(_keychain_service_name "$scope" "$project")
     local backend
-    backend=$(_detect_keychain)
+    backend=$(_detect_backend)
 
     case "$backend" in
         macos)
@@ -196,8 +285,8 @@ _keychain_list() {
                 grep "^attribute.account" | \
                 sed 's/.*= //' | sort -u
             ;;
-        none)
-            return 0
+        file)
+            _file_list "$scope" "$project"
             ;;
     esac
 }
