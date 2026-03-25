@@ -147,7 +147,7 @@ handle_initialize() {
     send_response "$id" '{
         "protocolVersion": "2024-11-05",
         "capabilities": {"tools": {}},
-        "serverInfo": {"name": "para-llm-secrets", "version": "1.0.0"}
+        "serverInfo": {"name": "para-llm-tools", "version": "1.0.0"}
     }'
 }
 
@@ -193,6 +193,24 @@ handle_tools_list() {
                         }
                     },
                     "required": ["name"]
+                }
+            },
+            {
+                "name": "run_interactive",
+                "description": "Run a command that requires interactive user input in a tmux popup. Use this when a command needs user interaction that cannot go through the LLM (e.g., browser-based OAuth flows, interactive configuration wizards, TUI menus). The user completes the interaction directly in the popup, then control returns to you with the exit code. Examples: rclone config, gh auth login, aws configure, gcloud auth login, ssh-keygen.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "command": {
+                            "type": "string",
+                            "description": "The shell command to run interactively (e.g., rclone config, gh auth login)"
+                        },
+                        "reason": {
+                            "type": "string",
+                            "description": "A brief explanation shown to the user about why this interactive session is needed"
+                        }
+                    },
+                    "required": ["command", "reason"]
                 }
             }
         ]
@@ -311,6 +329,52 @@ handle_tool_call() {
                 send_response "$id" "{\"content\":[{\"type\":\"text\",\"text\":\"Secret '${check_name}' is registered and available.\"}]}"
             else
                 send_response "$id" "{\"content\":[{\"type\":\"text\",\"text\":\"Secret '${check_name}' is NOT registered. Use register_secret to add it.\"}]}"
+            fi
+            ;;
+
+        run_interactive)
+            local interactive_cmd interactive_reason
+            interactive_cmd=$(json_get "$args_json" "command")
+            interactive_reason=$(json_get "$args_json" "reason")
+
+            if [[ -z "$interactive_cmd" ]]; then
+                send_error "$id" -32602 "Missing required parameter: command"
+                return
+            fi
+
+            # Create a temporary result file
+            local result_file
+            result_file=$(mktemp /tmp/para-llm-interactive-result.XXXXXX)
+
+            local popup_script="$SCRIPT_DIR/popup-interactive.sh"
+
+            if command -v tmux &>/dev/null && [[ -n "${TMUX:-}" ]]; then
+                # Run in tmux popup - use larger size for interactive commands
+                tmux display-popup -E -w 80% -h 80% \
+                    "bash '$popup_script' '$interactive_cmd' '$interactive_reason' '$result_file'"
+
+                # Read the result
+                if [[ -f "$result_file" ]]; then
+                    local result
+                    result=$(cat "$result_file")
+                    rm -f "$result_file"
+
+                    local success
+                    success=$(json_get_any "$result" "success")
+                    local message
+                    message=$(json_get "$result" "message")
+                    local exit_code
+                    exit_code=$(json_get_any "$result" "exit_code")
+                    message=$(json_escape "$message")
+
+                    send_response "$id" "{\"content\":[{\"type\":\"text\",\"text\":\"${message} (exit code: ${exit_code})\"}]}"
+                else
+                    rm -f "$result_file"
+                    send_response "$id" '{"content":[{"type":"text","text":"Interactive session was closed without completing"}]}'
+                fi
+            else
+                rm -f "$result_file"
+                send_error "$id" -32603 "Cannot open interactive popup: no tmux session detected"
             fi
             ;;
 
