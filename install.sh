@@ -461,9 +461,10 @@ cat >> ~/.tmux.conf << EOF
 
 # para-llm-directory bindings
 
-# Enable extended keys so Shift+Enter passes through to Claude Code as newline
+# Enable extended keys and passthrough so Shift+Enter works in Claude Code
 set -s extended-keys on
 set -as terminal-features 'xterm*:extkeys'
+set -g allow-passthrough on
 
 # Enable mouse/trackpad scrolling and pane selection
 set -g mouse on
