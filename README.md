@@ -2,6 +2,8 @@
 
 Tmux workflow for managing parallel Claude Code sessions across multiple feature branches.
 
+<img width="1512" height="977" alt="Screenshot 2026-03-26 at 8 37 41 PM" src="https://github.com/user-attachments/assets/0c976b6a-d33a-4ec3-ac01-77c402f67e70" />
+
 ## What It Does
 
 - **Ctrl+b c**: Create or resume a feature branch environment
