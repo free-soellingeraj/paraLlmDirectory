@@ -113,10 +113,22 @@ restore_command_center() {
 
         # Check if this pane still exists
         if tmux list-panes -a -F '#{pane_id}' 2>/dev/null | grep -qx "$pane_id"; then
-            # Break pane out to a new window with its original name
-            if tmux break-pane -s "$pane_id" -n "$name" 2>/dev/null; then
-                ((restored++))
-                # Remember first restored window
+            local success=false
+            # If this pane is the last one in command-center, rename the window instead
+            # of breaking it out — some tmux versions refuse break-pane on the last pane,
+            # which silently fails and leaves the 7th+ window with a wrong name.
+            local cc_count
+            cc_count=$(tmux list-panes -t "$COMMAND_CENTER" 2>/dev/null | wc -l | tr -d ' ')
+            if [[ "${cc_count:-0}" -eq 1 ]] && \
+               tmux list-panes -t "$COMMAND_CENTER" -F '#{pane_id}' 2>/dev/null | grep -qx "$pane_id"; then
+                # Last pane in command-center: rename the window to preserve the name
+                tmux rename-window -t "$COMMAND_CENTER" "$name" 2>/dev/null && success=true
+            else
+                # Use -d to avoid switching focus on each break, keeping the loop stable
+                tmux break-pane -s "$pane_id" -n "$name" -d 2>/dev/null && success=true
+            fi
+            if $success; then
+                ((restored++)) || true
                 if [[ -z "$first_restored_window" ]]; then
                     first_restored_window="$name"
                 fi
@@ -131,7 +143,7 @@ restore_command_center() {
         tmux list-panes -t "$COMMAND_CENTER" -F '#{pane_id}|#{pane_current_path}' 2>/dev/null | while IFS='|' read -r remain_id remain_path; do
             local remain_name
             remain_name=$(basename "$remain_path")
-            tmux break-pane -s "$remain_id" -n "$remain_name" 2>/dev/null || true
+            tmux break-pane -s "$remain_id" -n "$remain_name" -d 2>/dev/null || true
         done
     fi
 
