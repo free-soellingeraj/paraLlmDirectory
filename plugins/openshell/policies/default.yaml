@@ -1,0 +1,77 @@
+version: 1
+
+filesystem_policy:
+  include_workdir: true
+  read_only:
+    - /usr
+    - /lib
+    - /lib64
+    - /bin
+    - /sbin
+    - /etc
+  read_write:
+    - /sandbox
+    - /tmp
+    - /home
+
+process:
+  run_as_user: sandbox
+  run_as_group: sandbox
+
+landlock:
+  compatibility: best_effort
+
+network_policies:
+  anthropic_api:
+    name: anthropic-api
+    endpoints:
+      - host: api.anthropic.com
+        port: 443
+      - host: "*.anthropic.com"
+        port: 443
+    binaries:
+      - path: /usr/local/bin/claude
+      - path: /usr/bin/node
+      - path: /usr/bin/curl
+
+  github:
+    name: github
+    endpoints:
+      - host: github.com
+        port: 443
+      - host: github.com
+        port: 22
+      - host: "*.github.com"
+        port: 443
+      - host: "*.githubusercontent.com"
+        port: 443
+    binaries:
+      - path: /usr/bin/git
+      - path: /usr/bin/ssh
+      - path: /usr/bin/gh
+      - path: /usr/local/bin/gh
+      - path: /usr/local/bin/claude
+
+  npm_registry:
+    name: npm-registry
+    endpoints:
+      - host: registry.npmjs.org
+        port: 443
+      - host: "*.npmjs.org"
+        port: 443
+    binaries:
+      - path: /usr/bin/npm
+      - path: /usr/local/bin/npm
+      - path: /usr/bin/node
+
+  pypi:
+    name: pypi
+    endpoints:
+      - host: pypi.org
+        port: 443
+      - host: files.pythonhosted.org
+        port: 443
+    binaries:
+      - path: /usr/bin/pip
+      - path: /usr/local/bin/pip
+      - path: /usr/local/bin/uv

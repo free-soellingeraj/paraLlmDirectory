@@ -61,7 +61,18 @@ for d in "$ENVS_DIR"/*/; do
     [[ "$unpushed" -gt 0 ]] && status+="↑${unpushed} unpushed "
     [[ -z "$status" ]] && status="clean"
 
-    printf "%-40s %-25s %s\n" "$env_name" "$branch" "$status"
+    # Check if environment is running in an OpenShell sandbox
+    local sandbox_indicator=""
+    if [[ -d "$PARA_LLM_ROOT/openshell/state/sandboxes" ]]; then
+        local project_name="${env_name%%-*}"
+        local branch_name="${env_name#*-}"
+        local sandbox_name="para-$(echo "${project_name}-${branch_name}" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g')"
+        if [[ -f "$PARA_LLM_ROOT/openshell/state/sandboxes/$sandbox_name" ]]; then
+            sandbox_indicator=" [sandboxed]"
+        fi
+    fi
+
+    printf "%-40s %-25s %s\n" "$env_name" "$branch" "${status}${sandbox_indicator}"
 
     if $VERBOSE && [[ "$unpushed" -gt 0 ]]; then
         git -C "$dir" log --oneline @{u}.. 2>/dev/null | sed 's/^/    /'

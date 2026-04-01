@@ -167,6 +167,18 @@ main() {
                     fi
                 done
 
+                # Destroy OpenShell sandbox if this env was sandboxed
+                local openshell_plugin="$SCRIPT_DIR/plugins/openshell/openshell-sandbox.sh"
+                if [[ -f "$openshell_plugin" ]]; then
+                    # Extract project name (everything before first dash in env name)
+                    local project_name="${ENV_NAME%%-*}"
+                    source "$openshell_plugin"
+                    if is_env_sandboxed "$project_name" "$BRANCH_NAME"; then
+                        echo "Destroying OpenShell sandbox..."
+                        sandbox_destroy "$project_name" "$BRANCH_NAME" "$ENV_DIR/${project_name}" || true
+                    fi
+                fi
+
                 # Kill any tmux windows/panes with this branch name
                 if in_command_center; then
                     # In command center: find and kill the pane for this branch
