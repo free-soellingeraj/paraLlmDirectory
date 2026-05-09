@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # Toggle speech-to-text recording for the active tmux pane
-# Called by tmux key binding: Ctrl+b x
+# Called by tmux key binding: Ctrl+b a
 #
 # First press:  start recording from microphone
 # Second press: stop recording, transcribe, inject text into pane
@@ -9,7 +9,7 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-STT_DIR="/tmp/claude-stt"
+STT_DIR="/tmp/para-llm-stt"
 PID_FILE="$STT_DIR/recording.pid"
 TARGET_FILE="$STT_DIR/target-pane"
 AUDIO_FILE="$STT_DIR/audio.wav"

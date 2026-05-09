@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# para-llm-save-state.sh - Save Claude session state for recovery
+# para-llm-save-state.sh - Save managed AI terminal session state for recovery
 # Called by tmux-resurrect's @resurrect-hook-post-save-all (every 1 minute via continuum)
 
 set -u
@@ -12,7 +12,10 @@ fi
 PARA_LLM_ROOT="$(cat "$BOOTSTRAP_FILE")"
 
 # Source config for INSTALL_DIR and other settings
-if [[ -f "$PARA_LLM_ROOT/config" ]]; then
+CONFIG_LOADER="$PARA_LLM_ROOT/scripts/para-llm-config.sh"
+if [[ -f "$CONFIG_LOADER" ]]; then
+    source "$CONFIG_LOADER"
+elif [[ -f "$PARA_LLM_ROOT/config" ]]; then
     source "$PARA_LLM_ROOT/config"
 fi
 
@@ -85,9 +88,11 @@ SESSION_NAME=$(echo "$PANE_DATA" | head -1 | cut -d'|' -f1)
                     # Branch is env_name with project prefix removed
                     BRANCH="${ENV_NAME#"$PROJECT"-}"
 
-                    # Check if Claude is running in this pane
+                    # Check if the env's selected AI terminal is running in this pane
                     HAD_CLAUDE="false"
-                    if pgrep -P "$pane_pid" -f "claude" >/dev/null 2>&1; then
+                    para_llm_ensure_meta_for_path "$pane_path" >/dev/null 2>&1 || true
+                    REPL="$(para_llm_repl_for_path "$pane_path" 2>/dev/null || echo "claude")"
+                    if pgrep -P "$pane_pid" -f "$(para_llm_repl_process_pattern "$REPL")" >/dev/null 2>&1; then
                         HAD_CLAUDE="true"
                     fi
 

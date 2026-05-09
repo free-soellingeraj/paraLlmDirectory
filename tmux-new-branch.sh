@@ -12,6 +12,7 @@ mkdir -p "$ENVS_DIR"
 
 # Check if we're currently in command center (matches cleanup script approach)
 COMMAND_CENTER="command-center"
+CREATED_PANE_ID=""
 
 in_command_center() {
     local current_window
@@ -33,6 +34,7 @@ create_feature_window() {
         tmux new-window -n "$branch_name" -c "$working_dir"
         local new_pane_id
         new_pane_id=$(tmux display-message -p '#{pane_id}')
+        CREATED_PANE_ID="$new_pane_id"
 
         # Add to state file so it can be restored later
         local session_name
@@ -47,7 +49,7 @@ create_feature_window() {
         tmux select-layout -t "$COMMAND_CENTER" tiled
 
         # Initialize pane display option
-        tmux set-option -p -t "$new_pane_id" @pane_display "#[fg=green]No Claude | $project_name | $branch_name#[default]" 2>/dev/null || true
+        tmux set-option -p -t "$new_pane_id" @pane_display "#[fg=green]No AI terminal | $project_name | $branch_name#[default]" 2>/dev/null || true
 
         # Start state monitor for the new pane
         local monitor_script
@@ -61,10 +63,62 @@ create_feature_window() {
     else
         # Normal mode - just create window
         tmux new-window -n "$branch_name" -c "$working_dir"
+        CREATED_PANE_ID=$(tmux display-message -p '#{pane_id}')
     fi
 }
 
-# Create CLAUDE.md for multi-repo environments
+select_repl_for_env() {
+    local env_dir="$1"
+    local default_repl="${2:-$PARA_LLM_DEFAULT_REPL}"
+
+    if command -v fzf >/dev/null 2>&1; then
+        local selection
+        selection=$(printf "Claude Code\nCodex\n" | fzf --prompt="REPL for $(basename "$env_dir") [$default_repl]> ")
+        case "$selection" in
+            "Codex") echo "codex" ;;
+            "Claude Code"|*) echo "claude" ;;
+        esac
+    else
+        echo "Select REPL for $(basename "$env_dir"):"
+        echo "1) Claude Code"
+        echo "2) Codex"
+        read -r -p "Choice [1]: " choice
+        case "$choice" in
+            2) echo "codex" ;;
+            *) echo "claude" ;;
+        esac
+    fi
+}
+
+start_transcript_pipe() {
+    local pane_id="$1"
+    local working_dir="$2"
+    local meta_dir transcript_file quoted_transcript
+
+    para_llm_ensure_meta_for_path "$working_dir" >/dev/null 2>&1 || return 0
+    meta_dir="$(para_llm_meta_dir_for_path "$working_dir" 2>/dev/null || true)"
+    [[ -n "$meta_dir" ]] || return 0
+    transcript_file="$meta_dir/transcript.log"
+    quoted_transcript="$(para_llm_shell_quote "$transcript_file")"
+    tmux pipe-pane -t "$pane_id" -o "cat >> $quoted_transcript" 2>/dev/null || true
+}
+
+launch_repl_in_created_pane() {
+    local working_dir="$1"
+    local resume="${2:-false}"
+    local launch_cmd
+
+    start_transcript_pipe "$CREATED_PANE_ID" "$working_dir"
+    launch_cmd="$(para_llm_repl_command_for_path "$working_dir" "$resume")"
+
+    if [[ -f "$working_dir/paraLlm_setup.sh" ]]; then
+        tmux send-keys -t "$CREATED_PANE_ID" "./paraLlm_setup.sh && $launch_cmd" Enter
+    else
+        tmux send-keys -t "$CREATED_PANE_ID" "$launch_cmd" Enter
+    fi
+}
+
+# Create AI-agent instructions for multi-repo environments
 # Usage: create_multi_repo_claude_md "/path/to/env" "branch-name" "repo1" "repo2" ...
 create_multi_repo_claude_md() {
     local env_dir="$1"
@@ -112,6 +166,8 @@ CLAUDE_MD_EOF
 - If repos depend on each other, merge the dependency first
 - Consider using feature flags if changes can't be deployed atomically
 CLAUDE_MD_EOF
+
+    cp "$env_dir/CLAUDE.md" "$env_dir/AGENTS.md"
 }
 
 # Find git repos in ~/code (base repos only - directories with .git dir at top level)
@@ -311,8 +367,9 @@ main() {
                     ENV_DIR="${ENVS_DIR}/${selected_env}"
                     PROJECT_NAME="$selected_env"
                     local window_name="${PROJECT_NAME} multi-repo (${REPO_COUNT})"
+                    para_llm_ensure_meta_for_path "$ENV_DIR" >/dev/null 2>&1 || true
                     create_feature_window "$window_name" "$ENV_DIR"
-                    tmux send-keys "claude --dangerously-skip-permissions --resume" Enter
+                    launch_repl_in_created_pane "$ENV_DIR" true
                     exit 0
                 else
                     # Step 3a: Select existing branch for this project
@@ -328,12 +385,8 @@ main() {
                     CLONE_DIR="${ENV_DIR}/${REPO_NAME}"
 
                     create_feature_window "$BRANCH_NAME" "$CLONE_DIR"
-                    # Run setup hook if it exists
-                    if [[ -f "$CLONE_DIR/paraLlm_setup.sh" ]]; then
-                        tmux send-keys "./paraLlm_setup.sh && claude --dangerously-skip-permissions --resume" Enter
-                    else
-                        tmux send-keys "claude --dangerously-skip-permissions --resume" Enter
-                    fi
+                    para_llm_ensure_meta_for_path "$CLONE_DIR" >/dev/null 2>&1 || true
+                    launch_repl_in_created_pane "$CLONE_DIR" true
                     exit 0
                 fi
                 ;;
@@ -398,19 +451,19 @@ main() {
 
                 # For multi-repo, start in env root; for single repo, start in the repo
                 if [[ "$IS_MULTI_REPO" == true ]]; then
-                    # Create CLAUDE.md explaining multi-repo context
+                    # Create AI-agent instructions explaining multi-repo context
                     create_multi_repo_claude_md "$ENV_DIR" "$BRANCH_NAME" "${REPO_NAMES[@]}"
                     local window_name="${PROJECT_NAME} multi-repo (${REPO_COUNT})"
+                    SELECTED_REPL="$(select_repl_for_env "$ENV_DIR")"
+                    para_llm_set_repl_for_path "$ENV_DIR" "$SELECTED_REPL"
                     create_feature_window "$window_name" "$ENV_DIR"
-                    tmux send-keys "claude --dangerously-skip-permissions" Enter
+                    launch_repl_in_created_pane "$ENV_DIR" false
                 else
                     CLONE_DIR="$primary_clone_dir"
+                    SELECTED_REPL="$(select_repl_for_env "$ENV_DIR")"
+                    para_llm_set_repl_for_path "$CLONE_DIR" "$SELECTED_REPL"
                     create_feature_window "$BRANCH_NAME" "$CLONE_DIR"
-                    if [[ -f "$CLONE_DIR/paraLlm_setup.sh" ]]; then
-                        tmux send-keys "./paraLlm_setup.sh && claude --dangerously-skip-permissions" Enter
-                    else
-                        tmux send-keys "claude --dangerously-skip-permissions" Enter
-                    fi
+                    launch_repl_in_created_pane "$CLONE_DIR" false
                 fi
                 exit 0
                 ;;
@@ -448,16 +501,14 @@ main() {
                     sleep 1
                     if [[ "$IS_MULTI_REPO" == true ]]; then
                         local window_name="${PROJECT_NAME} multi-repo (${REPO_COUNT})"
+                        para_llm_ensure_meta_for_path "$ENV_DIR" >/dev/null 2>&1 || true
                         create_feature_window "$window_name" "$ENV_DIR"
-                        tmux send-keys "claude --dangerously-skip-permissions --resume" Enter
+                        launch_repl_in_created_pane "$ENV_DIR" true
                     else
                         CLONE_DIR="${ENV_DIR}/${REPO_NAME}"
+                        para_llm_ensure_meta_for_path "$CLONE_DIR" >/dev/null 2>&1 || true
                         create_feature_window "$BRANCH_NAME" "$CLONE_DIR"
-                        if [[ -f "$CLONE_DIR/paraLlm_setup.sh" ]]; then
-                            tmux send-keys "./paraLlm_setup.sh && claude --dangerously-skip-permissions --resume" Enter
-                        else
-                            tmux send-keys "claude --dangerously-skip-permissions --resume" Enter
-                        fi
+                        launch_repl_in_created_pane "$CLONE_DIR" true
                     fi
                     exit 0
                 fi
@@ -508,19 +559,19 @@ main() {
 
                 # For multi-repo, start in env root; for single repo, start in the repo
                 if [[ "$IS_MULTI_REPO" == true ]]; then
-                    # Create CLAUDE.md explaining multi-repo context
+                    # Create AI-agent instructions explaining multi-repo context
                     create_multi_repo_claude_md "$ENV_DIR" "$BRANCH_NAME" "${REPO_NAMES[@]}"
                     local window_name="${PROJECT_NAME} multi-repo (${REPO_COUNT})"
+                    SELECTED_REPL="$(select_repl_for_env "$ENV_DIR")"
+                    para_llm_set_repl_for_path "$ENV_DIR" "$SELECTED_REPL"
                     create_feature_window "$window_name" "$ENV_DIR"
-                    tmux send-keys "claude --dangerously-skip-permissions" Enter
+                    launch_repl_in_created_pane "$ENV_DIR" false
                 else
                     CLONE_DIR="$primary_clone_dir"
+                    SELECTED_REPL="$(select_repl_for_env "$ENV_DIR")"
+                    para_llm_set_repl_for_path "$CLONE_DIR" "$SELECTED_REPL"
                     create_feature_window "$BRANCH_NAME" "$CLONE_DIR"
-                    if [[ -f "$CLONE_DIR/paraLlm_setup.sh" ]]; then
-                        tmux send-keys "./paraLlm_setup.sh && claude --dangerously-skip-permissions" Enter
-                    else
-                        tmux send-keys "claude --dangerously-skip-permissions" Enter
-                    fi
+                    launch_repl_in_created_pane "$CLONE_DIR" false
                 fi
                 exit 0
                 ;;

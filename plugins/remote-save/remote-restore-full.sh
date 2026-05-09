@@ -4,7 +4,7 @@
 # 2. For each entry: git clone from git_remote
 # 3. git checkout branch
 # 4. Creates tmux window
-# 5. Launches Claude with --dangerously-skip-permissions --resume if it was running
+# 5. Launches the env's selected REPL if it was running
 
 set -u
 
@@ -17,7 +17,10 @@ fi
 PARA_LLM_ROOT="$(cat "$BOOTSTRAP_FILE")"
 
 # Source config
-if [[ -f "$PARA_LLM_ROOT/config" ]]; then
+CONFIG_LOADER="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/para-llm-config.sh"
+if [[ -f "$CONFIG_LOADER" ]]; then
+    source "$CONFIG_LOADER"
+elif [[ -f "$PARA_LLM_ROOT/config" ]]; then
     source "$PARA_LLM_ROOT/config"
 fi
 
@@ -111,15 +114,24 @@ while IFS='|' read -r win_name pane_path project branch had_claude git_remote; d
         continue
     }
 
-    # Launch Claude if it was running
+    # Launch the env's selected REPL if it was running
     if [[ "$had_claude" == "true" ]]; then
-        echo "  Launching Claude..."
+        para_llm_ensure_meta_for_path "$PROJECT_DIR" >/dev/null 2>&1 || true
+        PANE_ID="$(tmux display-message -p -t "$win_name" '#{pane_id}' 2>/dev/null || true)"
+        META_DIR="$(para_llm_meta_dir_for_path "$PROJECT_DIR" 2>/dev/null || true)"
+        if [[ -n "$PANE_ID" && -n "$META_DIR" ]]; then
+            TRANSCRIPT_FILE="$META_DIR/transcript.log"
+            QUOTED_TRANSCRIPT="$(para_llm_shell_quote "$TRANSCRIPT_FILE")"
+            tmux pipe-pane -t "$PANE_ID" -o "cat >> $QUOTED_TRANSCRIPT" 2>/dev/null || true
+        fi
+        REPL="$(para_llm_repl_for_path "$PROJECT_DIR")"
+        echo "  Launching $REPL..."
         # Determine launch command
         SETUP_SCRIPT="$PROJECT_DIR/paraLlm_setup.sh"
         if [[ -f "$SETUP_SCRIPT" ]]; then
-            LAUNCH_CMD="./paraLlm_setup.sh && claude --dangerously-skip-permissions --resume"
+            LAUNCH_CMD="./paraLlm_setup.sh && $(para_llm_repl_command_for_path "$PROJECT_DIR" true)"
         else
-            LAUNCH_CMD="claude --dangerously-skip-permissions --resume"
+            LAUNCH_CMD="$(para_llm_repl_command_for_path "$PROJECT_DIR" true)"
         fi
         tmux send-keys -t "$win_name" "$LAUNCH_CMD" Enter
     fi

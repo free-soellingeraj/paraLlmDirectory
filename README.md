@@ -1,6 +1,6 @@
 # para-llm-directory
 
-Tmux workflow for managing parallel Claude Code sessions across multiple feature branches.
+Tmux workflow for managing parallel Claude Code or Codex sessions across multiple feature branches.
 
 <img width="1512" height="977" alt="Screenshot 2026-03-26 at 8 37 41 PM" src="https://github.com/user-attachments/assets/0c976b6a-d33a-4ec3-ac01-77c402f67e70" />
 
@@ -10,7 +10,8 @@ Tmux workflow for managing parallel Claude Code sessions across multiple feature
   - Select a project from `~/code`
   - Choose to start new or resume existing feature
   - Clones repo to `~/code/envs/{Project}-{feature}/{Project}/`
-  - Opens tmux window and starts Claude Code
+  - Choose Claude Code or Codex for the new worktree
+  - Opens tmux window and starts the selected REPL
 
 - **Ctrl+b k**: Cleanup a feature branch environment
   - Select feature to delete
@@ -20,6 +21,9 @@ Tmux workflow for managing parallel Claude Code sessions across multiple feature
 
 - **Ctrl+b C**: Plain new window (original tmux behavior)
 
+- **Ctrl+b y**: Choose or switch the active worktree between Claude Code and Codex
+- **Ctrl+b a**: Voice input with whisper.cpp (press once to record, again to transcribe)
+- **Ctrl+b p**: Voice playback for the latest active pane output
 - **Shift+Enter**: Insert newline in Claude Code REPL (requires iTerm2 with CSI u — see below)
 - **Mouse/trackpad**: Scroll tmux panes and click to select panes
 - **Option+drag**: Select and copy text (Cmd+C to copy, iTerm2 native selection)
@@ -41,6 +45,15 @@ brew install fzf
 
 # Install Claude Code
 npm install -g @anthropic-ai/claude-code
+
+# Optional: Install Codex if you want Codex terminals
+npm install -g @openai/codex
+
+# Voice input dependencies
+brew install sox whisper-cpp
+
+# Voice playback dependency
+pipx install edge-tts
 ```
 
 ## Installation
@@ -107,7 +120,7 @@ mkdir -p ~/code/envs
 3. Choose "No - start new feature/bug"
 4. Enter the feature/branch name
 5. Wait for clone to complete
-6. Claude Code starts automatically
+6. The selected REPL starts automatically
 
 ### Resuming work on a feature
 
@@ -115,7 +128,37 @@ mkdir -p ~/code/envs
 2. Select your project
 3. Choose "Yes - resume existing"
 4. Select the branch from the list
-5. Claude Code resumes with `--resume`
+5. The stored REPL for that environment resumes automatically
+
+### Switching between Claude and Codex
+
+From a worktree pane, press `Ctrl+b y` and choose Claude Code or Codex. The choice is stored per environment:
+
+```text
+.para-llm/
+  repl
+  transcript.log
+  handoff.md
+```
+
+When switching from one product to the other, para-llm captures the pane transcript, writes `.para-llm/handoff.md`, and starts the selected REPL with a prompt to continue from that handoff. This transfers working context, not the product's hidden conversation state.
+
+### Voice
+
+- Press `Ctrl+b a` to start recording, then `Ctrl+b a` again to transcribe into the active pane.
+- Press `Ctrl+b p` to speak the latest readable output from the active pane, then `Ctrl+b p` again to stop playback.
+
+Voice is always installed by `install.sh`. STT uses `sox` and `whisper-cpp`. TTS uses Microsoft `edge-tts` with `en-US-AndrewNeural` by default and plays audio with `afplay` on macOS. Before playback, para-llm asks the selected REPL backend to turn the latest pane text into concise speakable prose, so code blocks, diffs, logs, and long output are summarized instead of read verbatim. While TTS is preparing the summary and audio, para-llm plays a subtle repeating click so you know playback is working before the first utterance. If summarization is unavailable, playback falls back to the extracted pane text.
+
+### Upgrading existing environments
+
+After installing, run:
+
+```bash
+$PARA_LLM_ROOT/scripts/para-llm-upgrade-envs.sh
+```
+
+This creates `.para-llm/` metadata for existing envs, defaults missing REPL choices to Claude, creates `AGENTS.md` from `CLAUDE.md` when needed, and attaches transcript logging to currently open panes.
 
 ### Cleaning up a finished feature
 
@@ -137,7 +180,7 @@ Projects can define setup and teardown scripts that run automatically:
 
 ### `paraLlm_setup.sh`
 
-If this script exists in your project root, it runs when creating or resuming an environment (before Claude starts).
+If this script exists in your project root, it runs when creating or resuming an environment (before the REPL starts).
 
 **Example for an iOS project:**
 ```bash
@@ -201,5 +244,7 @@ MyProject-bugfix                         bugfix                    ↑3 unpushed
 - Base repos in `~/code` should not have dashes in their names (dashes indicate feature clones)
 - Each feature gets a fresh clone, so changes are isolated
 - Claude Code sessions are per-directory, so `--resume` works per feature
+- Codex restore uses `codex resume --last`
+- REPL switching captures terminal context into `.para-llm/handoff.md`; exact hidden session state is not portable between products
 - Unpushed commits are detected before deletion to prevent data loss
 - Project hooks are optional - environments work fine without them
