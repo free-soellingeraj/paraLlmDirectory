@@ -26,11 +26,11 @@ fi
 # Wait for panes to initialize
 sleep 2
 
-# Re-launch Claude sessions
-tmux display-message "para-llm: Re-launching Claude sessions..."
+# Re-launch managed AI terminal sessions
+tmux display-message "para-llm: Re-launching managed AI terminal sessions..."
 "$PARA_LLM_ROOT/scripts/para-llm-restore.sh"
 
-# Open command center view after Claude sessions are launched
+# Open command center view after managed AI terminal sessions are launched
 COMMAND_CENTER_SCRIPT="${INSTALL_DIR:-}/tmux-command-center.sh"
 if [[ -n "${INSTALL_DIR:-}" && -x "$COMMAND_CENTER_SCRIPT" ]]; then
     sleep 1

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# para-llm-restore.sh - Re-launch Claude in restored panes
+# para-llm-restore.sh - Re-launch managed AI terminals in restored panes
 # Idempotent: checks that pane is idle before launching
 
 set -u
@@ -12,6 +12,13 @@ if [[ ! -f "$BOOTSTRAP_FILE" ]]; then
 fi
 PARA_LLM_ROOT="$(cat "$BOOTSTRAP_FILE")"
 ENVS_DIR="$PARA_LLM_ROOT/envs"
+
+CONFIG_LOADER="$PARA_LLM_ROOT/scripts/para-llm-config.sh"
+if [[ -f "$CONFIG_LOADER" ]]; then
+    source "$CONFIG_LOADER"
+elif [[ -f "$PARA_LLM_ROOT/config" ]]; then
+    source "$PARA_LLM_ROOT/config"
+fi
 
 STATE_FILE="$PARA_LLM_ROOT/recovery/session-state"
 LOG_FILE="$PARA_LLM_ROOT/recovery/restore.log"
@@ -38,8 +45,8 @@ while IFS='|' read -r win_name pane_path project branch had_claude git_remote; d
 done < "$STATE_FILE"
 
 if [[ ${#SAVED_ENTRIES[@]} -eq 0 ]]; then
-    echo "  No Claude sessions to restore" >> "$LOG_FILE"
-    tmux display-message "para-llm: No Claude sessions to restore"
+    echo "  No managed AI terminal sessions to restore" >> "$LOG_FILE"
+    tmux display-message "para-llm: No managed AI terminal sessions to restore"
     exit 0
 fi
 
@@ -81,7 +88,7 @@ BRANCH=$branch
 CWD=$pane_path
 MAPPING_EOF
 
-        # Set initial pane title (will show until Claude hooks update it)
+        # Set initial pane title (will show until hooks update it)
         tmux set-option -p -t "$pane_id" @pane_display "#[fg=yellow]Working | $project | $branch#[default]" 2>/dev/null || true
 
         # Set initial border color to yellow (starting)
@@ -89,10 +96,17 @@ MAPPING_EOF
 
         # Determine launch command
         SETUP_SCRIPT="$pane_path/paraLlm_setup.sh"
+        para_llm_ensure_meta_for_path "$pane_path" >/dev/null 2>&1 || true
+        META_DIR="$(para_llm_meta_dir_for_path "$pane_path" 2>/dev/null || true)"
+        if [[ -n "$META_DIR" ]]; then
+            TRANSCRIPT_FILE="$META_DIR/transcript.log"
+            QUOTED_TRANSCRIPT="$(para_llm_shell_quote "$TRANSCRIPT_FILE")"
+            tmux pipe-pane -t "$pane_id" -o "cat >> $QUOTED_TRANSCRIPT" 2>/dev/null || true
+        fi
         if [[ -f "$SETUP_SCRIPT" ]]; then
-            LAUNCH_CMD="./paraLlm_setup.sh && claude --dangerously-skip-permissions --resume"
+            LAUNCH_CMD="./paraLlm_setup.sh && $(para_llm_repl_command_for_path "$pane_path" true)"
         else
-            LAUNCH_CMD="claude --dangerously-skip-permissions --resume"
+            LAUNCH_CMD="$(para_llm_repl_command_for_path "$pane_path" true)"
         fi
 
         # Send command to the pane
@@ -106,4 +120,4 @@ MAPPING_EOF
 done < <(tmux list-panes -a -F '#{pane_id}|#{pane_current_path}|#{pane_pid}' 2>/dev/null)
 
 echo "  Summary: restored=$RESTORED skipped=$SKIPPED" >> "$LOG_FILE"
-tmux display-message "para-llm: Restored $RESTORED Claude session(s), skipped $SKIPPED"
+tmux display-message "para-llm: Restored $RESTORED managed AI terminal session(s), skipped $SKIPPED"

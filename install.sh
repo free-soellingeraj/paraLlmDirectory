@@ -98,6 +98,11 @@ fi
 # Derive ENVS_DIR
 ENVS_DIR="$PARA_LLM_ROOT/envs"
 
+CLAUDE_LAUNCH_ARGS="${CLAUDE_LAUNCH_ARGS:---permission-mode auto}"
+CODEX_LAUNCH_ARGS="${CODEX_LAUNCH_ARGS:-}"
+PARA_LLM_DEFAULT_REPL="${PARA_LLM_DEFAULT_REPL:-claude}"
+echo ""
+
 # Create directory structure
 mkdir -p "$PARA_LLM_ROOT"
 mkdir -p "$ENVS_DIR"
@@ -123,6 +128,11 @@ echo "CODE_DIR=\"$CODE_DIR\"" >> "$PARA_LLM_ROOT/config"
 echo "" >> "$PARA_LLM_ROOT/config"
 echo "# Directory where para-llm-directory is installed (source scripts)" >> "$PARA_LLM_ROOT/config"
 echo "INSTALL_DIR=\"$SCRIPT_DIR\"" >> "$PARA_LLM_ROOT/config"
+echo "" >> "$PARA_LLM_ROOT/config"
+echo "# REPL launch profiles and default per-env REPL" >> "$PARA_LLM_ROOT/config"
+echo "PARA_LLM_DEFAULT_REPL=\"$PARA_LLM_DEFAULT_REPL\"" >> "$PARA_LLM_ROOT/config"
+echo "CLAUDE_LAUNCH_ARGS=\"$CLAUDE_LAUNCH_ARGS\"" >> "$PARA_LLM_ROOT/config"
+echo "CODEX_LAUNCH_ARGS=\"$CODEX_LAUNCH_ARGS\"" >> "$PARA_LLM_ROOT/config"
 cat >> "$PARA_LLM_ROOT/config" << 'EOF'
 
 # tmux status line settings
@@ -132,65 +142,53 @@ STATUS_LINE_EMOJI=0
 # STATUS_LINE_PREFIX="Claude"
 EOF
 
-# --- Optional: Speech-to-text plugin ---
-STT_ENABLED=false
-if [[ "$NON_INTERACTIVE" == true ]]; then
-    echo "Skipping STT plugin (non-interactive mode)"
+# --- Always-on voice layer ---
+echo ""
+echo "Setting up voice input/output..."
+echo "  STT: Ctrl+b a records and transcribes with whisper.cpp"
+echo "  TTS: Ctrl+b p speaks/stops latest pane output with Microsoft edge-tts"
+
+# Check/install sox
+if ! command -v rec &>/dev/null; then
+    echo "  Installing sox (audio recording)..."
+    pkg_install sox 2>/dev/null || echo "  Warning: Failed to install sox. Install with your package manager."
 else
-    echo ""
-    echo "Optional: Speech-to-text (STT) plugin"
-    echo "  Adds Ctrl+b a to dictate into the active pane using whisper.cpp"
-    echo "  Runs fully offline - no API keys or cloud calls"
-    echo ""
-    echo "  Dependencies (installed via your package manager):"
-    echo "    sox          ~3 MB   (audio recording)"
-    echo "    whisper-cpp  ~5 MB   (speech recognition engine)"
-    echo "    whisper model ~142 MB (ggml-base.en, auto-downloaded on first use)"
-    echo ""
-    read -r -p "Install STT plugin? [y/N]: " stt_choice
-    if [[ "$stt_choice" =~ ^[Yy] ]]; then
-        STT_ENABLED=true
-    fi
+    echo "  sox already installed"
 fi
 
-if [[ "$STT_ENABLED" == true ]]; then
-    echo ""
-    echo "Setting up STT plugin..."
+# Check/install whisper-cpp
+if ! command -v whisper-cli &>/dev/null && ! command -v whisper-cpp &>/dev/null; then
+    echo "  Installing whisper-cpp (speech recognition)..."
+    pkg_install whisper-cpp 2>/dev/null || echo "  Warning: Failed to install whisper-cpp. Install with your package manager."
+else
+    echo "  whisper-cpp already installed"
+fi
 
-    # Check/install sox
-    if ! command -v rec &>/dev/null; then
-        echo "  Installing sox (audio recording)..."
-        pkg_install sox 2>/dev/null || echo "  Warning: Failed to install sox. Install with your package manager."
-    else
-        echo "  sox already installed"
-    fi
+echo "  Whisper model (~142 MB) will be auto-downloaded on first use"
 
-    # Check/install whisper-cpp
-    if ! command -v whisper-cli &>/dev/null && ! command -v whisper-cpp &>/dev/null; then
-        echo "  Installing whisper-cpp (speech recognition)..."
-        pkg_install whisper-cpp 2>/dev/null || echo "  Warning: Failed to install whisper-cpp. Install with your package manager."
-    else
-        echo "  whisper-cpp already installed"
-    fi
+if ! command -v edge-tts &>/dev/null; then
+    echo "  Warning: edge-tts not found. Install with: pipx install edge-tts"
+else
+    echo "  edge-tts already installed"
+fi
 
-    echo "  Whisper model (~142 MB) will be auto-downloaded on first use"
+cat >> "$PARA_LLM_ROOT/config" << 'EOF'
 
-    # Save STT config
-    cat >> "$PARA_LLM_ROOT/config" << 'EOF'
-
-# Speech-to-text settings
+# Voice settings
 STT_ENABLED=1
+TTS_ENABLED=1
+TTS_AMBIENT_SOUND_ENABLED=1
+TTS_AMBIENT_SOUND_INTERVAL="1"
+TTS_AMBIENT_SOUND="/System/Library/Sounds/Tink.aiff"
+TTS_VOICE="en-US-AndrewNeural"
+TTS_RATE="+0%"
+TTS_VOLUME="+0%"
+TTS_PITCH="+0Hz"
+TTS_SUMMARIZE=1
+TTS_SUMMARIZER_BACKEND="auto"
 # STT_LANGUAGE="en"
 # STT_MODEL_PATH=""  # Override model location (default: $PARA_LLM_ROOT/plugins/stt/models/ggml-base.en.bin)
 EOF
-    echo "  STT plugin enabled (Ctrl+b a)"
-else
-    cat >> "$PARA_LLM_ROOT/config" << 'EOF'
-
-# Speech-to-text settings (disabled - re-run install.sh to enable)
-STT_ENABLED=0
-EOF
-fi
 
 # Add remote save config
 cat >> "$PARA_LLM_ROOT/config" << 'EOF'
@@ -205,6 +203,7 @@ echo "  Bootstrap pointer: $BOOTSTRAP_FILE"
 echo "  Config: $PARA_LLM_ROOT/config"
 echo "  Base repos: $CODE_DIR"
 echo "  Environments: $ENVS_DIR"
+echo "  Default REPL: $PARA_LLM_DEFAULT_REPL"
 echo ""
 
 # Check for fzf
@@ -219,6 +218,7 @@ chmod +x "$SCRIPT_DIR/tmux-cleanup-branch.sh"
 chmod +x "$SCRIPT_DIR/envs.sh"
 chmod +x "$SCRIPT_DIR/tmux-command-center.sh"
 chmod +x "$SCRIPT_DIR/tmux-cc-hooks.sh"
+chmod +x "$SCRIPT_DIR/tmux-repl-selector.sh"
 chmod +x "$SCRIPT_DIR/para-llm-config.sh"
 
 # Make plugin scripts executable (including helper scripts)
@@ -228,6 +228,9 @@ if [[ -d "$SCRIPT_DIR/plugins/claude-state-monitor" ]]; then
 fi
 if [[ -d "$SCRIPT_DIR/plugins/stt" ]]; then
     chmod +x "$SCRIPT_DIR/plugins/stt/"*.sh 2>/dev/null || true
+fi
+if [[ -d "$SCRIPT_DIR/plugins/tts" ]]; then
+    chmod +x "$SCRIPT_DIR/plugins/tts/"*.sh 2>/dev/null || true
 fi
 if [[ -d "$SCRIPT_DIR/plugins/remote-save" ]]; then
     chmod +x "$SCRIPT_DIR/plugins/remote-save/"*.sh 2>/dev/null || true
@@ -244,6 +247,8 @@ cp "$SCRIPT_DIR/scripts/para-llm-restore.sh" "$PARA_LLM_ROOT/scripts/"
 cp "$SCRIPT_DIR/scripts/para-llm-recovery-prompt.sh" "$PARA_LLM_ROOT/scripts/"
 cp "$SCRIPT_DIR/scripts/para-llm-do-restore.sh" "$PARA_LLM_ROOT/scripts/"
 cp "$SCRIPT_DIR/scripts/para-llm-do-discard.sh" "$PARA_LLM_ROOT/scripts/"
+cp "$SCRIPT_DIR/scripts/para-llm-upgrade-envs.sh" "$PARA_LLM_ROOT/scripts/"
+cp "$SCRIPT_DIR/para-llm-config.sh" "$PARA_LLM_ROOT/scripts/"
 # Clean up stale scripts that should not be in $PARA_LLM_ROOT/scripts/
 rm -f "$PARA_LLM_ROOT/scripts/tmux-command-center.sh"
 chmod +x "$PARA_LLM_ROOT/scripts/"*.sh
@@ -373,16 +378,15 @@ bind-key b set-window-option synchronize-panes \; display-message "Toggled broad
 # Ctrl+b t: Remote management menu (add/remove/test/toggle remotes)
 bind-key t display-popup -E -w 60% -h 60% "$SCRIPT_DIR/plugins/remote-save/remote-manage.sh"
 
-EOF
-
-# Conditionally add STT binding
-if [[ "$STT_ENABLED" == true ]]; then
-cat >> ~/.tmux.conf << EOF
+# Ctrl+b y: choose/switch Claude Code or Codex for the active worktree
+bind-key y display-popup -E -w 60% -h 50% "$SCRIPT_DIR/tmux-repl-selector.sh '#{pane_id}' '#{pane_current_path}'"
 
 # Ctrl+b a: Toggle speech-to-text recording (press to record, press again to transcribe)
 bind-key a run-shell -b "$SCRIPT_DIR/plugins/stt/toggle-stt.sh"
+
+# Ctrl+b p: Toggle text-to-speech playback for the active pane
+bind-key p run-shell -b "$SCRIPT_DIR/plugins/tts/toggle-tts.sh"
 EOF
-fi
 
 cat >> ~/.tmux.conf << EOF
 
@@ -405,13 +409,6 @@ bind-key r run-shell '$PARA_LLM_ROOT/scripts/para-llm-restore.sh'
 # Appends to existing status-right, preserving user customizations
 set -ga status-right ' #($SCRIPT_DIR/plugins/claude-state-monitor/tmux-status.sh)'
 EOF
-
-# Conditionally add STT status
-if [[ "$STT_ENABLED" == true ]]; then
-cat >> ~/.tmux.conf << EOF
-set -ga status-right ' #($SCRIPT_DIR/plugins/stt/stt-status.sh)'
-EOF
-fi
 
 cat >> ~/.tmux.conf << EOF
 set -g status-interval 5
@@ -454,10 +451,10 @@ echo "  Ctrl+b k  - Cleanup feature branch"
 echo "  Ctrl+b v  - Command Center (tiled view of all envs)"
 echo "  Ctrl+b b  - Toggle broadcast mode (type in all panes)"
 echo "  Ctrl+b t  - Remote management (add/test/toggle remotes)"
-echo "  Ctrl+b r  - Manual restore Claude sessions"
-if [[ "$STT_ENABLED" == true ]]; then
-echo "  Ctrl+b a  - Toggle speech-to-text recording"
-fi
+echo "  Ctrl+b y  - Choose/switch Claude Code or Codex for active worktree"
+echo "  Ctrl+b a  - Voice input: record/transcribe into active pane"
+echo "  Ctrl+b p  - Voice playback: speak/stop latest pane output"
+echo "  Ctrl+b r  - Manual restore managed AI terminal sessions"
 echo ""
 echo "Recovery:"
 echo "  Sessions auto-saved every 1 minute via tmux-continuum"
