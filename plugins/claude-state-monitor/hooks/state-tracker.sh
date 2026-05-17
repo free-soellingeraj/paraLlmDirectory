@@ -166,6 +166,22 @@ MAPEOF
             LABEL="$LABEL: $DETAIL"
         fi
 
+        # If TTS playback (or prep) is live for this pane, force magenta + ♪.
+        # Otherwise a Claude state event would clobber the indicator set by
+        # state-detector between its 300ms polls.
+        TTS_DIR="/tmp/para-llm-tts"
+        PANE_SAFE="${PANE_ID#%}"
+        for tts_file in "$TTS_DIR/$PANE_SAFE.pid" "$TTS_DIR/$PANE_SAFE.prep.pid"; do
+            if [[ -f "$tts_file" ]]; then
+                TTS_PID=$(cat "$tts_file" 2>/dev/null || echo "")
+                if [[ -n "$TTS_PID" ]] && kill -0 "$TTS_PID" 2>/dev/null; then
+                    COLOR="magenta"
+                    LABEL="♪ $LABEL"
+                    break
+                fi
+            fi
+        done
+
         # Update tmux border style directly
         if [[ "$COLOR" != "default" ]]; then
             tmux set-option -p -t "$PANE_ID" pane-border-style "fg=$COLOR" 2>/dev/null || true

@@ -129,6 +129,13 @@ Log of bugs encountered and fixed in the para-llm-directory project. Each entry 
 **Files**: `install.sh:16-37` (new functions), `install.sh:140,148,182` (replaced calls), `plugins/stt/toggle-stt.sh:22,26`, `plugins/stt/transcribe.sh:34`
 **Issue**: #44
 
+### BUG-016: STT (Ctrl+b a) transcribes every recording as "you"
+**Date**: 2026-05-17
+**Symptom**: Every `Ctrl+b a` recording produced the literal string `you` (or sometimes `Thank you.`, `Thanks for watching.`), regardless of what was spoken.
+**Cause**: Two layered issues. (1) The terminal app hosting tmux had no macOS microphone permission, so `rec` connected to CoreAudio successfully but received only silence — the WAV file was full-sized but contained ~0.000015 RMS amplitude (essentially noise floor). (2) Whisper's `ggml-base.en` model has a strong prior to emit "you" / "thank you" / "thanks for watching" when fed silent audio (a well-known artifact of its YouTube training data). The 1000-byte file-size floor in `toggle-stt.sh` only catches near-instantaneous taps; it does not catch silent-but-long recordings.
+**Fix**: Three guardrails. (1) `toggle-stt.sh` now runs `sox <wav> -n stat` before invoking the transcriber and rejects audio with RMS below 0.003 with the message `STT: no audible audio (RMS=...; check mic permission for your terminal app)`. (2) `rec` stderr now goes to `/tmp/para-llm-stt/rec.log` instead of `/dev/null` so silent-failure modes leave a trail. (3) `transcribe.sh` filters known Whisper hallucination strings (case-insensitive, terminal-punctuation tolerant): `you`, `thank you`, `thank you for watching`, `thanks for watching`, `thanks`, `bye`, `[blank_audio]`, `(silence)`. The filter only matches whole-transcript equality so real speech containing the word "you" passes through. User-side remediation: enable mic permission for the terminal app in System Settings → Privacy & Security → Microphone and relaunch the terminal.
+**File**: `plugins/stt/toggle-stt.sh:58-78`, `plugins/stt/transcribe.sh:66-83`
+
 ---
 
 ## Known Bug-Prone Areas

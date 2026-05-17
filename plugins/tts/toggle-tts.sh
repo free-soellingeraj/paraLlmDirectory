@@ -37,6 +37,7 @@ AMBIENT_PID_FILE="$TTS_DIR/$SAFE_PANE_ID.ambient.pid"
 TEXT_FILE="$TTS_DIR/$SAFE_PANE_ID.txt"
 SPEECH_FILE="$TTS_DIR/$SAFE_PANE_ID.speech.txt"
 AUDIO_FILE="$TTS_DIR/$SAFE_PANE_ID.mp3"
+ACTIVE_FILE="$TTS_DIR/active.pane"
 
 TTS_AMBIENT_SOUND_ENABLED="${TTS_AMBIENT_SOUND_ENABLED:-1}"
 TTS_AMBIENT_SOUND_INTERVAL="${TTS_AMBIENT_SOUND_INTERVAL:-1}"
@@ -84,7 +85,57 @@ stop_playback() {
     rm -f "$PREP_PID_FILE"
     rm -f "$AUDIO_FILE"
     stop_ambient_loop
+    release_playback_slot
     tmux display-message "TTS stopped"
+}
+
+stop_playback_for_pane() {
+    local safe="$1"
+    [[ -z "$safe" ]] && return 0
+    local p_pid p_prep p_amb pid
+    p_pid="$TTS_DIR/$safe.pid"
+    p_prep="$TTS_DIR/$safe.prep.pid"
+    p_amb="$TTS_DIR/$safe.ambient.pid"
+    if [[ -f "$p_pid" ]]; then
+        pid="$(cat "$p_pid" 2>/dev/null)"
+        [[ -n "$pid" ]] && kill "$pid" 2>/dev/null || true
+        rm -f "$p_pid"
+    fi
+    if [[ -f "$p_prep" ]]; then
+        pid="$(cat "$p_prep" 2>/dev/null)"
+        if [[ -n "$pid" && "$pid" != "$$" ]]; then
+            kill "$pid" 2>/dev/null || true
+        fi
+        rm -f "$p_prep"
+    fi
+    if [[ -f "$p_amb" ]]; then
+        pid="$(cat "$p_amb" 2>/dev/null)"
+        [[ -n "$pid" ]] && kill "$pid" 2>/dev/null || true
+        rm -f "$p_amb"
+    fi
+    rm -f "$TTS_DIR/$safe.mp3"
+}
+
+acquire_playback_slot() {
+    if [[ -f "$ACTIVE_FILE" ]]; then
+        local other
+        other="$(cat "$ACTIVE_FILE" 2>/dev/null)"
+        if [[ -n "$other" && "$other" != "$SAFE_PANE_ID" ]]; then
+            stop_playback_for_pane "$other"
+            tmux display-message "TTS: stole playback from pane %$other"
+        fi
+    fi
+    echo "$SAFE_PANE_ID" > "$ACTIVE_FILE"
+}
+
+release_playback_slot() {
+    if [[ -f "$ACTIVE_FILE" ]]; then
+        local owner
+        owner="$(cat "$ACTIVE_FILE" 2>/dev/null)"
+        if [[ "$owner" == "$SAFE_PANE_ID" ]]; then
+            rm -f "$ACTIVE_FILE"
+        fi
+    fi
 }
 
 stop_ambient_loop() {
@@ -99,6 +150,10 @@ stop_ambient_loop() {
 cleanup_on_exit() {
     stop_ambient_loop
     rm -f "$PREP_PID_FILE"
+    if [[ ! -f "$PID_FILE" ]]; then
+        # No live playback handed off — give up the slot so another pane can claim it.
+        release_playback_slot
+    fi
 }
 trap cleanup_on_exit EXIT TERM INT
 
@@ -121,6 +176,7 @@ start_ambient_loop() {
 }
 
 start_playback() {
+    acquire_playback_slot
     echo "$$" > "$PREP_PID_FILE"
 
     if ! command -v edge-tts >/dev/null 2>&1; then

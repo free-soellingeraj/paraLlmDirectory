@@ -65,6 +65,24 @@ OUTPUT=$("$WHISPER_BIN" \
 # Clean up: strip leading/trailing whitespace and blank lines
 CLEANED=$(echo "$OUTPUT" | sed '/^$/d' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
 
+# Filter Whisper hallucinations on near-silent input. ggml-base.en is heavily
+# fine-tuned on YouTube data and emits these exact strings when fed silence
+# that slipped past upstream RMS checks. We only filter when the whole
+# transcript is one of these (case-insensitive, trailing punctuation tolerated).
+case "$(echo "$CLEANED" | tr '[:upper:]' '[:lower:]' | sed 's/[.,!?]*$//')" in
+    "you" \
+    | "thank you" \
+    | "thanks for watching" \
+    | "thank you for watching" \
+    | "thanks" \
+    | "bye" \
+    | "[blank_audio]" \
+    | "(silence)")
+        echo "Filtered Whisper hallucination: '$CLEANED'" >&2
+        exit 1
+        ;;
+esac
+
 if [[ -n "$CLEANED" ]]; then
     echo "$CLEANED"
 else

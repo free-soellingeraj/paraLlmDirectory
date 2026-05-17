@@ -147,6 +147,16 @@ The currently selected pane is marked with asterisks (handled by tmux `pane-bord
 | **Needs Action: Permission** | Cyan | Claude needs permission approval |
 | **No Claude** | Green | Git pane with no Claude session running |
 | **No Git** | Default | Pane not in a git repository |
+| **♪ \<any state\>** | Magenta | TTS playback (or prep) active for this pane — overrides base color |
+
+**TTS playback indicator**: When `Ctrl+b p` triggers playback in a pane, the
+border + label switch to magenta with a `♪` prefix until playback finishes or
+is stopped. Only one pane can play at a time — starting playback in a second
+pane stops the first and "steals" the slot (a `TTS: stole playback from pane
+%N` message is shown). The slot is tracked at `/tmp/para-llm-tts/active.pane`
+and lifecycle is owned by `plugins/tts/toggle-tts.sh`. The indicator is
+written by both `state-detector.sh` (polling) and the Claude state hook
+(`state-tracker.sh`) so neither path strips it between events.
 
 **Detection Method** (terminal-based, simple & reliable):
 
