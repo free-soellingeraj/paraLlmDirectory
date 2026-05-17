@@ -55,8 +55,10 @@ start_recording() {
     # Remove old audio file
     rm -f "$AUDIO_FILE"
 
-    # Start recording: 16-bit, mono, 16kHz WAV (whisper.cpp input format)
-    rec -q -b 16 -c 1 -r 16000 "$AUDIO_FILE" &
+    # Start recording: 16-bit, mono, 16kHz WAV (whisper.cpp input format).
+    # Capture rec's stderr so silent-failure modes (denied mic permission, no
+    # default input device, sox driver errors) leave a trail we can read.
+    rec -b 16 -c 1 -r 16000 "$AUDIO_FILE" 2>"$STT_DIR/rec.log" &
     local rec_pid=$!
     echo "$rec_pid" > "$PID_FILE"
 
@@ -91,6 +93,20 @@ stop_and_transcribe() {
         tmux display-message "STT: Recording too short, nothing to transcribe"
         rm -f "$AUDIO_FILE"
         return 1
+    fi
+
+    # Detect silent / near-silent audio before invoking Whisper. Whisper's
+    # ggml-base.en model has a strong prior to emit "you" / "thank you" on
+    # silent input, so without this guard a denied mic permission looks like
+    # a transcription bug. RMS is on a 0..1 scale; room tone is ~0.001-0.003.
+    if command -v sox &>/dev/null; then
+        local rms
+        rms=$(sox "$AUDIO_FILE" -n stat 2>&1 | awk '/RMS[[:space:]]+amplitude/ {print $NF; exit}')
+        if [[ -n "$rms" ]] && awk -v r="$rms" 'BEGIN { exit !(r+0 < 0.003) }'; then
+            tmux display-message "STT: no audible audio (RMS=$rms; check mic permission for your terminal app)"
+            rm -f "$AUDIO_FILE"
+            return 1
+        fi
     fi
 
     tmux display-message "Transcribing..."
