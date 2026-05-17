@@ -23,6 +23,7 @@ BRANCH="${3:-unknown}"
 # Configuration
 POLL_INTERVAL=0.3                         # Fast polling for responsive updates
 PANE_MAPPING_DIR="/tmp/claude-pane-mapping"
+TTS_DIR="/tmp/para-llm-tts"
 
 # Find PARA_LLM_ROOT via bootstrap file for persistent storage
 BOOTSTRAP_FILE="$HOME/.para-llm-root"
@@ -119,14 +120,32 @@ is_claude_session() {
     return 1
 }
 
-# Detect state for this pane
+# Check if TTS playback (or prep) is live for this pane
+is_tts_playing() {
+    local safe="${PANE_ID#%}"
+    local f pid
+    for f in "$TTS_DIR/$safe.pid" "$TTS_DIR/$safe.prep.pid"; do
+        if [[ -f "$f" ]]; then
+            pid=$(cat "$f" 2>/dev/null)
+            if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+                return 0
+            fi
+        fi
+    done
+    return 1
+}
+
+# Detect state for this pane. Appends "+tts" when TTS playback is active so
+# the indicator survives unchanged base state (e.g. ready->ready+tts triggers
+# a re-render).
 detect_state() {
+    local base
     if is_claude_session; then
         # Claude session: check if "esc to interrupt" is in the status bar
         if is_claude_working; then
-            echo "working"
+            base="working"
         else
-            echo "ready"
+            base="ready"
         fi
     else
         # Regular terminal: check for running commands
@@ -134,46 +153,56 @@ detect_state() {
         pane_pid=$(get_pane_pid)
 
         if has_child_processes "$pane_pid"; then
-            echo "working"
+            base="working"
         else
-            echo "ready"
+            base="ready"
         fi
+    fi
+
+    if is_tts_playing; then
+        echo "$base+tts"
+    else
+        echo "$base"
     fi
 }
 
-# Update pane border style
+# Update pane border style. TTS active forces magenta over the base color.
 update_border_style() {
     local state="$1"
     local color
 
     case "$state" in
-        ready)   color="$COLOR_READY" ;;
-        working) color="$COLOR_WORKING" ;;
-        *)       color="$COLOR_WORKING" ;;
+        ready*)   color="$COLOR_READY" ;;
+        working*) color="$COLOR_WORKING" ;;
+        *)        color="$COLOR_WORKING" ;;
     esac
+
+    if [[ "$state" == *"+tts" ]]; then
+        color="magenta"
+    fi
 
     tmux set-option -p -t "$PANE_ID" pane-border-style "fg=$color" 2>/dev/null
 }
 
-# Write display string for pane-border-format
+# Write display string for pane-border-format. TTS active prepends ♪ and
+# overrides color to magenta.
 write_display() {
     local state="$1"
-    local color
+    local color label
 
     case "$state" in
-        ready)   color="$COLOR_READY" ;;
-        working) color="$COLOR_WORKING" ;;
-        *)       color="$COLOR_WORKING" ;;
+        ready*)   color="$COLOR_READY"; label="$LABEL_READY" ;;
+        working*) color="$COLOR_WORKING"; label="$LABEL_WORKING" ;;
+        *)        color="$COLOR_WORKING"; label="$LABEL_WORKING" ;;
     esac
 
-    local label
-    case "$state" in
-        ready)   label="$LABEL_READY" ;;
-        working) label="$LABEL_WORKING" ;;
-        *)       label="$LABEL_WORKING" ;;
-    esac
+    local prefix=""
+    if [[ "$state" == *"+tts" ]]; then
+        color="magenta"
+        prefix="♪ "
+    fi
 
-    local display="#[fg=$color]$label | $PROJECT | $BRANCH#[default]"
+    local display="#[fg=$color]${prefix}${label} | $PROJECT | $BRANCH#[default]"
     tmux set-option -p -t "$PANE_ID" @pane_display "$display" 2>/dev/null || true
 }
 
