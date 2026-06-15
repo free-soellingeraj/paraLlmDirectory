@@ -38,10 +38,51 @@ TEXT_FILE="$TTS_DIR/$SAFE_PANE_ID.txt"
 SPEECH_FILE="$TTS_DIR/$SAFE_PANE_ID.speech.txt"
 AUDIO_FILE="$TTS_DIR/$SAFE_PANE_ID.mp3"
 ACTIVE_FILE="$TTS_DIR/active.pane"
+TOGGLE_LOCK="$TTS_DIR/$SAFE_PANE_ID.toggle.lock"
 
 TTS_AMBIENT_SOUND_ENABLED="${TTS_AMBIENT_SOUND_ENABLED:-1}"
 TTS_AMBIENT_SOUND_INTERVAL="${TTS_AMBIENT_SOUND_INTERVAL:-1}"
 TTS_AMBIENT_SOUND="${TTS_AMBIENT_SOUND:-/System/Library/Sounds/Tink.aiff}"
+
+# Serialize concurrent prefix-p presses for this pane. The mkdir is atomic, so
+# only one instance at a time can decide start-vs-stop and claim the prep slot.
+acquire_toggle_lock() {
+    local tries=0
+    while ! mkdir "$TOGGLE_LOCK" 2>/dev/null; do
+        # Break a lock left behind by a crashed instance.
+        local holder
+        holder="$(cat "$TOGGLE_LOCK/pid" 2>/dev/null)"
+        if [[ -z "$holder" ]] || ! kill -0 "$holder" 2>/dev/null; then
+            rm -rf "$TOGGLE_LOCK" 2>/dev/null
+            continue
+        fi
+        tries=$((tries + 1))
+        [[ "$tries" -gt 100 ]] && break   # ~5s safety valve
+        sleep 0.05
+    done
+    echo "$$" > "$TOGGLE_LOCK/pid" 2>/dev/null || true
+}
+
+release_toggle_lock() {
+    rm -rf "$TOGGLE_LOCK" 2>/dev/null || true
+}
+
+# Kill a process and all of its descendants (the summarizer's claude/codex
+# child and edge-tts), so a stop actually interrupts in-flight preparation.
+kill_tree() {
+    local pid="$1" child
+    [[ -z "$pid" ]] && return 0
+    for child in $(pgrep -P "$pid" 2>/dev/null); do
+        kill_tree "$child"
+    done
+    kill "$pid" 2>/dev/null || true
+}
+
+# True only while this instance still owns the prep slot. A second press that
+# stops/steals us removes PREP_PID_FILE, so we can bail before playing.
+still_owner() {
+    [[ -f "$PREP_PID_FILE" ]] && [[ "$(cat "$PREP_PID_FILE" 2>/dev/null)" == "$$" ]]
+}
 
 is_playing() {
     if [[ -f "$PID_FILE" ]]; then
@@ -75,11 +116,11 @@ stop_playback() {
     local pid prep_pid
     pid="$(cat "$PID_FILE" 2>/dev/null || true)"
     if [[ -n "$pid" ]]; then
-        kill "$pid" 2>/dev/null || true
+        kill_tree "$pid"
     fi
     prep_pid="$(cat "$PREP_PID_FILE" 2>/dev/null || true)"
     if [[ -n "$prep_pid" && "$prep_pid" != "$$" ]]; then
-        kill "$prep_pid" 2>/dev/null || true
+        kill_tree "$prep_pid"
     fi
     rm -f "$PID_FILE"
     rm -f "$PREP_PID_FILE"
@@ -98,19 +139,19 @@ stop_playback_for_pane() {
     p_amb="$TTS_DIR/$safe.ambient.pid"
     if [[ -f "$p_pid" ]]; then
         pid="$(cat "$p_pid" 2>/dev/null)"
-        [[ -n "$pid" ]] && kill "$pid" 2>/dev/null || true
+        [[ -n "$pid" ]] && kill_tree "$pid"
         rm -f "$p_pid"
     fi
     if [[ -f "$p_prep" ]]; then
         pid="$(cat "$p_prep" 2>/dev/null)"
         if [[ -n "$pid" && "$pid" != "$$" ]]; then
-            kill "$pid" 2>/dev/null || true
+            kill_tree "$pid"
         fi
         rm -f "$p_prep"
     fi
     if [[ -f "$p_amb" ]]; then
         pid="$(cat "$p_amb" 2>/dev/null)"
-        [[ -n "$pid" ]] && kill "$pid" 2>/dev/null || true
+        [[ -n "$pid" ]] && kill_tree "$pid"
         rm -f "$p_amb"
     fi
     rm -f "$TTS_DIR/$safe.mp3"
@@ -149,13 +190,27 @@ stop_ambient_loop() {
 
 cleanup_on_exit() {
     stop_ambient_loop
-    rm -f "$PREP_PID_FILE"
+    release_toggle_lock
+    # Only clear the prep marker if it's still ours — a stealing instance may
+    # have already claimed it.
+    still_owner && rm -f "$PREP_PID_FILE"
     if [[ ! -f "$PID_FILE" ]]; then
         # No live playback handed off — give up the slot so another pane can claim it.
         release_playback_slot
     fi
 }
-trap cleanup_on_exit EXIT TERM INT
+
+# On a real signal (e.g. another press killed us mid-prep) tear down and EXIT,
+# so a killed prepping instance never resumes into afplay.
+cleanup_on_signal() {
+    stop_ambient_loop
+    release_toggle_lock
+    still_owner && rm -f "$PREP_PID_FILE"
+    release_playback_slot
+    exit 0
+}
+trap cleanup_on_exit EXIT
+trap cleanup_on_signal TERM INT
 
 start_ambient_loop() {
     if [[ "$TTS_AMBIENT_SOUND_ENABLED" == "0" ]]; then
@@ -176,8 +231,8 @@ start_ambient_loop() {
 }
 
 start_playback() {
+    # PREP_PID_FILE is already claimed under the toggle lock by the caller.
     acquire_playback_slot
-    echo "$$" > "$PREP_PID_FILE"
 
     if ! command -v edge-tts >/dev/null 2>&1; then
         tmux display-message "TTS Error: edge-tts not found. Install with: pipx install edge-tts"
@@ -208,6 +263,13 @@ start_playback() {
         fi
     fi
 
+    # Bail out if a second press stopped/stole us while summarizing, so we
+    # don't waste an audio synthesis and start an overlapping playback.
+    if ! still_owner; then
+        stop_ambient_loop
+        exit 0
+    fi
+
     rm -f "$AUDIO_FILE"
     tmux display-message "TTS generating audio..."
     if ! edge-tts \
@@ -224,6 +286,13 @@ start_playback() {
     fi
 
     stop_ambient_loop
+
+    # Final guard: if a stop arrived during synthesis, do not start playback.
+    if ! still_owner; then
+        rm -f "$AUDIO_FILE"
+        exit 0
+    fi
+
     afplay "$AUDIO_FILE" &
     local pid=$!
     echo "$pid" > "$PID_FILE"
@@ -231,8 +300,16 @@ start_playback() {
     tmux display-message "TTS playing latest pane output (Ctrl+b p to stop)"
 }
 
+# Serialize the start-vs-stop decision so two quick prefix-p presses in the
+# same pane can't both decide "start" and produce two offset playbacks.
+acquire_toggle_lock
 if is_playing; then
+    release_toggle_lock
     stop_playback
 else
+    # Claim the prep slot atomically while still holding the lock, before any
+    # slow work, so a second press sees us as already-preparing.
+    echo "$$" > "$PREP_PID_FILE"
+    release_toggle_lock
     start_playback
 fi
