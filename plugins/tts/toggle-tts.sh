@@ -26,7 +26,7 @@ TTS_RATE="${TTS_RATE:-+0%}"
 TTS_VOLUME="${TTS_VOLUME:-+0%}"
 TTS_PITCH="${TTS_PITCH:-+0Hz}"
 TTS_SUMMARIZE="${TTS_SUMMARIZE:-1}"
-TTS_SUMMARIZER_BACKEND="${TTS_SUMMARIZER_BACKEND:-auto}"
+TTS_SUMMARIZER_BACKEND="${TTS_SUMMARIZER_BACKEND:-codex}"
 
 PANE_ID="$(tmux display-message -p '#{pane_id}' 2>/dev/null)"
 PANE_PATH="$(tmux display-message -p -t "$PANE_ID" '#{pane_current_path}' 2>/dev/null || pwd)"
@@ -342,10 +342,10 @@ start_playback() {
     start_ambient_loop
     cp "$TEXT_FILE" "$SPEECH_FILE"
     if [[ "$TTS_SUMMARIZE" != "0" ]]; then
+        # Summarizer backend is decoupled from the pane's interactive REPL: the
+        # only LLM summarizer is codex (claude -p was retired — see ADR-009), so
+        # a Claude-Code pane no longer routes TTS through the metered claude -p.
         local backend="$TTS_SUMMARIZER_BACKEND"
-        if [[ "$backend" == "auto" && "$(type -t para_llm_repl_for_path 2>/dev/null)" == "function" ]]; then
-            backend="$(para_llm_repl_for_path "$PANE_PATH" 2>/dev/null || echo "auto")"
-        fi
         set_phase "summarizing via $backend"
         if ! "$SCRIPT_DIR/summarize-for-speech.sh" "$backend" "$TEXT_FILE" "$SPEECH_FILE" "$PANE_PATH" >/dev/null 2>&1; then
             cp "$TEXT_FILE" "$SPEECH_FILE"

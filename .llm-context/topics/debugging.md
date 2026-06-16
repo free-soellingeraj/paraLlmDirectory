@@ -20,9 +20,10 @@ cat /tmp/para-llm-tts/5.progress.log
 
 Stages: `extracting pane text` → `summarizing via <backend>` → `generating
 audio (edge-tts)` → `playing`. Common culprits:
-- **summarizing** stalls → the LLM backend (`claude -p`/`codex exec`) is slow or
-  hung; capped by `TTS_SUMMARIZE_TIMEOUT` (default 60s), then falls back to raw
-  pane text. Set `TTS_SUMMARIZE=0` to skip the LLM step entirely.
+- **summarizing** stalls → the LLM backend (`codex exec`; `claude -p` was
+  retired, see ADR-009) is slow or hung; capped by `TTS_SUMMARIZE_TIMEOUT`
+  (default 60s), then falls back to raw pane text. Set `TTS_SUMMARIZE=0` to skip
+  the LLM step entirely, or ensure `codex` is on PATH if summaries are missing.
 - **generating audio** stalls → `edge-tts` is a **network** call to Microsoft
   (`wss://speech.platform.bing.com`), so check connectivity; capped by
   `TTS_SYNTH_TIMEOUT` (default 60s).

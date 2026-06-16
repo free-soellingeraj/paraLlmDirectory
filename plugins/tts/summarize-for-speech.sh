@@ -63,25 +63,20 @@ Terminal text:
 PROMPT_EOF
 cat "$INPUT_FILE" >> "$PROMPT_FILE"
 
-run_claude() {
-    command -v claude >/dev/null 2>&1 || return 1
-    (cd "$CWD" && run_capped claude -p --no-session-persistence --output-format text < "$PROMPT_FILE") > "$OUTPUT_FILE"
-}
-
 run_codex() {
     command -v codex >/dev/null 2>&1 || return 1
     (cd "$CWD" && run_capped codex exec --skip-git-repo-check --sandbox read-only --output-last-message "$OUTPUT_FILE" - < "$PROMPT_FILE") >/dev/null
 }
 
+# `claude -p` (Claude Code's headless/print mode) was retired as a summarizer
+# backend. As of the June 2026 change it meters against a separate paid Agent
+# SDK credit pool rather than the interactive Claude subscription (see
+# ADR-009), so firing it on every Ctrl+b p is a billable call. codex is now the
+# only LLM summarizer; any backend value maps to it. If codex is unavailable
+# this exits non-zero and the caller falls back to the raw pane text.
 case "$BACKEND" in
-    claude)
-        run_claude
-        ;;
-    codex)
+    codex|auto|*)
         run_codex
-        ;;
-    auto|*)
-        run_codex || run_claude
         ;;
 esac
 status=$?

@@ -186,7 +186,7 @@ TTS_RATE="+0%"
 TTS_VOLUME="+0%"
 TTS_PITCH="+0Hz"
 TTS_SUMMARIZE=1
-TTS_SUMMARIZER_BACKEND="auto"
+TTS_SUMMARIZER_BACKEND="codex"   # codex only; claude -p retired (metered, see ADR-009)
 TTS_SUMMARIZE_TIMEOUT="60"       # Max seconds for the LLM summarizer before falling back to raw text (0 = no cap)
 TTS_SYNTH_TIMEOUT="60"           # Max seconds for edge-tts audio synthesis (0 = no cap)
 TTS_PROGRESS_ENABLED=1           # Show live "TTS: <stage> (Ns)" progress in the status line

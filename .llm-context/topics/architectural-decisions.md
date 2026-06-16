@@ -273,19 +273,18 @@ $PARA_LLM_ROOT/remotes/
 
 **File**: `plugins/remote-save/`
 
-## ADR-009: TTS Summarizer Backend Choice and `claude -p` Metered Billing
+## ADR-009: Retire `claude -p` as a TTS Summarizer Backend (Metered Billing)
 
-**Decision**: Keep the TTS summarizer backend configurable (`TTS_SUMMARIZER_BACKEND`, default `auto` → tries `codex` then `claude`), and document that the `claude` path now meters cost per invocation.
+**Decision**: Remove headless `claude -p` as a TTS summarizer backend entirely. `codex` is now the only LLM summarizer; if it is unavailable, playback falls back to the raw extracted pane text. Default `TTS_SUMMARIZER_BACKEND` changed from `auto` to `codex`, and the TTS summarizer is decoupled from the pane's interactive REPL choice.
 
-**Context**: `summarize-for-speech.sh` shells out to an LLM (`claude -p --no-session-persistence --output-format text` or `codex exec`) on every `Ctrl+b p` press to turn raw pane text into speakable prose. This can fire many times per session.
+**Context**: `summarize-for-speech.sh` shells out to an LLM on every `Ctrl+b p` press to turn raw pane text into speakable prose — potentially many times per session. Previously the backend was `auto`, which resolved to the pane's interactive REPL (`para_llm_repl_for_path` → `claude` or `codex`), so a Claude-Code pane routed TTS summarization through `claude -p`.
 
-**Billing finding (researched 2026-06-16, sources are mostly secondary — verify against the Console before relying on exact figures)**: Per reporting around a **June 15, 2026** change, Claude Code's **headless/print mode (`claude -p`)** — including scripted/automation invocations like this one — no longer draws from the interactive Pro/Max subscription pool. It instead consumes a separate monthly **Agent SDK credit** (reported ~$20 Pro / ~$100 Max 5x / ~$200 Max 20x), after which usage bills at standard per-token API rates. **Interactive** Claude Code (terminal/IDE) is unaffected. Authoritative reference: `https://code.claude.com/docs/en/costs` and the Console usage page `https://platform.claude.com/usage`.
+**Billing finding (researched 2026-06-16; sources mostly secondary — verify against the Console before relying on exact figures)**: Per reporting around a **June 15, 2026** change, Claude Code's **headless/print mode (`claude -p`)** — including scripted/automation invocations like this one — no longer draws from the interactive Pro/Max subscription pool. It instead consumes a separate monthly **Agent SDK credit** (reported ~$20 Pro / ~$100 Max 5x / ~$200 Max 20x), after which usage bills at standard per-token API rates. **Interactive** Claude Code (terminal/IDE) is unaffected. Reference: `https://code.claude.com/docs/en/costs`, Console usage `https://platform.claude.com/usage`.
 
-**Implications for this project**:
-- Each TTS playback with `claude` as the summarizer is a billable metered call. Frequent `Ctrl+b p` use can quietly draw down the credit pool.
-- The new `TTS_SUMMARIZE_TIMEOUT` (BUG-018) also bounds runaway cost from a hung/looping backend.
-- Mitigations available to users: `TTS_SUMMARIZE=0` (skip the LLM entirely, speak raw pane text), prefer `codex` backend, or set `ANTHROPIC_API_KEY` to track headless spend on a separate API account.
+**Rationale**: Firing a metered headless call on every voice playback is an unexpected, easily-overlooked cost. The user directed that we stop using `claude -p`. Removing it (rather than leaving it configurable) makes it impossible to accidentally trigger the metered path — even an old config with `TTS_SUMMARIZER_BACKEND=auto` or `=claude` now maps to `codex`, since `summarize-for-speech.sh` no longer has a `run_claude` function at all.
 
-**Trade-off**: We do not change the default backend (`auto`) — `codex` is tried first and only falls back to `claude` — so most users avoid the metered path unless `codex` is unavailable. Documenting the cost is preferred over silently disabling summarization.
+**Scope / non-goals**: This affects ONLY the headless TTS summarizer. The **interactive** REPL system (`PARA_LLM_DEFAULT_REPL`, `para_llm_repl_for_path`, the REPL selector) is unchanged — running Claude Code interactively in a pane is unaffected by the billing change and remains fully supported, including as the default REPL.
 
-**File**: `plugins/tts/summarize-for-speech.sh`
+**Trade-off**: If `codex` is not installed, TTS no longer summarizes — it speaks the raw pane text (same as `TTS_SUMMARIZE=0`). Accepted: a degraded-but-free default beats a silent paid one. Users who still want LLM summarization need `codex` on PATH. Restoring `claude -p` is a `git revert` away if Anthropic changes the policy.
+
+**File**: `plugins/tts/summarize-for-speech.sh` (codex-only), `plugins/tts/toggle-tts.sh` (default backend, decoupled from REPL)
