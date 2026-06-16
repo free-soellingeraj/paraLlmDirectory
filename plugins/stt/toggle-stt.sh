@@ -54,6 +54,24 @@ is_recording() {
     return 1
 }
 
+# Stop a recorder. SIGTERM lets sox flush a clean WAV, but sox can ignore TERM
+# while wedged in CoreAudio teardown (observed: a rec stuck ~24h surviving the
+# in-script SIGTERM), so escalate to an uncatchable SIGKILL after a short grace.
+kill_recorder() {
+    local pid="$1"
+    [[ -z "$pid" ]] && return 0
+    kill "$pid" 2>/dev/null || return 0
+    local n=0
+    while kill -0 "$pid" 2>/dev/null; do
+        n=$((n + 1))
+        if [[ $n -gt 15 ]]; then       # ~3s grace, then force
+            kill -9 "$pid" 2>/dev/null || true
+            break
+        fi
+        sleep 0.2
+    done
+}
+
 start_recording() {
     check_deps
 
@@ -63,8 +81,12 @@ start_recording() {
     echo "$active_pane" > "$TARGET_FILE"
 
     # Kill any orphaned recorder from a previous desynced toggle before we
-    # start a new one, so we never leave a stray rec holding the mic.
-    pkill -f "rec -b 16 -c 1 -r 16000 $AUDIO_FILE" 2>/dev/null || true
+    # start a new one, so we never leave a stray rec holding the mic. Use the
+    # escalating killer since a plain pkill -TERM may be ignored.
+    local opid
+    for opid in $(pgrep -f "rec -b 16 -c 1 -r 16000 $AUDIO_FILE" 2>/dev/null); do
+        kill_recorder "$opid"
+    done
 
     # Remove old audio file
     rm -f "$AUDIO_FILE"
@@ -83,9 +105,9 @@ stop_and_transcribe() {
     local pid
     pid=$(cat "$PID_FILE" 2>/dev/null)
 
-    # Stop recording
+    # Stop recording (escalates to SIGKILL if sox ignores SIGTERM)
     if [[ -n "$pid" ]]; then
-        kill "$pid" 2>/dev/null
+        kill_recorder "$pid"
         wait "$pid" 2>/dev/null || true
     fi
     rm -f "$PID_FILE"
