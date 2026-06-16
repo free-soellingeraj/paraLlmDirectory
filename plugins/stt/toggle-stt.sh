@@ -38,8 +38,18 @@ is_recording() {
         else
             # Stale PID file - clean up
             rm -f "$PID_FILE" "$TARGET_FILE" "$AUDIO_FILE"
-            return 1
         fi
+    fi
+    # Fallback: a recorder is running but the PID file is missing (desynced
+    # state from a prior crash/race/kill). Without this re-adoption, the toggle
+    # would think nothing is recording and start a SECOND rec on every press,
+    # stacking orphans that permanently hold the mic. Re-adopt it so the next
+    # press stops it.
+    local orphan
+    orphan=$(pgrep -f "rec -b 16 -c 1 -r 16000 $AUDIO_FILE" 2>/dev/null | head -1)
+    if [[ -n "$orphan" ]]; then
+        echo "$orphan" > "$PID_FILE"
+        return 0
     fi
     return 1
 }
@@ -51,6 +61,10 @@ start_recording() {
     local active_pane
     active_pane=$(tmux display-message -p '#{pane_id}')
     echo "$active_pane" > "$TARGET_FILE"
+
+    # Kill any orphaned recorder from a previous desynced toggle before we
+    # start a new one, so we never leave a stray rec holding the mic.
+    pkill -f "rec -b 16 -c 1 -r 16000 $AUDIO_FILE" 2>/dev/null || true
 
     # Remove old audio file
     rm -f "$AUDIO_FILE"

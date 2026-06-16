@@ -3,7 +3,7 @@
 # STT status for tmux status line
 # Shows REC indicator when recording, empty otherwise
 
-PID_FILE="/tmp/claude-stt/recording.pid"
+PID_FILE="/tmp/para-llm-stt/recording.pid"
 
 if [[ -f "$PID_FILE" ]]; then
     pid=$(cat "$PID_FILE" 2>/dev/null)
