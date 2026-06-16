@@ -34,6 +34,9 @@ SAFE_PANE_ID="${PANE_ID#%}"
 PID_FILE="$TTS_DIR/$SAFE_PANE_ID.pid"
 PREP_PID_FILE="$TTS_DIR/$SAFE_PANE_ID.prep.pid"
 AMBIENT_PID_FILE="$TTS_DIR/$SAFE_PANE_ID.ambient.pid"
+PROGRESS_PID_FILE="$TTS_DIR/$SAFE_PANE_ID.progress.pid"
+PHASE_FILE="$TTS_DIR/$SAFE_PANE_ID.phase"
+PROGRESS_LOG="$TTS_DIR/$SAFE_PANE_ID.progress.log"
 TEXT_FILE="$TTS_DIR/$SAFE_PANE_ID.txt"
 SPEECH_FILE="$TTS_DIR/$SAFE_PANE_ID.speech.txt"
 AUDIO_FILE="$TTS_DIR/$SAFE_PANE_ID.mp3"
@@ -49,6 +52,10 @@ TTS_AMBIENT_MAX_SECONDS="${TTS_AMBIENT_MAX_SECONDS:-120}"
 # Hard cap on edge-tts audio synthesis (a stalled network call can hang here).
 # 0 disables the cap.
 TTS_SYNTH_TIMEOUT="${TTS_SYNTH_TIMEOUT:-60}"
+# Live progress indicator: shows the current prep stage and how long it has
+# been running, so a hang is visible (and where). 0 disables it.
+TTS_PROGRESS_ENABLED="${TTS_PROGRESS_ENABLED:-1}"
+TTS_PROGRESS_INTERVAL="${TTS_PROGRESS_INTERVAL:-1}"
 
 # Resolve a `timeout`-style command (GNU coreutils ships it as `gtimeout` on
 # macOS). Empty if neither is available, in which case calls run uncapped.
@@ -141,6 +148,7 @@ stop_playback() {
     rm -f "$PREP_PID_FILE"
     rm -f "$AUDIO_FILE"
     stop_ambient_loop
+    stop_progress_loop
     release_playback_slot
     tmux display-message "TTS stopped"
 }
@@ -148,10 +156,11 @@ stop_playback() {
 stop_playback_for_pane() {
     local safe="$1"
     [[ -z "$safe" ]] && return 0
-    local p_pid p_prep p_amb pid
+    local p_pid p_prep p_amb p_prog pid
     p_pid="$TTS_DIR/$safe.pid"
     p_prep="$TTS_DIR/$safe.prep.pid"
     p_amb="$TTS_DIR/$safe.ambient.pid"
+    p_prog="$TTS_DIR/$safe.progress.pid"
     if [[ -f "$p_pid" ]]; then
         pid="$(cat "$p_pid" 2>/dev/null)"
         [[ -n "$pid" ]] && kill_tree "$pid"
@@ -169,6 +178,12 @@ stop_playback_for_pane() {
         [[ -n "$pid" ]] && kill_tree "$pid"
         rm -f "$p_amb"
     fi
+    if [[ -f "$p_prog" ]]; then
+        pid="$(cat "$p_prog" 2>/dev/null)"
+        [[ -n "$pid" ]] && kill_tree "$pid"
+        rm -f "$p_prog"
+    fi
+    rm -f "$TTS_DIR/$safe.phase"
     rm -f "$TTS_DIR/$safe.mp3"
 }
 
@@ -203,8 +218,54 @@ stop_ambient_loop() {
     rm -f "$AMBIENT_PID_FILE"
 }
 
+# Record the current prep stage. The live indicator reads PHASE_FILE; the log
+# keeps a timestamped trail so you can see, after the fact, where it stalled.
+set_phase() {
+    local phase="$1"
+    echo "$phase" > "$PHASE_FILE" 2>/dev/null || true
+    printf '%s  %s\n' "$(date '+%H:%M:%S')" "$phase" >> "$PROGRESS_LOG" 2>/dev/null || true
+}
+
+# Background loop that keeps the tmux status line showing the current stage and
+# how long it has been running, e.g. "TTS: generating audio (12s)". Per-stage
+# timer resets whenever set_phase changes PHASE_FILE, so a hang is easy to spot.
+start_progress_loop() {
+    if [[ "$TTS_PROGRESS_ENABLED" == "0" ]]; then
+        return 0
+    fi
+    stop_progress_loop
+    local interval="$TTS_PROGRESS_INTERVAL"
+    (
+        local last="" phase phase_start=0 elapsed
+        SECONDS=0
+        while true; do
+            phase="$(cat "$PHASE_FILE" 2>/dev/null || echo "starting")"
+            if [[ "$phase" != "$last" ]]; then
+                last="$phase"
+                phase_start=$SECONDS
+            fi
+            elapsed=$((SECONDS - phase_start))
+            tmux display-message -t "$PANE_ID" \
+                "TTS: $phase (${elapsed}s) — Ctrl+b p to stop" 2>/dev/null || true
+            sleep "$interval"
+        done
+    ) &
+    echo "$!" > "$PROGRESS_PID_FILE"
+}
+
+stop_progress_loop() {
+    local progress_pid
+    progress_pid="$(cat "$PROGRESS_PID_FILE" 2>/dev/null || true)"
+    if [[ -n "$progress_pid" ]]; then
+        kill "$progress_pid" 2>/dev/null || true
+    fi
+    rm -f "$PROGRESS_PID_FILE"
+    rm -f "$PHASE_FILE"
+}
+
 cleanup_on_exit() {
     stop_ambient_loop
+    stop_progress_loop
     release_toggle_lock
     # Only clear the prep marker if it's still ours — a stealing instance may
     # have already claimed it.
@@ -219,6 +280,7 @@ cleanup_on_exit() {
 # so a killed prepping instance never resumes into afplay.
 cleanup_on_signal() {
     stop_ambient_loop
+    stop_progress_loop
     release_toggle_lock
     still_owner && rm -f "$PREP_PID_FILE"
     release_playback_slot
@@ -265,6 +327,12 @@ start_playback() {
         exit 1
     fi
 
+    : > "$PROGRESS_LOG" 2>/dev/null || true
+    # Start the loop first: it calls stop_progress_loop (which clears PHASE_FILE),
+    # so set_phase must come after, or the first stage label gets wiped.
+    start_progress_loop
+    set_phase "extracting pane text"
+
     "$SCRIPT_DIR/extract-latest.sh" "$PANE_ID" > "$TEXT_FILE"
     if [[ ! -s "$TEXT_FILE" ]]; then
         tmux display-message "TTS: no readable pane text found"
@@ -278,10 +346,10 @@ start_playback() {
         if [[ "$backend" == "auto" && "$(type -t para_llm_repl_for_path 2>/dev/null)" == "function" ]]; then
             backend="$(para_llm_repl_for_path "$PANE_PATH" 2>/dev/null || echo "auto")"
         fi
-        tmux display-message "TTS preparing speech text..."
+        set_phase "summarizing via $backend"
         if ! "$SCRIPT_DIR/summarize-for-speech.sh" "$backend" "$TEXT_FILE" "$SPEECH_FILE" "$PANE_PATH" >/dev/null 2>&1; then
             cp "$TEXT_FILE" "$SPEECH_FILE"
-            tmux display-message "TTS summary unavailable; using pane text"
+            set_phase "summary unavailable, using raw text"
         fi
     fi
 
@@ -293,7 +361,7 @@ start_playback() {
     fi
 
     rm -f "$AUDIO_FILE"
-    tmux display-message "TTS generating audio..."
+    set_phase "generating audio (edge-tts)"
     local synth_cmd=(edge-tts
         --file "$SPEECH_FILE"
         --voice "$TTS_VOICE"
@@ -319,6 +387,8 @@ start_playback() {
         exit 0
     fi
 
+    set_phase "playing"
+    stop_progress_loop
     afplay "$AUDIO_FILE" &
     local pid=$!
     echo "$pid" > "$PID_FILE"

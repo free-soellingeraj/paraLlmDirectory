@@ -189,6 +189,8 @@ TTS_SUMMARIZE=1
 TTS_SUMMARIZER_BACKEND="auto"
 TTS_SUMMARIZE_TIMEOUT="60"       # Max seconds for the LLM summarizer before falling back to raw text (0 = no cap)
 TTS_SYNTH_TIMEOUT="60"           # Max seconds for edge-tts audio synthesis (0 = no cap)
+TTS_PROGRESS_ENABLED=1           # Show live "TTS: <stage> (Ns)" progress in the status line
+TTS_PROGRESS_INTERVAL="1"        # How often (seconds) to refresh the progress indicator
 # STT_LANGUAGE="en"
 # STT_MODEL_PATH=""  # Override model location (default: $PARA_LLM_ROOT/plugins/stt/models/ggml-base.en.bin)
 EOF

@@ -272,3 +272,20 @@ $PARA_LLM_ROOT/remotes/
 ```
 
 **File**: `plugins/remote-save/`
+
+## ADR-009: TTS Summarizer Backend Choice and `claude -p` Metered Billing
+
+**Decision**: Keep the TTS summarizer backend configurable (`TTS_SUMMARIZER_BACKEND`, default `auto` → tries `codex` then `claude`), and document that the `claude` path now meters cost per invocation.
+
+**Context**: `summarize-for-speech.sh` shells out to an LLM (`claude -p --no-session-persistence --output-format text` or `codex exec`) on every `Ctrl+b p` press to turn raw pane text into speakable prose. This can fire many times per session.
+
+**Billing finding (researched 2026-06-16, sources are mostly secondary — verify against the Console before relying on exact figures)**: Per reporting around a **June 15, 2026** change, Claude Code's **headless/print mode (`claude -p`)** — including scripted/automation invocations like this one — no longer draws from the interactive Pro/Max subscription pool. It instead consumes a separate monthly **Agent SDK credit** (reported ~$20 Pro / ~$100 Max 5x / ~$200 Max 20x), after which usage bills at standard per-token API rates. **Interactive** Claude Code (terminal/IDE) is unaffected. Authoritative reference: `https://code.claude.com/docs/en/costs` and the Console usage page `https://platform.claude.com/usage`.
+
+**Implications for this project**:
+- Each TTS playback with `claude` as the summarizer is a billable metered call. Frequent `Ctrl+b p` use can quietly draw down the credit pool.
+- The new `TTS_SUMMARIZE_TIMEOUT` (BUG-018) also bounds runaway cost from a hung/looping backend.
+- Mitigations available to users: `TTS_SUMMARIZE=0` (skip the LLM entirely, speak raw pane text), prefer `codex` backend, or set `ANTHROPIC_API_KEY` to track headless spend on a separate API account.
+
+**Trade-off**: We do not change the default backend (`auto`) — `codex` is tried first and only falls back to `claude` — so most users avoid the metered path unless `codex` is unavailable. Documenting the cost is preferred over silently disabling summarization.
+
+**File**: `plugins/tts/summarize-for-speech.sh`

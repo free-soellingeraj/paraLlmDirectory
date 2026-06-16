@@ -3,6 +3,36 @@
 ## Overview
 Tips and techniques for debugging para-llm-directory scripts and troubleshooting common issues.
 
+## Diagnosing TTS Playback (Ctrl+b p) Hangs
+
+When TTS "just beeps for a long time" without speaking, the prep phase is stuck.
+A live indicator shows the current stage and a per-stage timer in the status
+line, e.g. `TTS: summarizing via codex (14s)` — whichever stage the timer keeps
+climbing on is the one hanging.
+
+A timestamped trail of every stage is also written per pane:
+
+```bash
+cat /tmp/para-llm-tts/<pane>.progress.log
+# %-stripped pane id, so pane %5 -> file 5.progress.log
+cat /tmp/para-llm-tts/5.progress.log
+```
+
+Stages: `extracting pane text` → `summarizing via <backend>` → `generating
+audio (edge-tts)` → `playing`. Common culprits:
+- **summarizing** stalls → the LLM backend (`claude -p`/`codex exec`) is slow or
+  hung; capped by `TTS_SUMMARIZE_TIMEOUT` (default 60s), then falls back to raw
+  pane text. Set `TTS_SUMMARIZE=0` to skip the LLM step entirely.
+- **generating audio** stalls → `edge-tts` is a **network** call to Microsoft
+  (`wss://speech.platform.bing.com`), so check connectivity; capped by
+  `TTS_SYNTH_TIMEOUT` (default 60s).
+- The "preparing" beep itself is hard-capped by `TTS_AMBIENT_MAX_SECONDS`
+  (default 120s) regardless of cause.
+
+Disable the indicator with `TTS_PROGRESS_ENABLED=0`. See BUG-018.
+
+**File**: `plugins/tts/toggle-tts.sh` (`set_phase`, `start_progress_loop`)
+
 ## Running Scripts in Debug Mode
 
 ### Bash Debug Output
