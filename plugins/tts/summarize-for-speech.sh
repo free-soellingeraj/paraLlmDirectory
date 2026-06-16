@@ -8,9 +8,32 @@ INPUT_FILE="${2:?Usage: summarize-for-speech.sh <backend> <input-file> <output-f
 OUTPUT_FILE="${3:?Usage: summarize-for-speech.sh <backend> <input-file> <output-file> [cwd]}"
 CWD="${4:-$(pwd)}"
 
+# Hard cap on the summarizer LLM call so a hung/slow backend can't keep the
+# "preparing" beep looping forever. 0 disables the cap.
+TTS_SUMMARIZE_TIMEOUT="${TTS_SUMMARIZE_TIMEOUT:-60}"
+
 if [[ ! -s "$INPUT_FILE" ]]; then
     exit 1
 fi
+
+# Resolve a `timeout`-style command (GNU coreutils on macOS installs it as
+# `gtimeout`). Empty if neither is available, in which case we run uncapped.
+TIMEOUT_CMD=""
+if command -v timeout >/dev/null 2>&1; then
+    TIMEOUT_CMD="timeout"
+elif command -v gtimeout >/dev/null 2>&1; then
+    TIMEOUT_CMD="gtimeout"
+fi
+
+# Run a command with the summarizer timeout if one is configured and available.
+# `-k` sends SIGKILL a few seconds after SIGTERM in case the backend ignores it.
+run_capped() {
+    if [[ -n "$TIMEOUT_CMD" && "$TTS_SUMMARIZE_TIMEOUT" != "0" ]]; then
+        "$TIMEOUT_CMD" -k 5 "$TTS_SUMMARIZE_TIMEOUT" "$@"
+    else
+        "$@"
+    fi
+}
 
 PROMPT_FILE="$(mktemp "${TMPDIR:-/tmp}/para-llm-tts-summary.XXXXXX")"
 trap 'rm -f "$PROMPT_FILE"' EXIT
@@ -40,26 +63,30 @@ Terminal text:
 PROMPT_EOF
 cat "$INPUT_FILE" >> "$PROMPT_FILE"
 
-run_claude() {
-    command -v claude >/dev/null 2>&1 || return 1
-    (cd "$CWD" && claude -p --no-session-persistence --output-format text < "$PROMPT_FILE") > "$OUTPUT_FILE"
-}
-
 run_codex() {
     command -v codex >/dev/null 2>&1 || return 1
-    (cd "$CWD" && codex exec --skip-git-repo-check --sandbox read-only --output-last-message "$OUTPUT_FILE" - < "$PROMPT_FILE") >/dev/null
+    (cd "$CWD" && run_capped codex exec --skip-git-repo-check --sandbox read-only --output-last-message "$OUTPUT_FILE" - < "$PROMPT_FILE") >/dev/null
 }
 
+# `claude -p` (Claude Code's headless/print mode) was retired as a summarizer
+# backend. As of the June 2026 change it meters against a separate paid Agent
+# SDK credit pool rather than the interactive Claude subscription (see
+# ADR-009), so firing it on every Ctrl+b p is a billable call. codex is now the
+# only LLM summarizer; any backend value maps to it. If codex is unavailable
+# this exits non-zero and the caller falls back to the raw pane text.
 case "$BACKEND" in
-    claude)
-        run_claude
-        ;;
-    codex)
+    codex|auto|*)
         run_codex
         ;;
-    auto|*)
-        run_codex || run_claude
-        ;;
 esac
+status=$?
+
+# A timeout or backend error may leave a truncated/partial summary behind;
+# discard it so the caller falls back to the raw pane text instead of speaking
+# a half-finished sentence.
+if [[ "$status" -ne 0 ]]; then
+    rm -f "$OUTPUT_FILE"
+    exit 1
+fi
 
 [[ -s "$OUTPUT_FILE" ]]

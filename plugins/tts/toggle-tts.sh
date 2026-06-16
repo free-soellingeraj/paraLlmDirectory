@@ -26,7 +26,11 @@ TTS_RATE="${TTS_RATE:-+0%}"
 TTS_VOLUME="${TTS_VOLUME:-+0%}"
 TTS_PITCH="${TTS_PITCH:-+0Hz}"
 TTS_SUMMARIZE="${TTS_SUMMARIZE:-1}"
-TTS_SUMMARIZER_BACKEND="${TTS_SUMMARIZER_BACKEND:-auto}"
+TTS_SUMMARIZER_BACKEND="${TTS_SUMMARIZER_BACKEND:-codex}"
+# How long (seconds) an agent-authored script (voice-script.sh) stays eligible
+# for direct playback before it's treated as stale and we fall back to live
+# capture + summarize. 0 = never expires.
+TTS_AUTHORED_MAX_AGE="${TTS_AUTHORED_MAX_AGE:-900}"
 
 PANE_ID="$(tmux display-message -p '#{pane_id}' 2>/dev/null)"
 PANE_PATH="$(tmux display-message -p -t "$PANE_ID" '#{pane_current_path}' 2>/dev/null || pwd)"
@@ -34,8 +38,14 @@ SAFE_PANE_ID="${PANE_ID#%}"
 PID_FILE="$TTS_DIR/$SAFE_PANE_ID.pid"
 PREP_PID_FILE="$TTS_DIR/$SAFE_PANE_ID.prep.pid"
 AMBIENT_PID_FILE="$TTS_DIR/$SAFE_PANE_ID.ambient.pid"
+PROGRESS_PID_FILE="$TTS_DIR/$SAFE_PANE_ID.progress.pid"
+PHASE_FILE="$TTS_DIR/$SAFE_PANE_ID.phase"
+PROGRESS_LOG="$TTS_DIR/$SAFE_PANE_ID.progress.log"
 TEXT_FILE="$TTS_DIR/$SAFE_PANE_ID.txt"
 SPEECH_FILE="$TTS_DIR/$SAFE_PANE_ID.speech.txt"
+# Speakable script pre-authored by the coding agent (via voice-script.sh). When
+# present and fresh it is played directly, skipping capture + LLM summarize.
+AUTHORED_FILE="$TTS_DIR/$SAFE_PANE_ID.authored.txt"
 AUDIO_FILE="$TTS_DIR/$SAFE_PANE_ID.mp3"
 ACTIVE_FILE="$TTS_DIR/active.pane"
 TOGGLE_LOCK="$TTS_DIR/$SAFE_PANE_ID.toggle.lock"
@@ -43,6 +53,25 @@ TOGGLE_LOCK="$TTS_DIR/$SAFE_PANE_ID.toggle.lock"
 TTS_AMBIENT_SOUND_ENABLED="${TTS_AMBIENT_SOUND_ENABLED:-1}"
 TTS_AMBIENT_SOUND_INTERVAL="${TTS_AMBIENT_SOUND_INTERVAL:-1}"
 TTS_AMBIENT_SOUND="${TTS_AMBIENT_SOUND:-/System/Library/Sounds/Tink.aiff}"
+# Safety net: never let the "preparing" beep loop longer than this, even if a
+# downstream step hangs. 0 disables the cap.
+TTS_AMBIENT_MAX_SECONDS="${TTS_AMBIENT_MAX_SECONDS:-120}"
+# Hard cap on edge-tts audio synthesis (a stalled network call can hang here).
+# 0 disables the cap.
+TTS_SYNTH_TIMEOUT="${TTS_SYNTH_TIMEOUT:-60}"
+# Live progress indicator: shows the current prep stage and how long it has
+# been running, so a hang is visible (and where). 0 disables it.
+TTS_PROGRESS_ENABLED="${TTS_PROGRESS_ENABLED:-1}"
+TTS_PROGRESS_INTERVAL="${TTS_PROGRESS_INTERVAL:-1}"
+
+# Resolve a `timeout`-style command (GNU coreutils ships it as `gtimeout` on
+# macOS). Empty if neither is available, in which case calls run uncapped.
+TIMEOUT_CMD=""
+if command -v timeout >/dev/null 2>&1; then
+    TIMEOUT_CMD="timeout"
+elif command -v gtimeout >/dev/null 2>&1; then
+    TIMEOUT_CMD="gtimeout"
+fi
 
 # Serialize concurrent prefix-p presses for this pane. The mkdir is atomic, so
 # only one instance at a time can decide start-vs-stop and claim the prep slot.
@@ -126,6 +155,7 @@ stop_playback() {
     rm -f "$PREP_PID_FILE"
     rm -f "$AUDIO_FILE"
     stop_ambient_loop
+    stop_progress_loop
     release_playback_slot
     tmux display-message "TTS stopped"
 }
@@ -133,10 +163,11 @@ stop_playback() {
 stop_playback_for_pane() {
     local safe="$1"
     [[ -z "$safe" ]] && return 0
-    local p_pid p_prep p_amb pid
+    local p_pid p_prep p_amb p_prog pid
     p_pid="$TTS_DIR/$safe.pid"
     p_prep="$TTS_DIR/$safe.prep.pid"
     p_amb="$TTS_DIR/$safe.ambient.pid"
+    p_prog="$TTS_DIR/$safe.progress.pid"
     if [[ -f "$p_pid" ]]; then
         pid="$(cat "$p_pid" 2>/dev/null)"
         [[ -n "$pid" ]] && kill_tree "$pid"
@@ -154,6 +185,12 @@ stop_playback_for_pane() {
         [[ -n "$pid" ]] && kill_tree "$pid"
         rm -f "$p_amb"
     fi
+    if [[ -f "$p_prog" ]]; then
+        pid="$(cat "$p_prog" 2>/dev/null)"
+        [[ -n "$pid" ]] && kill_tree "$pid"
+        rm -f "$p_prog"
+    fi
+    rm -f "$TTS_DIR/$safe.phase"
     rm -f "$TTS_DIR/$safe.mp3"
 }
 
@@ -188,8 +225,66 @@ stop_ambient_loop() {
     rm -f "$AMBIENT_PID_FILE"
 }
 
+# True if the agent-authored script exists, is non-empty, and is within the
+# freshness window (so we don't speak a stale briefing from a previous task).
+authored_is_fresh() {
+    [[ -s "$AUTHORED_FILE" ]] || return 1
+    [[ "$TTS_AUTHORED_MAX_AGE" == "0" ]] && return 0
+    local now mtime age
+    now="$(date +%s)"
+    mtime="$(stat -f %m "$AUTHORED_FILE" 2>/dev/null || stat -c %Y "$AUTHORED_FILE" 2>/dev/null || echo 0)"
+    age=$((now - mtime))
+    [[ "$age" -le "$TTS_AUTHORED_MAX_AGE" ]]
+}
+
+# Record the current prep stage. The live indicator reads PHASE_FILE; the log
+# keeps a timestamped trail so you can see, after the fact, where it stalled.
+set_phase() {
+    local phase="$1"
+    echo "$phase" > "$PHASE_FILE" 2>/dev/null || true
+    printf '%s  %s\n' "$(date '+%H:%M:%S')" "$phase" >> "$PROGRESS_LOG" 2>/dev/null || true
+}
+
+# Background loop that keeps the tmux status line showing the current stage and
+# how long it has been running, e.g. "TTS: generating audio (12s)". Per-stage
+# timer resets whenever set_phase changes PHASE_FILE, so a hang is easy to spot.
+start_progress_loop() {
+    if [[ "$TTS_PROGRESS_ENABLED" == "0" ]]; then
+        return 0
+    fi
+    stop_progress_loop
+    local interval="$TTS_PROGRESS_INTERVAL"
+    (
+        local last="" phase phase_start=0 elapsed
+        SECONDS=0
+        while true; do
+            phase="$(cat "$PHASE_FILE" 2>/dev/null || echo "starting")"
+            if [[ "$phase" != "$last" ]]; then
+                last="$phase"
+                phase_start=$SECONDS
+            fi
+            elapsed=$((SECONDS - phase_start))
+            tmux display-message -t "$PANE_ID" \
+                "TTS: $phase (${elapsed}s) — Ctrl+b p to stop" 2>/dev/null || true
+            sleep "$interval"
+        done
+    ) &
+    echo "$!" > "$PROGRESS_PID_FILE"
+}
+
+stop_progress_loop() {
+    local progress_pid
+    progress_pid="$(cat "$PROGRESS_PID_FILE" 2>/dev/null || true)"
+    if [[ -n "$progress_pid" ]]; then
+        kill "$progress_pid" 2>/dev/null || true
+    fi
+    rm -f "$PROGRESS_PID_FILE"
+    rm -f "$PHASE_FILE"
+}
+
 cleanup_on_exit() {
     stop_ambient_loop
+    stop_progress_loop
     release_toggle_lock
     # Only clear the prep marker if it's still ours — a stealing instance may
     # have already claimed it.
@@ -204,6 +299,7 @@ cleanup_on_exit() {
 # so a killed prepping instance never resumes into afplay.
 cleanup_on_signal() {
     stop_ambient_loop
+    stop_progress_loop
     release_toggle_lock
     still_owner && rm -f "$PREP_PID_FILE"
     release_playback_slot
@@ -221,9 +317,16 @@ start_ambient_loop() {
     fi
 
     stop_ambient_loop
+    local max_secs="$TTS_AMBIENT_MAX_SECONDS"
     (
+        SECONDS=0
         while true; do
             afplay "$TTS_AMBIENT_SOUND" >/dev/null 2>&1 || true
+            # Stop beeping after the cap even if prep never finishes, so a hung
+            # downstream step can't beep indefinitely.
+            if [[ "$max_secs" != "0" && "$SECONDS" -ge "$max_secs" ]]; then
+                break
+            fi
             sleep "$TTS_AMBIENT_SOUND_INTERVAL"
         done
     ) &
@@ -243,23 +346,37 @@ start_playback() {
         exit 1
     fi
 
-    "$SCRIPT_DIR/extract-latest.sh" "$PANE_ID" > "$TEXT_FILE"
-    if [[ ! -s "$TEXT_FILE" ]]; then
-        tmux display-message "TTS: no readable pane text found"
-        exit 1
-    fi
+    : > "$PROGRESS_LOG" 2>/dev/null || true
+    # Start the loop first: it calls stop_progress_loop (which clears PHASE_FILE),
+    # so set_phase must come after, or the first stage label gets wiped.
+    start_progress_loop
 
-    start_ambient_loop
-    cp "$TEXT_FILE" "$SPEECH_FILE"
-    if [[ "$TTS_SUMMARIZE" != "0" ]]; then
-        local backend="$TTS_SUMMARIZER_BACKEND"
-        if [[ "$backend" == "auto" && "$(type -t para_llm_repl_for_path 2>/dev/null)" == "function" ]]; then
-            backend="$(para_llm_repl_for_path "$PANE_PATH" 2>/dev/null || echo "auto")"
+    if authored_is_fresh; then
+        # The coding agent already wrote a speakable script for this pane via
+        # voice-script.sh — play it directly, no capture or summarize needed.
+        set_phase "using agent-authored script"
+        cp "$AUTHORED_FILE" "$SPEECH_FILE"
+        start_ambient_loop
+    else
+        set_phase "extracting pane text"
+        "$SCRIPT_DIR/extract-latest.sh" "$PANE_ID" > "$TEXT_FILE"
+        if [[ ! -s "$TEXT_FILE" ]]; then
+            tmux display-message "TTS: no readable pane text found"
+            exit 1
         fi
-        tmux display-message "TTS preparing speech text..."
-        if ! "$SCRIPT_DIR/summarize-for-speech.sh" "$backend" "$TEXT_FILE" "$SPEECH_FILE" "$PANE_PATH" >/dev/null 2>&1; then
-            cp "$TEXT_FILE" "$SPEECH_FILE"
-            tmux display-message "TTS summary unavailable; using pane text"
+
+        start_ambient_loop
+        cp "$TEXT_FILE" "$SPEECH_FILE"
+        if [[ "$TTS_SUMMARIZE" != "0" ]]; then
+            # Summarizer backend is decoupled from the pane's interactive REPL: the
+            # only LLM summarizer is codex (claude -p was retired — see ADR-009), so
+            # a Claude-Code pane no longer routes TTS through the metered claude -p.
+            local backend="$TTS_SUMMARIZER_BACKEND"
+            set_phase "summarizing via $backend"
+            if ! "$SCRIPT_DIR/summarize-for-speech.sh" "$backend" "$TEXT_FILE" "$SPEECH_FILE" "$PANE_PATH" >/dev/null 2>&1; then
+                cp "$TEXT_FILE" "$SPEECH_FILE"
+                set_phase "summary unavailable, using raw text"
+            fi
         fi
     fi
 
@@ -271,16 +388,20 @@ start_playback() {
     fi
 
     rm -f "$AUDIO_FILE"
-    tmux display-message "TTS generating audio..."
-    if ! edge-tts \
-        --file "$SPEECH_FILE" \
-        --voice "$TTS_VOICE" \
-        --rate "$TTS_RATE" \
-        --volume "$TTS_VOLUME" \
-        --pitch "$TTS_PITCH" \
-        --write-media "$AUDIO_FILE" >/dev/null 2>&1; then
+    set_phase "generating audio (edge-tts)"
+    local synth_cmd=(edge-tts
+        --file "$SPEECH_FILE"
+        --voice "$TTS_VOICE"
+        --rate "$TTS_RATE"
+        --volume "$TTS_VOLUME"
+        --pitch "$TTS_PITCH"
+        --write-media "$AUDIO_FILE")
+    if [[ -n "$TIMEOUT_CMD" && "$TTS_SYNTH_TIMEOUT" != "0" ]]; then
+        synth_cmd=("$TIMEOUT_CMD" -k 5 "$TTS_SYNTH_TIMEOUT" "${synth_cmd[@]}")
+    fi
+    if ! "${synth_cmd[@]}" >/dev/null 2>&1; then
         stop_ambient_loop
-        tmux display-message "TTS Error: edge-tts failed"
+        tmux display-message "TTS Error: edge-tts failed or timed out"
         rm -f "$AUDIO_FILE"
         exit 1
     fi
@@ -293,6 +414,8 @@ start_playback() {
         exit 0
     fi
 
+    set_phase "playing"
+    stop_progress_loop
     afplay "$AUDIO_FILE" &
     local pid=$!
     echo "$pid" > "$PID_FILE"
