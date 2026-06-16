@@ -18,8 +18,12 @@ cat /tmp/para-llm-tts/<pane>.progress.log
 cat /tmp/para-llm-tts/5.progress.log
 ```
 
-Stages: `extracting pane text` → `summarizing via <backend>` → `generating
-audio (edge-tts)` → `playing`. Common culprits:
+Stages: either `using agent-authored script` (when the agent pre-wrote one via
+`voice-script.sh`) **or** `extracting pane text` → `summarizing via <backend>`,
+then both paths converge on `generating audio (edge-tts)` → `playing`. If you
+expected the authored script but see `extracting pane text` instead, it was
+missing or stale — check `plugins/tts/voice-script.sh --show` and
+`TTS_AUTHORED_MAX_AGE`. Common culprits:
 - **summarizing** stalls → the LLM backend (`codex exec`; `claude -p` was
   retired, see ADR-009) is slow or hung; capped by `TTS_SUMMARIZE_TIMEOUT`
   (default 60s), then falls back to raw pane text. Set `TTS_SUMMARIZE=0` to skip

@@ -191,6 +191,7 @@ TTS_SUMMARIZE_TIMEOUT="60"       # Max seconds for the LLM summarizer before fal
 TTS_SYNTH_TIMEOUT="60"           # Max seconds for edge-tts audio synthesis (0 = no cap)
 TTS_PROGRESS_ENABLED=1           # Show live "TTS: <stage> (Ns)" progress in the status line
 TTS_PROGRESS_INTERVAL="1"        # How often (seconds) to refresh the progress indicator
+TTS_AUTHORED_MAX_AGE="900"       # Seconds an agent-authored voice script (voice-script.sh) stays playable before falling back to live capture (0 = never expires)
 # STT_LANGUAGE="en"
 # STT_MODEL_PATH=""  # Override model location (default: $PARA_LLM_ROOT/plugins/stt/models/ggml-base.en.bin)
 EOF
@@ -240,6 +241,24 @@ fi
 if [[ -d "$SCRIPT_DIR/plugins/remote-save" ]]; then
     chmod +x "$SCRIPT_DIR/plugins/remote-save/"*.sh 2>/dev/null || true
     chmod +x "$SCRIPT_DIR/plugins/remote-save/backends/"*.sh 2>/dev/null || true
+fi
+
+# --- Agent voice-script skill (Claude Code skill + Codex prompt) ---
+# Lets the coding agent author a speakable briefing that Ctrl+b p plays directly,
+# skipping capture + LLM summarization. Both files point at the same recorder.
+VOICE_SCRIPT_PATH="$SCRIPT_DIR/plugins/tts/voice-script.sh"
+SKILL_SRC="$SCRIPT_DIR/plugins/tts/agent-skill"
+if [[ -f "$SKILL_SRC/SKILL.md" ]]; then
+    CLAUDE_SKILL_DIR="$HOME/.claude/skills/para-voice-script"
+    mkdir -p "$CLAUDE_SKILL_DIR"
+    sed "s|__VOICE_SCRIPT_PATH__|$VOICE_SCRIPT_PATH|g" "$SKILL_SRC/SKILL.md" > "$CLAUDE_SKILL_DIR/SKILL.md"
+    echo "  Installed Claude Code skill: para-voice-script"
+fi
+if [[ -f "$SKILL_SRC/codex-prompt.md" ]]; then
+    CODEX_PROMPT_DIR="$HOME/.codex/prompts"
+    mkdir -p "$CODEX_PROMPT_DIR"
+    sed "s|__VOICE_SCRIPT_PATH__|$VOICE_SCRIPT_PATH|g" "$SKILL_SRC/codex-prompt.md" > "$CODEX_PROMPT_DIR/voice-script.md"
+    echo "  Installed Codex prompt: /voice-script"
 fi
 
 # Make recovery scripts executable

@@ -284,6 +284,38 @@ plugins/remote-save/
 
 ---
 
+### 10. Voice Playback & Agent-Authored Voice Scripts (`Ctrl+b p`)
+
+`Ctrl+b p` speaks the latest readable pane output; press again to stop. The
+default path captures the pane, summarizes it with `codex` into speakable prose,
+synthesizes audio with `edge-tts`, and plays it with `afplay`. A live status-line
+indicator shows the current stage and a per-stage timer (`TTS: <stage> (Ns)`);
+a repeating click plays while preparing. See the `debugging` topic for hang
+diagnosis and BUG-018 for the timeout/cap behavior.
+
+**Agent-authored voice scripts**: instead of re-summarizing scrollback, the
+coding agent running in the pane can write the spoken briefing itself (it has
+full context of what it just did), and `Ctrl+b p` plays it directly — no
+capture, no LLM summarize step. This is faster, cheaper (no metered summarizer
+call), and more accurate.
+
+- **Mechanism**: `plugins/tts/voice-script.sh` records speakable prose for the
+  current pane (resolved via `$TMUX_PANE`) to `/tmp/para-llm-tts/<pane>.authored.txt`.
+  Supports `--clear` (revert to live capture) and `--show`.
+- **Agent integration** (installed by `install.sh`, both agents supported):
+  - Claude Code skill `para-voice-script` → `~/.claude/skills/para-voice-script/SKILL.md`
+  - Codex prompt `/voice-script` → `~/.codex/prompts/voice-script.md`
+  - Both are templated with the absolute path to `voice-script.sh` at install time.
+- **Playback preference**: on `Ctrl+b p`, if a fresh authored script exists it is
+  played directly (phase `using agent-authored script`); otherwise the live
+  capture+summarize path runs. Freshness window is `TTS_AUTHORED_MAX_AGE`
+  (default 900s; `0` = never expires).
+- **Usage**: ask the agent to "say that" / "make a voice script", then `Ctrl+b p`.
+
+**File**: `plugins/tts/voice-script.sh`, `plugins/tts/agent-skill/`, `plugins/tts/toggle-tts.sh`
+
+---
+
 ## Key Bindings Summary
 
 | Binding | Action |

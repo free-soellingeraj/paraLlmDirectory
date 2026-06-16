@@ -27,6 +27,10 @@ TTS_VOLUME="${TTS_VOLUME:-+0%}"
 TTS_PITCH="${TTS_PITCH:-+0Hz}"
 TTS_SUMMARIZE="${TTS_SUMMARIZE:-1}"
 TTS_SUMMARIZER_BACKEND="${TTS_SUMMARIZER_BACKEND:-codex}"
+# How long (seconds) an agent-authored script (voice-script.sh) stays eligible
+# for direct playback before it's treated as stale and we fall back to live
+# capture + summarize. 0 = never expires.
+TTS_AUTHORED_MAX_AGE="${TTS_AUTHORED_MAX_AGE:-900}"
 
 PANE_ID="$(tmux display-message -p '#{pane_id}' 2>/dev/null)"
 PANE_PATH="$(tmux display-message -p -t "$PANE_ID" '#{pane_current_path}' 2>/dev/null || pwd)"
@@ -39,6 +43,9 @@ PHASE_FILE="$TTS_DIR/$SAFE_PANE_ID.phase"
 PROGRESS_LOG="$TTS_DIR/$SAFE_PANE_ID.progress.log"
 TEXT_FILE="$TTS_DIR/$SAFE_PANE_ID.txt"
 SPEECH_FILE="$TTS_DIR/$SAFE_PANE_ID.speech.txt"
+# Speakable script pre-authored by the coding agent (via voice-script.sh). When
+# present and fresh it is played directly, skipping capture + LLM summarize.
+AUTHORED_FILE="$TTS_DIR/$SAFE_PANE_ID.authored.txt"
 AUDIO_FILE="$TTS_DIR/$SAFE_PANE_ID.mp3"
 ACTIVE_FILE="$TTS_DIR/active.pane"
 TOGGLE_LOCK="$TTS_DIR/$SAFE_PANE_ID.toggle.lock"
@@ -218,6 +225,18 @@ stop_ambient_loop() {
     rm -f "$AMBIENT_PID_FILE"
 }
 
+# True if the agent-authored script exists, is non-empty, and is within the
+# freshness window (so we don't speak a stale briefing from a previous task).
+authored_is_fresh() {
+    [[ -s "$AUTHORED_FILE" ]] || return 1
+    [[ "$TTS_AUTHORED_MAX_AGE" == "0" ]] && return 0
+    local now mtime age
+    now="$(date +%s)"
+    mtime="$(stat -f %m "$AUTHORED_FILE" 2>/dev/null || stat -c %Y "$AUTHORED_FILE" 2>/dev/null || echo 0)"
+    age=$((now - mtime))
+    [[ "$age" -le "$TTS_AUTHORED_MAX_AGE" ]]
+}
+
 # Record the current prep stage. The live indicator reads PHASE_FILE; the log
 # keeps a timestamped trail so you can see, after the fact, where it stalled.
 set_phase() {
@@ -331,25 +350,33 @@ start_playback() {
     # Start the loop first: it calls stop_progress_loop (which clears PHASE_FILE),
     # so set_phase must come after, or the first stage label gets wiped.
     start_progress_loop
-    set_phase "extracting pane text"
 
-    "$SCRIPT_DIR/extract-latest.sh" "$PANE_ID" > "$TEXT_FILE"
-    if [[ ! -s "$TEXT_FILE" ]]; then
-        tmux display-message "TTS: no readable pane text found"
-        exit 1
-    fi
+    if authored_is_fresh; then
+        # The coding agent already wrote a speakable script for this pane via
+        # voice-script.sh — play it directly, no capture or summarize needed.
+        set_phase "using agent-authored script"
+        cp "$AUTHORED_FILE" "$SPEECH_FILE"
+        start_ambient_loop
+    else
+        set_phase "extracting pane text"
+        "$SCRIPT_DIR/extract-latest.sh" "$PANE_ID" > "$TEXT_FILE"
+        if [[ ! -s "$TEXT_FILE" ]]; then
+            tmux display-message "TTS: no readable pane text found"
+            exit 1
+        fi
 
-    start_ambient_loop
-    cp "$TEXT_FILE" "$SPEECH_FILE"
-    if [[ "$TTS_SUMMARIZE" != "0" ]]; then
-        # Summarizer backend is decoupled from the pane's interactive REPL: the
-        # only LLM summarizer is codex (claude -p was retired — see ADR-009), so
-        # a Claude-Code pane no longer routes TTS through the metered claude -p.
-        local backend="$TTS_SUMMARIZER_BACKEND"
-        set_phase "summarizing via $backend"
-        if ! "$SCRIPT_DIR/summarize-for-speech.sh" "$backend" "$TEXT_FILE" "$SPEECH_FILE" "$PANE_PATH" >/dev/null 2>&1; then
-            cp "$TEXT_FILE" "$SPEECH_FILE"
-            set_phase "summary unavailable, using raw text"
+        start_ambient_loop
+        cp "$TEXT_FILE" "$SPEECH_FILE"
+        if [[ "$TTS_SUMMARIZE" != "0" ]]; then
+            # Summarizer backend is decoupled from the pane's interactive REPL: the
+            # only LLM summarizer is codex (claude -p was retired — see ADR-009), so
+            # a Claude-Code pane no longer routes TTS through the metered claude -p.
+            local backend="$TTS_SUMMARIZER_BACKEND"
+            set_phase "summarizing via $backend"
+            if ! "$SCRIPT_DIR/summarize-for-speech.sh" "$backend" "$TEXT_FILE" "$SPEECH_FILE" "$PANE_PATH" >/dev/null 2>&1; then
+                cp "$TEXT_FILE" "$SPEECH_FILE"
+                set_phase "summary unavailable, using raw text"
+            fi
         fi
     fi
 

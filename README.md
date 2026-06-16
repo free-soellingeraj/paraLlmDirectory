@@ -150,6 +150,8 @@ When switching from one product to the other, para-llm captures the pane transcr
 
 Voice is always installed by `install.sh`. STT uses `sox` and `whisper-cpp`. TTS uses Microsoft `edge-tts` with `en-US-AndrewNeural` by default and plays audio with `afplay` on macOS. Before playback, para-llm asks `codex` to turn the latest pane text into concise speakable prose, so code blocks, diffs, logs, and long output are summarized instead of read verbatim. (Headless `claude -p` was retired as a summarizer because it now meters against a separate paid credit pool — see ADR-009; set `TTS_SUMMARIZE=0` to skip summarization entirely.) While TTS is preparing the summary and audio, para-llm shows a live `TTS: <stage> (Ns)` progress indicator and plays a subtle repeating click so you know playback is working before the first utterance. If summarization is unavailable, playback falls back to the extracted pane text.
 
+**Agent-authored voice scripts.** The coding agent in a pane can write the spoken briefing itself instead of having TTS re-summarize scrollback — it already knows what it just did, so the result is faster (no LLM summarize step), cheaper, and more accurate. `install.sh` registers a Claude Code skill (`para-voice-script`) and a Codex prompt (`/voice-script`); just ask the agent to "say that" / "make a voice script". When a fresh authored script exists for the pane, `Ctrl+b p` plays it directly and skips capture + summarization. Scripts expire after `TTS_AUTHORED_MAX_AGE` seconds (default 900) and then fall back to live capture. Manage them with `plugins/tts/voice-script.sh --show` / `--clear`.
+
 ### Upgrading existing environments
 
 After installing, run:
