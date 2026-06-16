@@ -43,6 +43,21 @@ TOGGLE_LOCK="$TTS_DIR/$SAFE_PANE_ID.toggle.lock"
 TTS_AMBIENT_SOUND_ENABLED="${TTS_AMBIENT_SOUND_ENABLED:-1}"
 TTS_AMBIENT_SOUND_INTERVAL="${TTS_AMBIENT_SOUND_INTERVAL:-1}"
 TTS_AMBIENT_SOUND="${TTS_AMBIENT_SOUND:-/System/Library/Sounds/Tink.aiff}"
+# Safety net: never let the "preparing" beep loop longer than this, even if a
+# downstream step hangs. 0 disables the cap.
+TTS_AMBIENT_MAX_SECONDS="${TTS_AMBIENT_MAX_SECONDS:-120}"
+# Hard cap on edge-tts audio synthesis (a stalled network call can hang here).
+# 0 disables the cap.
+TTS_SYNTH_TIMEOUT="${TTS_SYNTH_TIMEOUT:-60}"
+
+# Resolve a `timeout`-style command (GNU coreutils ships it as `gtimeout` on
+# macOS). Empty if neither is available, in which case calls run uncapped.
+TIMEOUT_CMD=""
+if command -v timeout >/dev/null 2>&1; then
+    TIMEOUT_CMD="timeout"
+elif command -v gtimeout >/dev/null 2>&1; then
+    TIMEOUT_CMD="gtimeout"
+fi
 
 # Serialize concurrent prefix-p presses for this pane. The mkdir is atomic, so
 # only one instance at a time can decide start-vs-stop and claim the prep slot.
@@ -221,9 +236,16 @@ start_ambient_loop() {
     fi
 
     stop_ambient_loop
+    local max_secs="$TTS_AMBIENT_MAX_SECONDS"
     (
+        SECONDS=0
         while true; do
             afplay "$TTS_AMBIENT_SOUND" >/dev/null 2>&1 || true
+            # Stop beeping after the cap even if prep never finishes, so a hung
+            # downstream step can't beep indefinitely.
+            if [[ "$max_secs" != "0" && "$SECONDS" -ge "$max_secs" ]]; then
+                break
+            fi
             sleep "$TTS_AMBIENT_SOUND_INTERVAL"
         done
     ) &
@@ -272,15 +294,19 @@ start_playback() {
 
     rm -f "$AUDIO_FILE"
     tmux display-message "TTS generating audio..."
-    if ! edge-tts \
-        --file "$SPEECH_FILE" \
-        --voice "$TTS_VOICE" \
-        --rate "$TTS_RATE" \
-        --volume "$TTS_VOLUME" \
-        --pitch "$TTS_PITCH" \
-        --write-media "$AUDIO_FILE" >/dev/null 2>&1; then
+    local synth_cmd=(edge-tts
+        --file "$SPEECH_FILE"
+        --voice "$TTS_VOICE"
+        --rate "$TTS_RATE"
+        --volume "$TTS_VOLUME"
+        --pitch "$TTS_PITCH"
+        --write-media "$AUDIO_FILE")
+    if [[ -n "$TIMEOUT_CMD" && "$TTS_SYNTH_TIMEOUT" != "0" ]]; then
+        synth_cmd=("$TIMEOUT_CMD" -k 5 "$TTS_SYNTH_TIMEOUT" "${synth_cmd[@]}")
+    fi
+    if ! "${synth_cmd[@]}" >/dev/null 2>&1; then
         stop_ambient_loop
-        tmux display-message "TTS Error: edge-tts failed"
+        tmux display-message "TTS Error: edge-tts failed or timed out"
         rm -f "$AUDIO_FILE"
         exit 1
     fi

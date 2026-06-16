@@ -180,12 +180,15 @@ TTS_ENABLED=1
 TTS_AMBIENT_SOUND_ENABLED=1
 TTS_AMBIENT_SOUND_INTERVAL="1"
 TTS_AMBIENT_SOUND="/System/Library/Sounds/Tink.aiff"
+TTS_AMBIENT_MAX_SECONDS="120"   # Stop the "preparing" beep after this many seconds (0 = no cap)
 TTS_VOICE="en-US-AndrewNeural"
 TTS_RATE="+0%"
 TTS_VOLUME="+0%"
 TTS_PITCH="+0Hz"
 TTS_SUMMARIZE=1
 TTS_SUMMARIZER_BACKEND="auto"
+TTS_SUMMARIZE_TIMEOUT="60"       # Max seconds for the LLM summarizer before falling back to raw text (0 = no cap)
+TTS_SYNTH_TIMEOUT="60"           # Max seconds for edge-tts audio synthesis (0 = no cap)
 # STT_LANGUAGE="en"
 # STT_MODEL_PATH=""  # Override model location (default: $PARA_LLM_ROOT/plugins/stt/models/ggml-base.en.bin)
 EOF
