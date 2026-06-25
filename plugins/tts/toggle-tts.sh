@@ -41,12 +41,15 @@ AMBIENT_PID_FILE="$TTS_DIR/$SAFE_PANE_ID.ambient.pid"
 PROGRESS_PID_FILE="$TTS_DIR/$SAFE_PANE_ID.progress.pid"
 PHASE_FILE="$TTS_DIR/$SAFE_PANE_ID.phase"
 PROGRESS_LOG="$TTS_DIR/$SAFE_PANE_ID.progress.log"
+ERROR_LOG="$TTS_DIR/$SAFE_PANE_ID.error.log"
 TEXT_FILE="$TTS_DIR/$SAFE_PANE_ID.txt"
 SPEECH_FILE="$TTS_DIR/$SAFE_PANE_ID.speech.txt"
 # Speakable script pre-authored by the coding agent (via voice-script.sh). When
 # present and fresh it is played directly, skipping capture + LLM summarize.
 AUTHORED_FILE="$TTS_DIR/$SAFE_PANE_ID.authored.txt"
 AUDIO_FILE="$TTS_DIR/$SAFE_PANE_ID.mp3"
+AUDIO_DIR="$TTS_DIR/$SAFE_PANE_ID.audio"
+PLAYLIST_FILE="$TTS_DIR/$SAFE_PANE_ID.audio-list"
 ACTIVE_FILE="$TTS_DIR/active.pane"
 TOGGLE_LOCK="$TTS_DIR/$SAFE_PANE_ID.toggle.lock"
 
@@ -59,6 +62,9 @@ TTS_AMBIENT_MAX_SECONDS="${TTS_AMBIENT_MAX_SECONDS:-120}"
 # Hard cap on edge-tts audio synthesis (a stalled network call can hang here).
 # 0 disables the cap.
 TTS_SYNTH_TIMEOUT="${TTS_SYNTH_TIMEOUT:-60}"
+# Maximum characters per edge-tts request. Long requests can stall after writing
+# partial audio; smaller sentence-based chunks are more reliable.
+TTS_SYNTH_CHARS="${TTS_SYNTH_CHARS:-180}"
 # Live progress indicator: shows the current prep stage and how long it has
 # been running, so a hang is visible (and where). 0 disables it.
 TTS_PROGRESS_ENABLED="${TTS_PROGRESS_ENABLED:-1}"
@@ -154,6 +160,8 @@ stop_playback() {
     rm -f "$PID_FILE"
     rm -f "$PREP_PID_FILE"
     rm -f "$AUDIO_FILE"
+    rm -f "$PLAYLIST_FILE"
+    rm -rf "$AUDIO_DIR"
     stop_ambient_loop
     stop_progress_loop
     release_playback_slot
@@ -192,6 +200,8 @@ stop_playback_for_pane() {
     fi
     rm -f "$TTS_DIR/$safe.phase"
     rm -f "$TTS_DIR/$safe.mp3"
+    rm -f "$TTS_DIR/$safe.audio-list"
+    rm -rf "$TTS_DIR/$safe.audio"
 }
 
 acquire_playback_slot() {
@@ -243,6 +253,10 @@ set_phase() {
     local phase="$1"
     echo "$phase" > "$PHASE_FILE" 2>/dev/null || true
     printf '%s  %s\n' "$(date '+%H:%M:%S')" "$phase" >> "$PROGRESS_LOG" 2>/dev/null || true
+}
+
+log_error() {
+    printf '%s  %s\n' "$(date '+%H:%M:%S')" "$*" >> "$ERROR_LOG" 2>/dev/null || true
 }
 
 # Background loop that keeps the tmux status line showing the current stage and
@@ -333,6 +347,143 @@ start_ambient_loop() {
     echo "$!" > "$AMBIENT_PID_FILE"
 }
 
+split_speech_for_synthesis() {
+    local input_file="$1"
+    local chunk_dir="$2"
+    local max_chars="$3"
+
+    python3 - "$input_file" "$chunk_dir" "$max_chars" <<'PY'
+import os
+import re
+import sys
+from pathlib import Path
+
+input_file, chunk_dir, max_chars_raw = sys.argv[1:4]
+max_chars = max(200, int(max_chars_raw))
+text = Path(input_file).read_text(errors="replace").strip()
+text = re.sub(r"\s+", " ", text)
+if not text:
+    sys.exit(1)
+
+sentences = re.split(r"(?<=[.!?])\s+", text)
+chunks = []
+current = ""
+
+def push(value):
+    value = value.strip()
+    if value:
+        chunks.append(value)
+
+for sentence in sentences:
+    sentence = sentence.strip()
+    if not sentence:
+        continue
+    if len(sentence) > max_chars:
+        words = sentence.split()
+        for word in words:
+            if len(current) + len(word) + 1 <= max_chars:
+                current = f"{current} {word}".strip()
+            else:
+                push(current)
+                current = word
+        continue
+    if len(current) + len(sentence) + 1 <= max_chars:
+        current = f"{current} {sentence}".strip()
+    else:
+        push(current)
+        current = sentence
+
+push(current)
+
+os.makedirs(chunk_dir, exist_ok=True)
+for index, chunk in enumerate(chunks, start=1):
+    Path(chunk_dir, f"chunk-{index:03d}.txt").write_text(chunk + "\n")
+PY
+}
+
+synthesize_chunk() {
+    local input_file="$1"
+    local output_file="$2"
+    local synth_err="$3"
+    local synth_cmd=(edge-tts
+        --file "$input_file"
+        --voice "$TTS_VOICE"
+        --rate "$TTS_RATE"
+        --volume "$TTS_VOLUME"
+        --pitch "$TTS_PITCH"
+        --write-media "$output_file")
+    if [[ -n "$TIMEOUT_CMD" && "$TTS_SYNTH_TIMEOUT" != "0" ]]; then
+        synth_cmd=("$TIMEOUT_CMD" -k 5 "$TTS_SYNTH_TIMEOUT" "${synth_cmd[@]}")
+    fi
+
+    "${synth_cmd[@]}" > /dev/null 2> "$synth_err"
+}
+
+synthesize_local_chunk() {
+    local input_file="$1"
+    local output_file="$2"
+    command -v say >/dev/null 2>&1 || return 1
+    say -f "$input_file" -o "$output_file" >/dev/null 2>&1
+}
+
+synthesize_audio() {
+    local input_file="$1"
+    local output_file="$2"
+    local chunk_dir="$TTS_DIR/$SAFE_PANE_ID.synth.$$"
+    local synth_err="$TTS_DIR/$SAFE_PANE_ID.edge-tts.err"
+    local chunk chunk_audio index=0 status
+
+    rm -rf "$chunk_dir"
+    mkdir -p "$chunk_dir"
+    rm -rf "$AUDIO_DIR"
+    mkdir -p "$AUDIO_DIR"
+    : > "$PLAYLIST_FILE"
+    if ! split_speech_for_synthesis "$input_file" "$chunk_dir" "$TTS_SYNTH_CHARS"; then
+        log_error "failed to split speech for synthesis"
+        rm -rf "$chunk_dir" "$synth_err" "$AUDIO_DIR" "$PLAYLIST_FILE"
+        return 1
+    fi
+
+    for chunk in "$chunk_dir"/chunk-*.txt; do
+        [[ -f "$chunk" ]] || continue
+        index=$((index + 1))
+        chunk_audio="$AUDIO_DIR/chunk-$(printf '%03d' "$index").mp3"
+        set_phase "generating audio chunk $index"
+
+        synthesize_chunk "$chunk" "$chunk_audio" "$synth_err"
+        status=$?
+        if [[ "$status" -ne 0 ]]; then
+            log_error "edge-tts chunk $index failed with status $status; retrying once"
+            sed 's/^/edge-tts: /' "$synth_err" >> "$ERROR_LOG" 2>/dev/null || true
+            sleep 1
+            rm -f "$chunk_audio"
+            synthesize_chunk "$chunk" "$chunk_audio" "$synth_err"
+            status=$?
+        fi
+        if [[ "$status" -ne 0 ]]; then
+            log_error "edge-tts chunk $index retry failed with status $status; using local say fallback"
+            sed 's/^/edge-tts: /' "$synth_err" >> "$ERROR_LOG" 2>/dev/null || true
+            chunk_audio="$AUDIO_DIR/chunk-$(printf '%03d' "$index").aiff"
+            set_phase "local audio chunk $index"
+            if ! synthesize_local_chunk "$chunk" "$chunk_audio"; then
+                log_error "local say fallback failed for chunk $index"
+                rm -rf "$chunk_dir" "$synth_err" "$output_file" "$AUDIO_DIR" "$PLAYLIST_FILE"
+                return 1
+            fi
+        fi
+        if [[ ! -s "$chunk_audio" ]]; then
+            log_error "audio chunk $index produced no audio"
+            rm -rf "$chunk_dir" "$synth_err" "$output_file" "$AUDIO_DIR" "$PLAYLIST_FILE"
+            return 1
+        fi
+        printf '%s\n' "$chunk_audio" >> "$PLAYLIST_FILE"
+    done
+
+    rm -rf "$chunk_dir" "$synth_err"
+    : > "$output_file"
+    [[ "$index" -gt 0 ]] && [[ -s "$PLAYLIST_FILE" ]]
+}
+
 start_playback() {
     # PREP_PID_FILE is already claimed under the toggle lock by the caller.
     acquire_playback_slot
@@ -347,6 +498,7 @@ start_playback() {
     fi
 
     : > "$PROGRESS_LOG" 2>/dev/null || true
+    : > "$ERROR_LOG" 2>/dev/null || true
     # Start the loop first: it calls stop_progress_loop (which clears PHASE_FILE),
     # so set_phase must come after, or the first stage label gets wiped.
     start_progress_loop
@@ -388,20 +540,9 @@ start_playback() {
     fi
 
     rm -f "$AUDIO_FILE"
-    set_phase "generating audio (edge-tts)"
-    local synth_cmd=(edge-tts
-        --file "$SPEECH_FILE"
-        --voice "$TTS_VOICE"
-        --rate "$TTS_RATE"
-        --volume "$TTS_VOLUME"
-        --pitch "$TTS_PITCH"
-        --write-media "$AUDIO_FILE")
-    if [[ -n "$TIMEOUT_CMD" && "$TTS_SYNTH_TIMEOUT" != "0" ]]; then
-        synth_cmd=("$TIMEOUT_CMD" -k 5 "$TTS_SYNTH_TIMEOUT" "${synth_cmd[@]}")
-    fi
-    if ! "${synth_cmd[@]}" >/dev/null 2>&1; then
+    if ! synthesize_audio "$SPEECH_FILE" "$AUDIO_FILE"; then
         stop_ambient_loop
-        tmux display-message "TTS Error: edge-tts failed or timed out"
+        tmux display-message "TTS Error: edge-tts failed; see $ERROR_LOG"
         rm -f "$AUDIO_FILE"
         exit 1
     fi
@@ -414,9 +555,18 @@ start_playback() {
         exit 0
     fi
 
+    set_phase "audio ready"
     set_phase "playing"
     stop_progress_loop
-    afplay "$AUDIO_FILE" &
+    (
+        while IFS= read -r chunk_audio; do
+            [[ -f "$chunk_audio" ]] || continue
+            afplay "$chunk_audio" || exit $?
+        done < "$PLAYLIST_FILE"
+        rm -f "$PID_FILE" "$AUDIO_FILE" "$PLAYLIST_FILE"
+        rm -rf "$AUDIO_DIR"
+        release_playback_slot
+    ) >> "$ERROR_LOG" 2>&1 &
     local pid=$!
     echo "$pid" > "$PID_FILE"
     rm -f "$PREP_PID_FILE"

@@ -188,7 +188,7 @@ TTS_PITCH="+0Hz"
 TTS_SUMMARIZE=1
 TTS_SUMMARIZER_BACKEND="codex"   # codex only; claude -p retired (metered, see ADR-009)
 TTS_SUMMARIZE_TIMEOUT="60"       # Max seconds for the LLM summarizer before falling back to raw text (0 = no cap)
-TTS_SYNTH_TIMEOUT="60"           # Max seconds for edge-tts audio synthesis (0 = no cap)
+TTS_SYNTH_TIMEOUT="20"           # Max seconds for each edge-tts chunk before falling back locally (0 = no cap)
 TTS_PROGRESS_ENABLED=1           # Show live "TTS: <stage> (Ns)" progress in the status line
 TTS_PROGRESS_INTERVAL="1"        # How often (seconds) to refresh the progress indicator
 TTS_AUTHORED_MAX_AGE="900"       # Seconds an agent-authored voice script (voice-script.sh) stays playable before falling back to live capture (0 = never expires)
