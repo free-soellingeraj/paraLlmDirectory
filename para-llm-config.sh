@@ -31,7 +31,7 @@ CODE_DIR="${CODE_DIR:-$DEFAULT_CODE_DIR}"
 # REPL launch profiles. The selected REPL is stored per environment in
 # $ENV_DIR/.para-llm/repl; these args only define each product's native defaults.
 CLAUDE_LAUNCH_ARGS="${CLAUDE_LAUNCH_ARGS:---permission-mode auto}"
-CODEX_LAUNCH_ARGS="${CODEX_LAUNCH_ARGS:-}"
+CODEX_LAUNCH_ARGS="${CODEX_LAUNCH_ARGS:---yolo}"
 PARA_LLM_DEFAULT_REPL="${PARA_LLM_DEFAULT_REPL:-claude}"
 
 para_llm_shell_quote() {
@@ -134,7 +134,11 @@ para_llm_repl_command() {
                     echo "codex $(para_llm_shell_quote "$handoff_prompt")"
                 fi
             elif [[ "$resume" == "true" ]]; then
-                echo "codex resume --last"
+                if [[ -n "$CODEX_LAUNCH_ARGS" ]]; then
+                    echo "codex $CODEX_LAUNCH_ARGS resume --last"
+                else
+                    echo "codex resume --last"
+                fi
             elif [[ -n "$CODEX_LAUNCH_ARGS" ]]; then
                 echo "codex $CODEX_LAUNCH_ARGS"
             else

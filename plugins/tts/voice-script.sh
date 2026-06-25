@@ -17,12 +17,40 @@ set -uo pipefail
 TTS_DIR="/tmp/para-llm-tts"
 mkdir -p "$TTS_DIR"
 
-# Resolve the pane this command is running in. tmux exports $TMUX_PANE in every
-# pane; fall back to querying tmux directly.
-PANE_ID="${TMUX_PANE:-}"
-if [[ -z "$PANE_ID" ]]; then
-    PANE_ID="$(tmux display-message -p '#{pane_id}' 2>/dev/null || true)"
-fi
+# Resolve the pane this command is running in. tmux normally exports
+# $TMUX_PANE, but some agent-launched commands can inherit a stale pane id while
+# running in another pane's working directory. Prefer $TMUX_PANE only when its
+# tmux cwd matches this process cwd; otherwise use a unique cwd match.
+resolve_pane_id() {
+    local cwd="${PWD:-$(pwd)}"
+    local env_pane="${TMUX_PANE:-}"
+    local env_cwd=""
+
+    if [[ -n "$env_pane" ]]; then
+        env_cwd="$(tmux display-message -p -t "$env_pane" '#{pane_current_path}' 2>/dev/null || true)"
+        if [[ "$env_cwd" == "$cwd" ]]; then
+            echo "$env_pane"
+            return 0
+        fi
+    fi
+
+    local matches
+    matches="$(tmux list-panes -a -F '#{pane_id}|#{pane_current_path}' 2>/dev/null \
+        | awk -F'|' -v cwd="$cwd" '$2 == cwd { print $1 }')"
+    if [[ "$(printf '%s\n' "$matches" | sed '/^$/d' | wc -l | tr -d ' ')" == "1" ]]; then
+        printf '%s\n' "$matches"
+        return 0
+    fi
+
+    if [[ -n "$env_pane" ]]; then
+        echo "$env_pane"
+        return 0
+    fi
+
+    tmux display-message -p '#{pane_id}' 2>/dev/null || true
+}
+
+PANE_ID="$(resolve_pane_id)"
 if [[ -z "$PANE_ID" ]]; then
     echo "voice-script: not inside a tmux pane (no \$TMUX_PANE); cannot target playback" >&2
     exit 1
