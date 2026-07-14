@@ -101,7 +101,8 @@ DROP_PATTERNS = [
     re.compile(r"^\s*⎿"),                    # tool result marker
     re.compile(r"^\s{4,}"),                  # tool output continuation / code indent
     re.compile(r"^\s*[>❯›]\s?"),             # prompt line / echoed user input
-    re.compile(r"^\s*[✻✽✶✳✢∴☐☒⚒·•▸▪⏵]"),     # spinner / status / todo glyphs
+    re.compile(r"^\s*[✻✽✶✳✢∴☐☒⚒·•▸▪⏵⧉✔✖✗]"), # spinner / status / todo / tab-bar glyphs
+    re.compile(r"^\s*…"),                    # collapsed-list chrome: "… +77 completed"
     re.compile(r"^⏺\s+\w[\w-]*\("),          # finalized tool line: "⏺ Bash(ls)"
     re.compile(r"…\s*(\(\d[^)]*\))?\s*$"),   # in-progress ellipsis, optional timer: "Running 1 shell command… (3s)"
     re.compile(r"^\s*Running \d+ shell command"),  # tool header renders with 2-space indent, no ⏺
@@ -211,8 +212,12 @@ else:
         anchor = (matched + settled)[-ANCHOR_LINES:]
         spoken_recent = (spoken_recent + [l for l in settled if l.strip()])[-SPOKEN_MEMORY:]
         write_text(spoken_path, "\n".join(spoken_recent))
-    elif matched != anchor:
-        anchor = matched
+    # NOTE: when nothing settled, the anchor is deliberately NOT replaced by
+    # the trimmed match — persisting shrinks let repeated trims whittle the
+    # anchor down to a single ubiquitous line (observed live: the ⧉ tab bar,
+    # which is always the LAST line, pinning the anchor at end-of-transcript
+    # so nothing could ever settle again — BUG-025). find_anchor_end re-trims
+    # stale lines on every poll anyway; the anchor only advances on settle.
 
 write_text(prev_path, "\n".join(spk_cur))
 write_text(anchor_path, "\n".join(anchor))

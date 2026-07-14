@@ -195,6 +195,13 @@ Log of bugs encountered and fixed in the para-llm-directory project. Each entry 
 **Fix**: (1) The bound pane gets a purple background tint via per-pane `window-style` (verified truly pane-scoped, unlike `pane-border-style`/BUG-021; applied with `set-option -p`, not `select-pane -P`, which can move focus). Focus-independent; `TTS_STREAM_TINT` configures it, empty disables. (2) Label priority is now env dir name > branch > basename, resolved once at enable time.
 **File**: `plugins/tts/toggle-stream.sh`, `plugins/tts/stream-watcher.sh`
 
+### BUG-025: Speak mode went permanently silent — anchor pinned to the tab bar
+**Date**: 2026-07-14
+**Symptom**: `Ctrl+b o` played its recap, then never spoke again as Claude streamed new text. No resyncs, no errors; the watcher just never settled anything (`raw/.next` stayed 1).
+**Cause**: Two compounding issues. (1) Claude Code's bottom tab bar (`⧉ coverage · …`) and todo chrome (`✔ …`, `… +77 completed`) weren't filtered, and the tab bar is always the LAST captured line. (2) The anchor-shrink path (`anchor = matched` when nothing settled) let repeated trims whittle the 24-line anchor down to just that tab-bar line — whose last occurrence is the end of the transcript, so "after the anchor" was permanently empty and nothing could ever settle.
+**Fix**: `⧉ ✔ ✖ ✗` and leading-`…` lines added to the streaming drops; the anchor no longer shrinks on no-settle polls (find_anchor_end re-trims stale lines each poll anyway — the anchor only advances when text is consumed). Regression case "tabbar" pins the scenario.
+**File**: `plugins/tts/stream-step.py`
+
 ---
 
 ## Known Bug-Prone Areas
