@@ -88,6 +88,36 @@ chime() {
 }
 
 player_pid() { cat "$SPOOL/player.pid" 2>/dev/null; }
+framing_pid() { cat "$SPOOL/framing.pid" 2>/dev/null; }
+
+# SIGSTOP freezes the player loop, but the in-flight afplay keeps draining
+# its CoreAudio buffer — the current sentence would play to the end while the
+# user is dictating. Freeze the loop first (no new chunks start), then KILL
+# the in-flight afplay children (SIGKILL works on stopped processes; TERM
+# would stay pending until CONT). The interrupted sentence is skipped on
+# resume. The framing worker is paused too so its "preparing" beeper stops.
+pause_playback() {
+    local pid child
+    pid="$(player_pid)"
+    if [[ -n "$pid" ]]; then
+        signal_tree STOP "$pid"
+        for child in $(pgrep -P "$pid" 2>/dev/null); do
+            kill -9 "$child" 2>/dev/null || true
+        done
+    fi
+    pid="$(framing_pid)"
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+        signal_tree STOP "$pid"
+    fi
+}
+
+resume_playback() {
+    local pid
+    pid="$(framing_pid)"
+    [[ -n "$pid" ]] && signal_tree CONT "$pid"
+    pid="$(player_pid)"
+    [[ -n "$pid" ]] && signal_tree CONT "$pid"
+}
 
 normalize() {
     printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z ' | tr -s ' '
@@ -100,8 +130,7 @@ cleanup() {
     pid="$(cat "$STREAM_PID_FILE" 2>/dev/null)"
     [[ -n "$pid" ]] && signal_tree TERM "$pid"
     # Never leave playback suspended.
-    pid="$(player_pid)"
-    [[ -n "$pid" ]] && signal_tree CONT "$pid"
+    resume_playback
     rm -f "$STATE_FILE" "$REC_PID_FILE" "$STREAM_PID_FILE"
 }
 trap cleanup EXIT
@@ -154,10 +183,24 @@ stem_of() {
 START_STEM="$(stem_of "$START_NORM")"
 STOP_STEM="$(stem_of "$STOP_NORM")"
 
+# True while the player has an afplay in flight — i.e., TTS audio is coming
+# out of the speakers, which the mic may hear (feedback).
+player_speaking() {
+    local pid
+    pid="$(player_pid)"
+    [[ -n "$pid" ]] && pgrep -P "$pid" -x afplay >/dev/null 2>&1
+}
+
 # $1 = joined two-line window, $2 = current line, $3 = full phrase, $4 = stem
+# Lenient stem matching is only allowed when no TTS audio is playing: the
+# played-back voice frequently says words like "transcribe" (it narrates work
+# on this very feature), and on speakers the mic hears it — a short leaked
+# segment must not count as a command. Over live audio, only the exact full
+# phrase triggers.
 matches_phrase() {
     local joined="$1" line="$2" phrase="$3" stem="$4"
     case "$joined" in *"$phrase"*) return 0 ;; esac
+    player_speaking && return 1
     [[ -n "$stem" && ${#stem} -ge 4 ]] || return 1
     local words
     words="$(printf '%s' "$line" | wc -w | tr -d ' ')"
@@ -175,15 +218,14 @@ log_lifecycle "listening for '$STT_WAKE_START_PHRASE' / '$STT_WAKE_STOP_PHRASE'"
 
 state="listening"
 dict_started=0
+dict_ended=0
 prev_line=""
 
 begin_dictation() {
     state="dictating"
     echo "dictating" > "$STATE_FILE"
     dict_started=$SECONDS
-    local pid
-    pid="$(player_pid)"
-    [[ -n "$pid" ]] && signal_tree STOP "$pid"
+    pause_playback
     chime "$STT_WAKE_START_SOUND"
     rm -f "$DICT_WAV"
     rec -b 16 -c 1 -r 16000 "$DICT_WAV" 2>"$SPOOL/dictation-rec.log" &
@@ -195,6 +237,7 @@ begin_dictation() {
 
 end_dictation() {
     state="listening"
+    dict_ended=$SECONDS
     echo "listening" > "$STATE_FILE"
     local rec_pid
     rec_pid="$(cat "$REC_PID_FILE" 2>/dev/null)"
@@ -236,9 +279,7 @@ PY
 )"
     fi
 
-    local pid
-    pid="$(player_pid)"
-    [[ -n "$pid" ]] && signal_tree CONT "$pid"
+    resume_playback
     tmux refresh-client -S 2>/dev/null || true
 
     if [[ -z "$text" ]]; then
@@ -266,7 +307,12 @@ while mode_active; do
         joined="$(normalize "$prev_line $line")"
         prev_line="$line"
         if [[ "$state" == "listening" ]]; then
-            if matches_phrase "$joined" "$norm_line" "$START_NORM" "$START_STEM"; then
+            # Cooldown after a dictation ends: the stop phrase's audio tail
+            # and the resumed playback are still in whisper's window and must
+            # not immediately re-trigger.
+            if (( SECONDS - dict_ended < 3 )); then
+                :
+            elif matches_phrase "$joined" "$norm_line" "$START_NORM" "$START_STEM"; then
                 log_lifecycle "start trigger: '$line'"
                 begin_dictation
                 prev_line=""
