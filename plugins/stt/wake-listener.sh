@@ -221,6 +221,20 @@ log_lifecycle "listening for '$STT_WAKE_TRANSCRIBE_WORD' / '$STT_WAKE_REPEAT_WOR
 state="listening"
 dict_started=0
 dict_ended=0
+# The word that just triggered lingers in whisper's ~6s sliding window and
+# re-appears in the next segment(s). Until a line WITHOUT that stem arrives,
+# the same command must not fire again — otherwise saying "transcribe" starts
+# dictation and its own echo immediately ends it.
+echo_stem=""
+
+line_has_stem() {
+    local line="$1" stem="$2" w
+    [[ -n "$stem" ]] || return 1
+    for w in $line; do
+        [[ "$w" == "$stem"* ]] && return 0
+    done
+    return 1
+}
 
 begin_dictation() {
     state="dictating"
@@ -351,26 +365,38 @@ exec 3< <(tail -n 0 -F "$WAKE_LOG" 2>/dev/null)
 while mode_active; do
     if read -t 1 -u 3 -r line; then
         norm_line="$(normalize "$line")"
+        # The triggered word has left the window once a line arrives without it.
+        if [[ -n "$echo_stem" ]] && ! line_has_stem "$norm_line" "$echo_stem"; then
+            echo_stem=""
+        fi
         if [[ "$state" == "listening" ]]; then
             # Cooldown after a dictation ends: the toggle word's audio tail
             # and the resumed playback are still in whisper's window and must
             # not immediately re-trigger.
             if (( SECONDS - dict_ended < 3 )); then
                 :
-            elif matches_word "$norm_line" "$TRANSCRIBE_STEM"; then
+            elif [[ "$echo_stem" != "$TRANSCRIBE_STEM" ]] \
+                && matches_word "$norm_line" "$TRANSCRIBE_STEM"; then
                 log_lifecycle "transcribe trigger: '$line'"
                 begin_dictation
-            elif matches_word "$norm_line" "$REPEAT_STEM"; then
+                echo_stem="$TRANSCRIBE_STEM"
+            elif [[ "$echo_stem" != "$REPEAT_STEM" ]] \
+                && matches_word "$norm_line" "$REPEAT_STEM"; then
                 log_lifecycle "repeat trigger: '$line'"
                 do_repeat
-            elif matches_word "$norm_line" "$SEND_STEM"; then
+                echo_stem="$REPEAT_STEM"
+            elif [[ "$echo_stem" != "$SEND_STEM" ]] \
+                && matches_word "$norm_line" "$SEND_STEM"; then
                 log_lifecycle "send trigger: '$line'"
                 do_send
+                echo_stem="$SEND_STEM"
             fi
         else
-            if matches_word "$norm_line" "$TRANSCRIBE_STEM" strict; then
+            if [[ "$echo_stem" != "$TRANSCRIBE_STEM" ]] \
+                && matches_word "$norm_line" "$TRANSCRIBE_STEM" strict; then
                 log_lifecycle "transcribe-end trigger: '$line'"
                 end_dictation
+                echo_stem="$TRANSCRIBE_STEM"
             fi
         fi
     fi
