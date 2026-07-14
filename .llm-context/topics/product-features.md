@@ -361,16 +361,24 @@ prose, skipping tool calls/results, spinners, echoed input, and other chrome.
 - **Never repeats**: a rolling 400-line spoken memory guarantees a line heard
   once is not spoken again (BUG-023); lifecycle + anchor diagnostics persist
   in `/tmp/para-llm-tts/stream.log`.
-- **Hands-free dictation** (`plugins/stt/wake-listener.sh`): while speak mode
-  is on, `whisper-stream` (tiny.en, auto-downloaded) listens continuously.
-  Say **"start transcription"** → chime, playback pauses (SIGSTOP tree),
-  status chip flips to red `🎤DICTATE`, sox records. Say **"stop
-  transcription"** → chime, full-quality transcription (base.en), phrases
-  stripped from the edges, text injected into the bound pane WITHOUT Enter
-  (review before submitting), playback resumes. Safety: silence/RMS guard,
-  120s max dictation, listener dies with the mode, sox + whisper-stream mic
-  sharing verified on macOS. Config: `STT_WAKE_ENABLED` (default 1),
-  `STT_WAKE_START_PHRASE`, `STT_WAKE_STOP_PHRASE`, `STT_WAKE_MAX_DICTATION`.
+- **Hands-free voice commands** (`plugins/stt/wake-listener.sh`): while speak
+  mode is on, `whisper-stream` (tiny.en, auto-downloaded) listens
+  continuously for three single words (stem-matched on short utterances, so
+  "transcription"/"transcribed" also work):
+  - **"transcribe"** — toggles dictation. Start: chime, playback truly
+    silenced (loop frozen + in-flight afplay killed), red `🎤DICTATE` chip,
+    sox records. Again: chime, full-quality transcription (base.en), toggle
+    word stripped from the edges (clipped/courtesy "stop" variants too),
+    text injected into the bound pane WITHOUT Enter, playback resumes.
+  - **"repeat"** — re-runs the recap (spoken summary of the pane), through
+    the mode's own audio queue.
+  - **"send"** — presses Enter in the bound pane (submits the dictation).
+  Feedback protection: while TTS audio is in flight only a one-word
+  utterance triggers; 3s cooldown after each dictation; word-prefix matching
+  (never substring). Safety: silence/RMS guard, 120s max dictation, listener
+  dies with the mode, sox + whisper-stream mic sharing verified on macOS.
+  Config: `STT_WAKE_ENABLED` (default 1), `STT_WAKE_TRANSCRIBE_WORD`,
+  `STT_WAKE_REPEAT_WORD`, `STT_WAKE_SEND_WORD`, `STT_WAKE_MAX_DICTATION`.
 
 **File**: `plugins/tts/toggle-stream.sh`, `plugins/tts/stream-watcher.sh`,
 `plugins/tts/stream-step.py`, `plugins/tts/stream-synth.sh`,

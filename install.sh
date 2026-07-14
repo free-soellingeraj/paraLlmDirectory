@@ -203,10 +203,11 @@ TTS_STREAM_FRAMING=1             # On enable: summarize what's happening in the 
 TTS_STREAM_REWRITE=1             # Rewrite streamed text into listenable narration via codex before speaking (0 = speak raw)
 TTS_STREAM_REWRITE_TIMEOUT="45"  # Max seconds per rewrite batch before falling back to raw text
 
-# Hands-free dictation while speak mode is on (wake-listener.sh)
-STT_WAKE_ENABLED=1               # Listen for the phrases below while speak mode is on (0 = off)
-STT_WAKE_START_PHRASE="start transcribe"       # Say this to begin dictating into the bound pane
-STT_WAKE_STOP_PHRASE="stop transcribe"         # Say this to transcribe + inject (no Enter pressed)
+# Hands-free voice commands while speak mode is on (wake-listener.sh)
+STT_WAKE_ENABLED=1               # Listen for the words below while speak mode is on (0 = off)
+STT_WAKE_TRANSCRIBE_WORD="transcribe"  # Toggles dictation: say it to start, say it again to inject (no Enter)
+STT_WAKE_REPEAT_WORD="repeat"    # Re-runs the recap (spoken summary of the pane)
+STT_WAKE_SEND_WORD="send"        # Presses Enter in the bound pane
 STT_WAKE_MAX_DICTATION="120"     # Force-end dictation after this many seconds (0 = no cap)
 # STT_LANGUAGE="en"
 # STT_MODEL_PATH=""  # Override model location (default: $PARA_LLM_ROOT/plugins/stt/models/ggml-base.en.bin)

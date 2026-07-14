@@ -32,8 +32,11 @@ if [[ -f "$BOOTSTRAP_FILE" ]]; then
     fi
 fi
 
-STT_WAKE_START_PHRASE="${STT_WAKE_START_PHRASE:-start transcribe}"
-STT_WAKE_STOP_PHRASE="${STT_WAKE_STOP_PHRASE:-stop transcribe}"
+# Single-word voice commands. "transcribe" toggles dictation; "repeat" re-runs
+# the recap; "send" presses Enter in the bound pane.
+STT_WAKE_TRANSCRIBE_WORD="${STT_WAKE_TRANSCRIBE_WORD:-transcribe}"
+STT_WAKE_REPEAT_WORD="${STT_WAKE_REPEAT_WORD:-repeat}"
+STT_WAKE_SEND_WORD="${STT_WAKE_SEND_WORD:-send}"
 STT_WAKE_MODEL="${STT_WAKE_MODEL:-ggml-tiny.en.bin}"
 STT_WAKE_STEP_MS="${STT_WAKE_STEP_MS:-2000}"
 STT_WAKE_MAX_DICTATION="${STT_WAKE_MAX_DICTATION:-120}"
@@ -167,21 +170,16 @@ if [[ ! -f "$MODEL_PATH" ]]; then
     fi
 fi
 
-START_NORM="$(normalize "$STT_WAKE_START_PHRASE")"
-STOP_NORM="$(normalize "$STT_WAKE_STOP_PHRASE")"
-
-# Whisper often clips the first word of a short command utterance (observed
-# live: saying "start transcription" produced only " transcription."), so a
-# full-phrase match alone is too strict. Fallback: a SHORT utterance (<=4
-# words) containing the key stem also triggers — the current state says
-# whether that means start or stop. The stem is the first 8 chars of the
-# phrase's last word, so "transcribe" also matches "transcription"/"transcribed".
-stem_of() {
-    local last="${1##* }"
-    printf '%s' "${last:0:8}"
+# Stems are the first 8 chars of each command word, so "transcribe" also
+# matches whisper renderings like "transcription"/"transcribed".
+stem8() {
+    local n
+    n="$(normalize "$1")"
+    printf '%s' "${n:0:8}"
 }
-START_STEM="$(stem_of "$START_NORM")"
-STOP_STEM="$(stem_of "$STOP_NORM")"
+TRANSCRIBE_STEM="$(stem8 "$STT_WAKE_TRANSCRIBE_WORD")"
+REPEAT_STEM="$(stem8 "$STT_WAKE_REPEAT_WORD")"
+SEND_STEM="$(stem8 "$STT_WAKE_SEND_WORD")"
 
 # True while the player has an afplay in flight — i.e., TTS audio is coming
 # out of the speakers, which the mic may hear (feedback).
@@ -191,22 +189,26 @@ player_speaking() {
     [[ -n "$pid" ]] && pgrep -P "$pid" -x afplay >/dev/null 2>&1
 }
 
-# $1 = joined two-line window, $2 = current line, $3 = full phrase, $4 = stem
-# Lenient stem matching is only allowed when no TTS audio is playing: the
-# played-back voice frequently says words like "transcribe" (it narrates work
-# on this very feature), and on speakers the mic hears it — a short leaked
-# segment must not count as a command. Over live audio, only the exact full
-# phrase triggers.
-matches_phrase() {
-    local joined="$1" line="$2" phrase="$3" stem="$4"
-    case "$joined" in *"$phrase"*) return 0 ;; esac
-    player_speaking && return 1
-    [[ -n "$stem" && ${#stem} -ge 4 ]] || return 1
-    local words
-    words="$(printf '%s' "$line" | wc -w | tr -d ' ')"
-    [[ "$words" -le 4 ]] || return 1
-    case "$line" in *"$stem"*) return 0 ;; esac
-    return 1
+# A command fires when a SHORT utterance contains a word starting with the
+# stem — word-prefix, not substring, so "send" never matches inside "ascend".
+# Thresholds tighten when leak risk is higher: while TTS audio is in flight
+# (the mic may hear the played voice) the utterance must be exactly one word,
+# and while dictating ($3 = strict) likewise — a lone "transcribe" ends the
+# take, but a sentence that merely mentions transcription stays content.
+matches_word() {
+    local line="$1" stem="$2" strict="${3:-}"
+    [[ -n "$stem" && ${#stem} -ge 3 ]] || return 1
+    local count=0 found=1 w
+    for w in $line; do
+        count=$((count + 1))
+        [[ "$w" == "$stem"* ]] && found=0
+    done
+    [[ "$found" -eq 0 ]] || return 1
+    if [[ -n "$strict" ]] || player_speaking; then
+        [[ "$count" -eq 1 ]]
+    else
+        [[ "$count" -le 3 ]]
+    fi
 }
 
 : > "$WAKE_LOG"
@@ -214,12 +216,11 @@ whisper-stream -m "$MODEL_PATH" -t 4 --step "$STT_WAKE_STEP_MS" --length 6000 \
     -f "$WAKE_LOG" >/dev/null 2>> "$SPOOL/error.log" &
 echo "$!" > "$STREAM_PID_FILE"
 echo "listening" > "$STATE_FILE"
-log_lifecycle "listening for '$STT_WAKE_START_PHRASE' / '$STT_WAKE_STOP_PHRASE'"
+log_lifecycle "listening for '$STT_WAKE_TRANSCRIBE_WORD' / '$STT_WAKE_REPEAT_WORD' / '$STT_WAKE_SEND_WORD'"
 
 state="listening"
 dict_started=0
 dict_ended=0
-prev_line=""
 
 begin_dictation() {
     state="dictating"
@@ -230,7 +231,7 @@ begin_dictation() {
     rm -f "$DICT_WAV"
     rec -b 16 -c 1 -r 16000 "$DICT_WAV" 2>"$SPOOL/dictation-rec.log" &
     echo "$!" > "$REC_PID_FILE"
-    tmux display-message -t "$PANE_ID" "🎤 Dictating… say '$STT_WAKE_STOP_PHRASE' to finish" 2>/dev/null || true
+    tmux display-message -t "$PANE_ID" "🎤 Dictating… say '$STT_WAKE_TRANSCRIBE_WORD' to finish" 2>/dev/null || true
     tmux refresh-client -S 2>/dev/null || true
     log_lifecycle "dictation started"
 }
@@ -266,14 +267,33 @@ end_dictation() {
     if [[ -n "$text" ]]; then
         # The stop phrase lands in the recording tail (and the start phrase
         # occasionally in the head) — strip them from the edges.
-        text="$(python3 - "$text" "$STT_WAKE_START_PHRASE" "$STT_WAKE_STOP_PHRASE" <<'PY'
+        text="$(python3 - "$text" "$STT_WAKE_TRANSCRIBE_WORD" "$STT_WAKE_TRANSCRIBE_WORD" <<'PY'
 import re, sys
 text, start, stop = sys.argv[1], sys.argv[2], sys.argv[3]
-def edge_pattern(phrase):
-    words = [re.escape(w) for w in phrase.split()]
-    return r"[\s.,!?]*" + r"[\s.,!?]+".join(words) + r"[\s.,!?]*"
-text = re.sub(r"(?i)^" + edge_pattern(start), " ", text)
-text = re.sub(r"(?i)" + edge_pattern(stop) + r"$", " ", text)
+
+# Strip the toggle word from the transcript edges by STEM (first 8 chars of
+# the word, so transcribe/transcription/transcribed all match), tolerating a
+# courtesy "start/stop" said out of habit. The tail rule requires whitespace
+# before the stem so the preceding sentence keeps its own punctuation.
+def clipped_core(phrase):
+    words = phrase.split()
+    stems = [re.escape(w[:8]) for w in words if len(w) >= 6]
+    shorts = [re.escape(w) for w in words if len(w) < 6]
+    if not stems:
+        return None
+    core = r"(?:%s)\w*" % "|".join(stems)
+    # Habit tolerance: "stop transcribe." at the tail should strip fully even
+    # though the command word is just "transcribe".
+    shorts = shorts or ["start", "stop", "begin", "end"]
+    opt = r"(?:(?:%s)[\s.,!?]+)?" % "|".join(shorts)
+    return opt + core
+
+head = clipped_core(start)
+tail = clipped_core(stop)
+if head:
+    text = re.sub(r"(?i)^[\s.,!?]*" + head + r"[\s.,!?]*", " ", text)
+if tail:
+    text = re.sub(r"(?i)\s+" + tail + r"[\s.,!?]*$", "", text)
 print(text.strip())
 PY
 )"
@@ -295,6 +315,33 @@ PY
     log_lifecycle "dictation injected: ${#text} chars"
 }
 
+# "repeat that": run the recap routine again (the speak-mode equivalent of
+# Ctrl+b p) — scan back, summarize, speak, then resume streaming. Plays
+# through the mode's own audio queue, so no playback-slot conflict.
+do_repeat() {
+    local fpid
+    fpid="$(framing_pid)"
+    if [[ -n "$fpid" ]] && kill -0 "$fpid" 2>/dev/null; then
+        log_lifecycle "repeat-that ignored: recap already running"
+        return 0
+    fi
+    log_lifecycle "repeat-that: recap requested"
+    chime "$STT_WAKE_START_SOUND"
+    touch "$SPOOL/framing.lock"
+    nohup "$SCRIPT_DIR/../tts/stream-framing.sh" "$PANE_ID" "$SPOOL" >/dev/null 2>&1 &
+    echo "$!" > "$SPOOL/framing.pid"
+    tmux display-message -t "$PANE_ID" "🔁 Recapping…" 2>/dev/null || true
+}
+
+# "send that": press Enter in the bound pane — submits whatever the earlier
+# dictation left in the input box.
+do_send() {
+    log_lifecycle "send-that: Enter sent"
+    chime "$STT_WAKE_STOP_SOUND"
+    tmux send-keys -t "$PANE_ID" Enter 2>/dev/null || true
+    tmux display-message -t "$PANE_ID" "📨 Sent" 2>/dev/null || true
+}
+
 # Follow the whisper-stream transcript. read -t keeps the loop ticking so the
 # max-dictation timeout and mode checks run even when nobody is speaking.
 # Matching uses the last two lines joined, so a phrase split across two
@@ -304,24 +351,26 @@ exec 3< <(tail -n 0 -F "$WAKE_LOG" 2>/dev/null)
 while mode_active; do
     if read -t 1 -u 3 -r line; then
         norm_line="$(normalize "$line")"
-        joined="$(normalize "$prev_line $line")"
-        prev_line="$line"
         if [[ "$state" == "listening" ]]; then
-            # Cooldown after a dictation ends: the stop phrase's audio tail
+            # Cooldown after a dictation ends: the toggle word's audio tail
             # and the resumed playback are still in whisper's window and must
             # not immediately re-trigger.
             if (( SECONDS - dict_ended < 3 )); then
                 :
-            elif matches_phrase "$joined" "$norm_line" "$START_NORM" "$START_STEM"; then
-                log_lifecycle "start trigger: '$line'"
+            elif matches_word "$norm_line" "$TRANSCRIBE_STEM"; then
+                log_lifecycle "transcribe trigger: '$line'"
                 begin_dictation
-                prev_line=""
+            elif matches_word "$norm_line" "$REPEAT_STEM"; then
+                log_lifecycle "repeat trigger: '$line'"
+                do_repeat
+            elif matches_word "$norm_line" "$SEND_STEM"; then
+                log_lifecycle "send trigger: '$line'"
+                do_send
             fi
         else
-            if matches_phrase "$joined" "$norm_line" "$STOP_NORM" "$STOP_STEM"; then
-                log_lifecycle "stop trigger: '$line'"
+            if matches_word "$norm_line" "$TRANSCRIBE_STEM" strict; then
+                log_lifecycle "transcribe-end trigger: '$line'"
                 end_dictation
-                prev_line=""
             fi
         fi
     fi
