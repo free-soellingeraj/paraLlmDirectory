@@ -326,8 +326,11 @@ prose, skipping tool calls/results, spinners, echoed input, and other chrome.
 - **Binding**: bound to exactly one pane at a time. Press in the bound pane to
   turn it off; press in a different pane to move the mode there. (Note:
   `Ctrl+b o` overrides tmux's default "cycle panes" binding.)
-- **Status line**: shows `🔊SPEAK %N` (green) while active; updates instantly
-  on toggle via `tmux refresh-client -S`.
+- **Indicators** (all focus-independent): the bound pane's background is
+  tinted purple (`TTS_STREAM_TINT`, per-pane window-style), its border title
+  shows a magenta `🔊 SPEAKING` chip, and the status line shows
+  `🔊SPEAK <env-name>` (label = env dir name, resolved at enable time).
+  Updates instantly on toggle via `tmux refresh-client -S`.
 - **Pipeline** (three workers per bound pane, spool under
   `/tmp/para-llm-tts/<pane>.stream/`):
   - `stream-watcher.sh` polls `capture-pane` (default 0.7s), filters chrome
@@ -340,9 +343,13 @@ prose, skipping tool calls/results, spinners, echoed input, and other chrome.
 - **Interplay**: speak mode owns the audio channel — enabling it stops any
   one-shot playback, and `Ctrl+b p` is refused while speak mode is on.
   Closing the bound pane tears the whole mode down automatically.
-- **Config** (`$PARA_LLM_ROOT/config`): `TTS_STREAM_POLL_INTERVAL` (0.7),
+- **Config** (`$PARA_LLM_ROOT/config`): `TTS_STREAM_POLL_INTERVAL` (0.4),
   `TTS_STREAM_FLUSH_SECS` (4 — speak unterminated headers/bullets after this
-  quiet period), `TTS_STREAM_ENGINE` (`edge-tts` | `say`).
+  quiet period), `TTS_STREAM_ENGINE` (`edge-tts` | `say`),
+  `TTS_STREAM_TINT` (bound-pane background colour, empty to disable).
+- **Never repeats**: a rolling 400-line spoken memory guarantees a line heard
+  once is not spoken again (BUG-023); lifecycle + anchor diagnostics persist
+  in `/tmp/para-llm-tts/stream.log`.
 
 **File**: `plugins/tts/toggle-stream.sh`, `plugins/tts/stream-watcher.sh`,
 `plugins/tts/stream-step.py`, `plugins/tts/stream-synth.sh`,

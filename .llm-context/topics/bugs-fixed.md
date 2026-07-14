@@ -180,6 +180,21 @@ Log of bugs encountered and fixed in the para-llm-directory project. Each entry 
 **Fix**: Three layers: (1) workers and their PID files are set up BEFORE `stream.pane` is announced; (2) each worker waits up to ~2s for the mode file instead of exiting on a not-yet-on mode; (3) the status script only treats `stream.pane` as stale after a 15s grace period.
 **File**: `plugins/tts/toggle-stream.sh`, `plugins/tts/stream-watcher.sh`, `plugins/tts/stream-synth.sh`, `plugins/tts/stream-player.sh`, `plugins/tts/stream-status.sh`
 
+### BUG-023: Speak mode looped the same messages repeatedly
+**Date**: 2026-07-14
+**Symptom**: Speak mode re-spoke the same Claude messages over and over instead of only new text.
+**Cause**: When the anchor's newest lines flicker (overlay, re-render, expanding tool output pushing prose out of the viewport and back), the anchor match falls back to an earlier block and still-visible text "re-settles" — every flicker cycle replayed it.
+**Fix**: Rolling spoken-lines memory (`spoken.recent`, last 400 lines) in `stream-step.py`: a settled line heard before is never queued again, so anchor confusion degrades to a silent no-op. The anchor still advances over ALL settled lines to track screen position. Suppression/resync events are mirrored to the persistent `/tmp/para-llm-tts/stream.log` (the in-spool events.log dies with the spool on teardown, which had destroyed post-mortem evidence twice).
+**Trade-off**: an identical line genuinely repeated within recent memory stays silent.
+**File**: `plugins/tts/stream-step.py`
+
+### BUG-024: Speak indicator — frame vanished on focus change; label showed an unknown branch
+**Date**: 2026-07-14
+**Symptom**: The magenta frame disappeared as soon as another pane was focused, leaving no way to tell which pane was bound; the status chip read "SPEAK accounts-local-identity", a name the user didn't recognize.
+**Cause**: (1) Tiled pane borders are SHARED between neighbours; on focus change the active pane's frame overpaints the shared segments, so a border is inherently focus-dependent. (2) The label used `git branch --show-current`, but agents switch branches inside env worktrees mid-session — the chip showed the agent's transient branch, not the env.
+**Fix**: (1) The bound pane gets a purple background tint via per-pane `window-style` (verified truly pane-scoped, unlike `pane-border-style`/BUG-021; applied with `set-option -p`, not `select-pane -P`, which can move focus). Focus-independent; `TTS_STREAM_TINT` configures it, empty disables. (2) Label priority is now env dir name > branch > basename, resolved once at enable time.
+**File**: `plugins/tts/toggle-stream.sh`, `plugins/tts/stream-watcher.sh`
+
 ---
 
 ## Known Bug-Prone Areas
