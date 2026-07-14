@@ -29,7 +29,11 @@ spool = sys.argv[1]
 max_chars = max(80, int(os.environ.get("TTS_SYNTH_CHARS", "180") or "180"))
 flush_secs = float(os.environ.get("TTS_STREAM_FLUSH_SECS", "4") or "4")
 
-ANCHOR_LINES = 8
+# Deep anchor: Claude Code can restructure its whole active region at once
+# (tool blocks expanding/collapsing), wiping every recent line. A deep anchor
+# reaches back into stable transcript/history so a full loss is rare; the
+# suffix/newest trimming in find_anchor_end keeps deep anchors cheap to match.
+ANCHOR_LINES = 24
 
 cur_path = os.path.join(spool, "cur.txt")
 prev_path = os.path.join(spool, "prev.txt")
@@ -157,13 +161,27 @@ else:
 spoken_recent = read_lines(spoken_path) or []
 spoken_set = set(spoken_recent)
 
+recovered = False
+if i_cur is None and spk_prev:
+    # Anchor vanished, but the previous poll is only one interval old — its
+    # tail is a fresher anchor candidate. Recovering through it means a TUI
+    # restructure only delays speech by a poll instead of skipping everything
+    # visible. (The spoken-lines memory makes a misjudged recovery harmless.)
+    i_rec, rec_block = find_anchor_end(spk_cur, spk_prev[-ANCHOR_LINES:])
+    if i_rec is not None and rec_block:
+        log_event("anchor lost; recovered via prev-tail (%d lines at %d)"
+                  % (len(rec_block), i_rec), persist=True)
+        anchor = rec_block
+        recovered = True  # settle nothing this poll; next poll resumes normally
+
 if i_cur is None:
-    # Anchor vanished: pane cleared, screen switched, or output flooded past
-    # the viewport between polls. Re-anchor to now rather than re-speak or
-    # guess; the skipped text is logged.
-    log_event("resync: anchor lost; re-anchoring on %d lines" % len(spk_cur),
-              persist=True)
-    anchor = spk_cur[-ANCHOR_LINES:]
+    if not recovered:
+        # Recovery also failed: pane cleared, screen switched, or output
+        # flooded past the viewport between polls. Re-anchor to now rather
+        # than re-speak or guess; the skipped text is logged.
+        log_event("resync: anchor lost; re-anchoring on %d lines" % len(spk_cur),
+                  persist=True)
+        anchor = spk_cur[-ANCHOR_LINES:]
 else:
     new_cur = spk_cur[i_cur:]
     new_prev = spk_prev[i_prev:] if i_prev is not None else []
