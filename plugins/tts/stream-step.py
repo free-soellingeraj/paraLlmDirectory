@@ -35,9 +35,19 @@ cur_path = os.path.join(spool, "cur.txt")
 prev_path = os.path.join(spool, "prev.txt")
 anchor_path = os.path.join(spool, "anchor.txt")
 pending_path = os.path.join(spool, "pending.txt")
+spoken_path = os.path.join(spool, "spoken.recent")
 chunks_dir = os.path.join(spool, "chunks")
 next_path = os.path.join(chunks_dir, ".next")
 events_path = os.path.join(spool, "events.log")
+
+# The spool is deleted on teardown, taking events.log with it — mirror the
+# diagnostic events into the persistent per-mode log next to the spool.
+persist_log = os.path.join(os.path.dirname(spool.rstrip("/")), "stream.log")
+pane_tag = os.path.basename(spool.rstrip("/")).replace(".stream", "")
+
+# Never re-speak a line heard recently: any anchor confusion (re-render,
+# scroll, trim) then degrades to a silent no-op instead of a repeat loop.
+SPOKEN_MEMORY = 400
 
 
 def read_lines(path):
@@ -61,9 +71,16 @@ def write_text(path, text):
         f.write(text)
 
 
-def log_event(msg):
+def log_event(msg, persist=False):
+    line = "%s  %s\n" % (time.strftime("%H:%M:%S"), msg)
     with open(events_path, "a") as f:
-        f.write("%s  %s\n" % (time.strftime("%H:%M:%S"), msg))
+        f.write(line)
+    if persist:
+        try:
+            with open(persist_log, "a") as f:
+                f.write("%s  step[%%%s]  %s\n" % (time.strftime("%F %T"), pane_tag, msg))
+        except OSError:
+            pass
 
 
 # Lines that must never reach the diff: anything that churns while the agent
@@ -137,11 +154,15 @@ else:
     # Empty anchor (pane was empty at enable): everything is candidate text.
     i_cur, i_prev, matched = 0, 0, []
 
+spoken_recent = read_lines(spoken_path) or []
+spoken_set = set(spoken_recent)
+
 if i_cur is None:
     # Anchor vanished: pane cleared, screen switched, or output flooded past
     # the viewport between polls. Re-anchor to now rather than re-speak or
     # guess; the skipped text is logged.
-    log_event("resync: anchor lost; re-anchoring on %d lines" % len(spk_cur))
+    log_event("resync: anchor lost; re-anchoring on %d lines" % len(spk_cur),
+              persist=True)
     anchor = spk_cur[-ANCHOR_LINES:]
 else:
     new_cur = spk_cur[i_cur:]
@@ -151,14 +172,23 @@ else:
         if a != b:
             break
         settled.append(a)
-    # Rebuild the anchor from the block that matched — keeping trimmed-away
-    # stale lines would leave a block that can never match again.
+    # The anchor tracks screen position for ALL settled lines, but only lines
+    # not heard recently reach the speech queue — an anchor re-match at an
+    # earlier point (after a re-render or trim) must not replay old text.
     if settled:
-        block = "\n".join(settled).strip()
+        fresh = [l for l in settled if l not in spoken_set]
+        suppressed = len(settled) - len(fresh)
+        if suppressed:
+            log_event("suppressed %d already-spoken line(s) (anchor matched "
+                      "%d/%d lines at %d)" % (suppressed, len(matched),
+                                              len(anchor), i_cur), persist=True)
+        block = "\n".join(fresh).strip()
         if block:
             pending = (pending.rstrip() + "\n" + block) if pending.strip() else block
             grew = True
         anchor = (matched + settled)[-ANCHOR_LINES:]
+        spoken_recent = (spoken_recent + [l for l in settled if l.strip()])[-SPOKEN_MEMORY:]
+        write_text(spoken_path, "\n".join(spoken_recent))
     elif matched != anchor:
         anchor = matched
 
