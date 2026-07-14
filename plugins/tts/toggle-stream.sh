@@ -56,20 +56,20 @@ log_lifecycle() {
 }
 
 # Human-meaningful name for the bound pane, resolved ONCE at enable time while
-# the pane is guaranteed alive: git branch, else env dir name, else basename.
-# The status script reads the stored result — re-deriving it later through a
-# dead pane id would silently read a DIFFERENT pane (display-message falls
-# back instead of failing).
+# the pane is guaranteed alive. The ENV DIRECTORY name comes first — it's how
+# panes are identified in this workflow and it's stable; the checked-out git
+# branch is NOT (agents switch branches inside the worktree mid-session, which
+# made the chip show a branch nobody recognized). The status script reads the
+# stored result — re-deriving it later through a dead pane id would silently
+# read a DIFFERENT pane (display-message falls back instead of failing).
 resolve_label() {
-    local pane_path label
+    local pane_path label=""
     pane_path="$(tmux display-message -pt "$PANE_ID" '#{pane_current_path}' 2>/dev/null)"
-    label="$(git -C "$pane_path" branch --show-current 2>/dev/null)"
-    if [[ -z "$label" && -n "$pane_path" ]]; then
-        case "$pane_path" in
-            */envs/*) label="${pane_path#*/envs/}"; label="${label%%/*}" ;;
-            *)        label="${pane_path##*/}" ;;
-        esac
-    fi
+    case "$pane_path" in
+        */envs/*) label="${pane_path#*/envs/}"; label="${label%%/*}" ;;
+    esac
+    [[ -z "$label" ]] && label="$(git -C "$pane_path" branch --show-current 2>/dev/null)"
+    [[ -z "$label" && -n "$pane_path" ]] && label="${pane_path##*/}"
     [[ -z "$label" ]] && label="pane $SAFE_PANE_ID"
     echo "${label:0:24}"
 }
@@ -96,20 +96,32 @@ release_toggle_lock() {
 }
 trap release_toggle_lock EXIT
 
-# Pane-border indicator: the bound pane gets @speak_on, a true pane-scoped
-# user option. The magenta border and "🔊 SPEAKING" chip come from GLOBAL
-# pane-border-style / pane-border-format conditionals on @speak_on (see
-# install.sh) — pane-border-style itself is a window option, so setting it
-# "per pane" here would actually paint every border in the window (BUG-021).
-# The option vanishes with the pane, so death cleanup is automatic.
+# Bound-pane indicator, three layers:
+#   1. @speak_on (true pane-scoped user option) drives the "🔊 SPEAKING" chip
+#      and magenta border via GLOBAL pane-border-format/style conditionals
+#      (see install.sh) — pane-border-style is a window option, so setting it
+#      "per pane" here would paint every border in the window (BUG-021).
+#   2. A purple background tint on the pane content itself (select-pane -P →
+#      per-pane window-style). Tiled borders are SHARED between neighbours and
+#      get overpainted when focus moves, so the border alone stops marking the
+#      pane the moment you click elsewhere — the tint is focus-independent.
+# Pane options vanish with the pane, so death cleanup is automatic.
+SPEAK_TINT="${TTS_STREAM_TINT-#3a2044}"   # set TTS_STREAM_TINT="" to disable
+
 mark_pane() {
     local pane="$1"
     tmux set-option -pt "$pane" @speak_on 1 2>/dev/null || true
+    # window-style IS pane-scoped (verified: does not leak to window scope).
+    # set-option rather than select-pane -P, which can also move focus.
+    if [[ -n "$SPEAK_TINT" ]]; then
+        tmux set-option -pt "$pane" window-style "bg=$SPEAK_TINT" 2>/dev/null || true
+    fi
 }
 
 unmark_pane() {
     local pane="$1"
     tmux set-option -pt "$pane" -u @speak_on 2>/dev/null || true
+    tmux set-option -pt "$pane" -u window-style 2>/dev/null || true
 }
 
 stop_stream_for_pane() {

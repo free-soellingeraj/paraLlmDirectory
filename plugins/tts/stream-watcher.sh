@@ -61,8 +61,9 @@ teardown_dead_pane() {
         rm -f "$STREAM_PANE_FILE"
     fi
     # The pane is gone so its options usually died with it, but unmark anyway
-    # in case the id was reused — a stale @speak_on would frame a random pane.
+    # in case the id was reused — a stale @speak_on/tint would mark a random pane.
     tmux set-option -pt "$PANE_ID" -u @speak_on 2>/dev/null || true
+    tmux set-option -pt "$PANE_ID" -u window-style 2>/dev/null || true
     local f pid
     for f in "$SPOOL/synth.pid" "$SPOOL/player.pid"; do
         pid="$(cat "$f" 2>/dev/null)"

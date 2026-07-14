@@ -198,6 +198,7 @@ TTS_AUTHORED_MAX_AGE="900"       # Seconds an agent-authored voice script (voice
 TTS_STREAM_POLL_INTERVAL="0.4"   # How often (seconds) to poll the bound pane for new text
 TTS_STREAM_FLUSH_SECS="4"        # Speak un-terminated text (headers, bullets) after this quiet period
 TTS_STREAM_ENGINE="edge-tts"     # "edge-tts" (network, better voice) or "say" (local, lower latency)
+TTS_STREAM_TINT="#3a2044"        # Background tint of the pane being listened to (empty to disable)
 # STT_LANGUAGE="en"
 # STT_MODEL_PATH=""  # Override model location (default: $PARA_LLM_ROOT/plugins/stt/models/ggml-base.en.bin)
 EOF
