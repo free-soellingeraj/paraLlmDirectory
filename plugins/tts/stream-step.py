@@ -5,16 +5,19 @@ emit sentence chunks for synthesis.
 Called by stream-watcher.sh once per poll with the spool dir as argv[1].
 State lives in files so each step is a fresh process:
 
-  cur.txt       filtered transcript captured this poll (input, written by watcher)
-  prev.txt      filtered transcript from the previous poll
-  spoken.count  number of transcript lines already handed to the synth queue
-  pending.txt   settled text waiting for a sentence boundary
-  chunks/NNN.txt      emitted chunks, consumed in order by stream-synth.sh
-  chunks/.next        next chunk sequence number
+  cur.txt      filtered transcript captured this poll (input, written by watcher)
+  prev.txt     speakable lines from the previous poll
+  anchor.txt   the last few lines already consumed (content, not indices)
+  pending.txt  settled text waiting for a sentence boundary
+  chunks/NNNNN.txt   emitted chunks, consumed in order by stream-synth.sh
+  chunks/.next       next chunk sequence number
 
-A transcript line is "settled" once it is identical across two consecutive
-polls — that excludes the TUI's mutating tail (spinner, input box, the
-paragraph still being streamed) without needing to understand the TUI.
+Anchoring is by CONTENT, not line index: Claude Code (and other TUIs) run on
+the alternate screen, where the capture is just the viewport and every line
+shifts up as output scrolls. We find the last occurrence of the anchor block
+in the new capture; whatever follows it is candidate text. A candidate line is
+"settled" (safe to speak) once it appears identically in two consecutive polls
+— that excludes the still-streaming tail without understanding the TUI.
 """
 
 import os
@@ -26,9 +29,11 @@ spool = sys.argv[1]
 max_chars = max(80, int(os.environ.get("TTS_SYNTH_CHARS", "180") or "180"))
 flush_secs = float(os.environ.get("TTS_STREAM_FLUSH_SECS", "4") or "4")
 
+ANCHOR_LINES = 8
+
 cur_path = os.path.join(spool, "cur.txt")
 prev_path = os.path.join(spool, "prev.txt")
-spoken_path = os.path.join(spool, "spoken.count")
+anchor_path = os.path.join(spool, "anchor.txt")
 pending_path = os.path.join(spool, "pending.txt")
 chunks_dir = os.path.join(spool, "chunks")
 next_path = os.path.join(chunks_dir, ".next")
@@ -61,81 +66,100 @@ def log_event(msg):
         f.write("%s  %s\n" % (time.strftime("%H:%M:%S"), msg))
 
 
-cur = read_lines(cur_path) or []
-prev = read_lines(prev_path)
-
-if prev is None:
-    # First poll: anchor to the current transcript so we only ever speak text
-    # that arrives after speak mode was enabled.
-    write_text(prev_path, "\n".join(cur))
-    write_text(spoken_path, str(len(cur)))
-    log_event("anchored at line %d" % len(cur))
-    sys.exit(0)
-
-try:
-    spoken = int(read_text(spoken_path).strip() or "0")
-except ValueError:
-    spoken = len(cur)
-
-# Longest common prefix (in lines) of the two captures. Everything below it is
-# stable scrollback; everything at/after it changed this poll and must wait.
-settled = 0
-limit = min(len(prev), len(cur))
-while settled < limit and prev[settled] == cur[settled]:
-    settled += 1
-
-# Lines we speak vs. skip. The shared chrome filter already ran; these are the
-# streaming-specific drops: tool invocations/results, echoed user input,
-# spinner/status glyphs, deep-indented continuation output.
+# Lines that must never reach the diff: anything that churns while the agent
+# works (spinners, timers, token counters, prompt, separators) would otherwise
+# destabilize settling, and tool chatter isn't speech. The shared chrome
+# filter (filter-pane-text.sh) already ran in the watcher; these are the
+# streaming-specific drops, applied BEFORE anchoring so cur/prev only ever
+# contain speakable transcript lines.
 DROP_PATTERNS = [
-    re.compile(r"^\s*⎿"),                # tool result marker
-    re.compile(r"^\s{4,}"),              # tool output continuation / code indent
-    re.compile(r"^\s*>\s"),              # echoed user prompt
-    re.compile(r"^\s*[✻✽✶✳✢∴☐☒⚒]"),      # spinner / todo / status glyphs
-    re.compile(r"^⏺\s+\w[\w-]*\("),      # tool call lines like "⏺ Bash(ls)"
+    re.compile(r"^\s*⎿"),                    # tool result marker
+    re.compile(r"^\s{4,}"),                  # tool output continuation / code indent
+    re.compile(r"^\s*[>❯›]\s?"),             # prompt line / echoed user input
+    re.compile(r"^\s*[✻✽✶✳✢∴☐☒⚒·•▸▪]"),      # spinner / status / todo glyphs
+    re.compile(r"^⏺\s+\w[\w-]*\("),          # finalized tool line: "⏺ Bash(ls)"
+    re.compile(r"^⏺.*…\s*$"),                # transient progress: "⏺ Running 2 shell commands…"
+    re.compile(r"^\s*[─═━┄┈╌\-_=]{4,}\s*$"), # separators / rules
     re.compile(r"\?\s+for shortcuts"),
     re.compile(r"[Bb]ypassing [Pp]ermissions"),
-    re.compile(r"^\s*[-+═─—]{3,}\s*$"),  # rules / separators
+    re.compile(r"\(ctrl\+"),                 # inline keyboard hints
+    re.compile(r"↓.*tokens|tokens\)"),       # token counters
+    re.compile(r"esc to interrupt"),
 ]
 
 
 def speakable(line):
-    return not any(p.search(line) for p in DROP_PATTERNS)
+    return line.strip() and not any(p.search(line) for p in DROP_PATTERNS)
 
+
+def find_anchor_end(lines, anchor):
+    """Index just past the LAST occurrence of the anchor block in lines.
+
+    Falls back to progressively shorter suffixes of the anchor (dropping the
+    oldest lines first) so an anchor whose top scrolled out of the viewport
+    can still match. Returns None if even the newest single line is gone —
+    that means a real rewrite (clear/screen switch) or an output flood.
+    """
+    for start in range(len(anchor)):
+        block = anchor[start:]
+        if not block:
+            break
+        for i in range(len(lines) - len(block), -1, -1):
+            if lines[i:i + len(block)] == block:
+                return i + len(block)
+    return None
+
+
+cur = read_lines(cur_path) or []
+spk_cur = [l for l in cur if speakable(l)]
+spk_prev = read_lines(prev_path)
+anchor = read_lines(anchor_path) or []
+
+if spk_prev is None:
+    # First poll: anchor to what's on screen so we only speak what comes next.
+    write_text(prev_path, "\n".join(spk_cur))
+    write_text(anchor_path, "\n".join(spk_cur[-ANCHOR_LINES:]))
+    log_event("anchored on %d speakable lines" % len(spk_cur))
+    sys.exit(0)
 
 old_pending = read_text(pending_path)
 pending = old_pending
 grew = False
 
-# The last line or two of a transcript mutate in place (the paragraph still
-# being streamed, a shell prompt gaining typed text). A small dip of the
-# common prefix below the anchor is that tail churn — un-anchor those lines so
-# their final form is spoken once it settles. Only a large divergence means
-# the screen was really rewritten (clear, screen switch, scrollback trim).
-TAIL_WINDOW = 3
-
-if settled < spoken:
-    if spoken - settled <= TAIL_WINDOW:
-        spoken = settled
-    else:
-        # Re-anchor to what's visible now instead of re-speaking history.
-        log_event("resync: settled=%d < spoken=%d; re-anchoring at %d"
-                  % (settled, spoken, len(cur)))
-        spoken = len(cur)
+if anchor:
+    i_cur = find_anchor_end(spk_cur, anchor)
+    i_prev = find_anchor_end(spk_prev, anchor)
 else:
-    fresh = [l for l in cur[spoken:settled] if speakable(l)]
-    block = "\n".join(fresh).strip()
-    if block:
-        pending = (pending.rstrip() + "\n" + block) if pending.strip() else block
-        grew = True
-    spoken = settled if settled > spoken else spoken
+    # Empty anchor (pane was empty at enable): everything is candidate text.
+    i_cur, i_prev = 0, 0
 
-write_text(prev_path, "\n".join(cur))
-write_text(spoken_path, str(spoken))
+if i_cur is None:
+    # Anchor vanished: pane cleared, screen switched, or output flooded past
+    # the viewport between polls. Re-anchor to now rather than re-speak or
+    # guess; the skipped text is logged.
+    log_event("resync: anchor lost; re-anchoring on %d lines" % len(spk_cur))
+    anchor = spk_cur[-ANCHOR_LINES:]
+else:
+    new_cur = spk_cur[i_cur:]
+    new_prev = spk_prev[i_prev:] if i_prev is not None else []
+    settled = []
+    for a, b in zip(new_prev, new_cur):
+        if a != b:
+            break
+        settled.append(a)
+    if settled:
+        block = "\n".join(settled).strip()
+        if block:
+            pending = (pending.rstrip() + "\n" + block) if pending.strip() else block
+            grew = True
+        anchor = (anchor + settled)[-ANCHOR_LINES:]
+
+write_text(prev_path, "\n".join(spk_cur))
+write_text(anchor_path, "\n".join(anchor))
 
 
 def normalize(text):
-    text = text.replace("⏺", " ").replace("●", " ").replace("•", " ")
+    text = text.replace("⏺", " ").replace("●", " ")
     text = re.sub(r"[*_`#|]+", " ", text)
     text = re.sub(r"\s+", " ", text)
     return text.strip()

@@ -158,6 +158,14 @@ Log of bugs encountered and fixed in the para-llm-directory project. Each entry 
 **Follow-up**: A wedged orphan (`STAT=S`, alive ~24h) survived the in-script `kill` — sox installs its own SIGTERM handler and can ignore TERM during CoreAudio teardown, so adoption alone didn't clear it. Added `kill_recorder()` which sends SIGTERM, waits ~3s, then escalates to an uncatchable `kill -9`. Used by both `stop_and_transcribe` and the pre-start orphan guard (the guard now loops `pgrep`→`kill_recorder` instead of a single `pkill -TERM`). User-side: a stuck pre-fix orphan needs `kill -9 <pid>` once (`kill` alone won't take it).
 **File**: `plugins/stt/toggle-stt.sh:38-54` (orphan adoption), `:57-72` (kill_recorder), `:84-91` (escalating orphan guard), `:104-108` (stop path)
 
+### BUG-020: Speak mode (Ctrl+b o) silent on real Claude Code panes
+**Date**: 2026-07-14
+**Symptom**: Speak mode showed its 🔊SPEAK status indicator but never spoke anything from a pane running Claude Code, even as responses streamed. Worked fine in plain shell panes during development testing.
+**Cause**: Two compounding issues. (1) Claude Code's TUI runs on the **alternate screen** (`alternate_on=1`, empty history), so `capture-pane -S -` returns only the ~viewport, and every line **shifts position** as output scrolls — the index-based common-prefix anchor could never hold. (2) The current Claude Code chrome (spinner `✶ Working… (12s · ↓ 6.1k tokens)`, `❯` prompt, `──` separators, live tool timers) was not filtered before diffing, so 4–5 tail lines churned every poll; the churn always exceeded the 3-line tail tolerance, so every poll took the "screen rewrite" resync path and re-anchored past all new text — swallowing everything.
+**Fix**: `stream-step.py` rewritten: (1) all churn-prone chrome is dropped **before** diffing (spinners, prompts, separators, tool lines, token counters, keyboard hints), so cur/prev only contain speakable transcript lines; (2) anchoring is now by **content** — the last ≤8 consumed lines are located as a block (last occurrence, progressively shorter suffixes for scroll-off) in each new capture, making the diff immune to line-index shifts from alternate-screen scrolling. Verified by replaying real Claude Code captures and an alt-screen fake-TUI simulator end-to-end.
+**Gotcha for future capture work**: `tmux display-message -pt <dead-pane>` exits 0 (falls back to another target) — pane liveness needs `list-panes -a` + exact match (already handled in `stream-watcher.sh`).
+**File**: `plugins/tts/stream-step.py`, `plugins/tts/stream-watcher.sh`
+
 ---
 
 ## Known Bug-Prone Areas

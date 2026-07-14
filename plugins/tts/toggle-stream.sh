@@ -71,10 +71,28 @@ release_toggle_lock() {
 }
 trap release_toggle_lock EXIT
 
+# Pane-border indicator: green border + 🔊SPEAK marker on the bound pane
+# (pane-border-format shows @speak_on; see install.sh). Options are per-pane
+# and vanish with the pane, so death cleanup is automatic.
+mark_pane() {
+    local pane="$1"
+    tmux set-option -pt "$pane" @speak_on 1 2>/dev/null || true
+    tmux set-option -pt "$pane" pane-border-style 'fg=green' 2>/dev/null || true
+    tmux set-option -pt "$pane" pane-active-border-style 'fg=green,bold' 2>/dev/null || true
+}
+
+unmark_pane() {
+    local pane="$1"
+    tmux set-option -pt "$pane" -u @speak_on 2>/dev/null || true
+    tmux set-option -pt "$pane" -u pane-border-style 2>/dev/null || true
+    tmux set-option -pt "$pane" -u pane-active-border-style 2>/dev/null || true
+}
+
 stop_stream_for_pane() {
     local safe="$1"
     local spool
     spool="$(spool_for "$safe")"
+    unmark_pane "%$safe"
 
     # Clearing stream.pane first lets the worker loops exit on their own even
     # if a PID file went missing; kill_tree then stops them (and any afplay
@@ -122,6 +140,7 @@ start_stream() {
     echo 1 > "$spool/chunks/.next"
 
     echo "$SAFE_PANE_ID" > "$STREAM_PANE_FILE"
+    mark_pane "$PANE_ID"
 
     nohup "$SCRIPT_DIR/stream-watcher.sh" "$PANE_ID" "$spool" >/dev/null 2>&1 &
     echo "$!" > "$spool/watcher.pid"
