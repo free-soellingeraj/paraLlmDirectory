@@ -1,7 +1,10 @@
 # Streaming Voice Mode ("Speak Mode") — Implementation Plan
 
-Status: **proposed** (this PR contains the plan only; implementation follows in
-subsequent PRs on this branch or stacked branches).
+Status: **Phase 1 implemented in this PR** (speak mode, `Ctrl+b o`).
+Phase 2 (wake-word dictation) remains proposed. Implementation deviations
+from the original plan are noted inline with *[implemented: …]* markers where
+they matter; see ADR-010 for the settling/anchor details discovered during
+implementation (tail-mutation tolerance, `display-message` dead-pane quirk).
 
 ## What we're building
 

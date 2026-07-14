@@ -316,6 +316,40 @@ call), and more accurate.
 
 ---
 
+### 11. Speak Mode — Streaming Voice Playback (`Ctrl+b o`)
+
+`Ctrl+b o` toggles **speak mode**: a per-pane mode that speaks the agent's
+output as it streams into the pane, a few seconds behind the text. Unlike the
+one-shot `Ctrl+b p`, it does not summarize — it reads the actual response
+prose, skipping tool calls/results, spinners, echoed input, and other chrome.
+
+- **Binding**: bound to exactly one pane at a time. Press in the bound pane to
+  turn it off; press in a different pane to move the mode there. (Note:
+  `Ctrl+b o` overrides tmux's default "cycle panes" binding.)
+- **Status line**: shows `🔊SPEAK %N` (green) while active; updates instantly
+  on toggle via `tmux refresh-client -S`.
+- **Pipeline** (three workers per bound pane, spool under
+  `/tmp/para-llm-tts/<pane>.stream/`):
+  - `stream-watcher.sh` polls `capture-pane` (default 0.7s), filters chrome
+    via the shared `filter-pane-text.sh`, and runs `stream-step.py`, which
+    speaks only *settled* lines (identical across two consecutive polls) and
+    cuts them into sentence chunks.
+  - `stream-synth.sh` converts chunks to audio in order (edge-tts, one retry,
+    then local `say` fallback), running ahead of playback.
+  - `stream-player.sh` plays chunks strictly in sequence with `afplay`.
+- **Interplay**: speak mode owns the audio channel — enabling it stops any
+  one-shot playback, and `Ctrl+b p` is refused while speak mode is on.
+  Closing the bound pane tears the whole mode down automatically.
+- **Config** (`$PARA_LLM_ROOT/config`): `TTS_STREAM_POLL_INTERVAL` (0.7),
+  `TTS_STREAM_FLUSH_SECS` (4 — speak unterminated headers/bullets after this
+  quiet period), `TTS_STREAM_ENGINE` (`edge-tts` | `say`).
+
+**File**: `plugins/tts/toggle-stream.sh`, `plugins/tts/stream-watcher.sh`,
+`plugins/tts/stream-step.py`, `plugins/tts/stream-synth.sh`,
+`plugins/tts/stream-player.sh`, `plugins/tts/stream-status.sh`
+
+---
+
 ## Key Bindings Summary
 
 | Binding | Action |
@@ -325,6 +359,9 @@ call), and more accurate.
 | `Ctrl+b v` | Command Center (tiled view) |
 | `Ctrl+b t` | Remote management menu |
 | `Ctrl+b r` | Manual restore Claude sessions |
+| `Ctrl+b a` | Voice input: record, then transcribe into pane |
+| `Ctrl+b p` | Voice playback: speak/stop latest pane output |
+| `Ctrl+b o` | Speak mode: stream agent output as speech (one pane) |
 
 ---
 

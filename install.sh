@@ -147,6 +147,7 @@ echo ""
 echo "Setting up voice input/output..."
 echo "  STT: Ctrl+b a records and transcribes with whisper.cpp"
 echo "  TTS: Ctrl+b p speaks/stops latest pane output with Microsoft edge-tts"
+echo "  Speak mode: Ctrl+b o streams agent output as speech for one pane"
 
 # Check/install sox
 if ! command -v rec &>/dev/null; then
@@ -192,6 +193,11 @@ TTS_SYNTH_TIMEOUT="20"           # Max seconds for each edge-tts chunk before fa
 TTS_PROGRESS_ENABLED=1           # Show live "TTS: <stage> (Ns)" progress in the status line
 TTS_PROGRESS_INTERVAL="1"        # How often (seconds) to refresh the progress indicator
 TTS_AUTHORED_MAX_AGE="900"       # Seconds an agent-authored voice script (voice-script.sh) stays playable before falling back to live capture (0 = never expires)
+
+# Speak mode (Ctrl+b o): stream agent output as speech
+TTS_STREAM_POLL_INTERVAL="0.7"   # How often (seconds) to poll the bound pane for new text
+TTS_STREAM_FLUSH_SECS="4"        # Speak un-terminated text (headers, bullets) after this quiet period
+TTS_STREAM_ENGINE="edge-tts"     # "edge-tts" (network, better voice) or "say" (local, lower latency)
 # STT_LANGUAGE="en"
 # STT_MODEL_PATH=""  # Override model location (default: $PARA_LLM_ROOT/plugins/stt/models/ggml-base.en.bin)
 EOF
@@ -410,6 +416,10 @@ bind-key a run-shell -b "$SCRIPT_DIR/plugins/stt/toggle-stt.sh"
 
 # Ctrl+b p: Toggle text-to-speech playback for the active pane
 bind-key p run-shell -b "$SCRIPT_DIR/plugins/tts/toggle-tts.sh"
+
+# Ctrl+b o: Toggle speak mode (stream agent output as speech, bound to one pane)
+# NOTE: overrides tmux's default "o" binding (cycle to next pane)
+bind-key o run-shell -b "$SCRIPT_DIR/plugins/tts/toggle-stream.sh '#{pane_id}'"
 EOF
 
 cat >> ~/.tmux.conf << EOF
@@ -432,6 +442,10 @@ bind-key r run-shell '$PARA_LLM_ROOT/scripts/para-llm-restore.sh'
 # Claude Code status in status line (shows aggregate state)
 # Appends to existing status-right, preserving user customizations
 set -ga status-right ' #($SCRIPT_DIR/plugins/claude-state-monitor/tmux-status.sh)'
+
+# Voice indicators: REC while dictating, SPEAK while speak mode is bound
+set -ga status-right ' #($SCRIPT_DIR/plugins/stt/stt-status.sh)'
+set -ga status-right ' #($SCRIPT_DIR/plugins/tts/stream-status.sh)'
 EOF
 
 cat >> ~/.tmux.conf << EOF
@@ -478,6 +492,7 @@ echo "  Ctrl+b t  - Remote management (add/test/toggle remotes)"
 echo "  Ctrl+b y  - Choose/switch Claude Code or Codex for active worktree"
 echo "  Ctrl+b a  - Voice input: record/transcribe into active pane"
 echo "  Ctrl+b p  - Voice playback: speak/stop latest pane output"
+echo "  Ctrl+b o  - Speak mode: stream agent output as speech (toggle, one pane)"
 echo "  Ctrl+b r  - Manual restore managed AI terminal sessions"
 echo ""
 echo "Recovery:"

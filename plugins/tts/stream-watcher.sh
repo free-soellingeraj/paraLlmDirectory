@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+# stream-watcher.sh - speak mode's capture loop.
+# Polls the bound pane, filters chrome, and runs stream-step.py to turn newly
+# settled transcript lines into synthesis chunks. Started by toggle-stream.sh.
+#
+# Usage: stream-watcher.sh <pane_id> <spool_dir>
+
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PANE_ID="${1:?usage: stream-watcher.sh <pane_id> <spool_dir>}"
+SPOOL="${2:?usage: stream-watcher.sh <pane_id> <spool_dir>}"
+
+TTS_DIR="/tmp/para-llm-tts"
+STREAM_PANE_FILE="$TTS_DIR/stream.pane"
+SAFE_PANE_ID="${PANE_ID#%}"
+
+BOOTSTRAP_FILE="$HOME/.para-llm-root"
+if [[ -f "$BOOTSTRAP_FILE" ]]; then
+    PARA_LLM_ROOT="$(cat "$BOOTSTRAP_FILE")"
+    if [[ -f "$PARA_LLM_ROOT/config" ]]; then
+        source "$PARA_LLM_ROOT/config"
+    fi
+fi
+
+export TTS_SYNTH_CHARS="${TTS_SYNTH_CHARS:-180}"
+export TTS_STREAM_FLUSH_SECS="${TTS_STREAM_FLUSH_SECS:-4}"
+POLL_INTERVAL="${TTS_STREAM_POLL_INTERVAL:-0.7}"
+
+source "$SCRIPT_DIR/tts-lib.sh"
+
+mode_active() {
+    [[ "$(cat "$STREAM_PANE_FILE" 2>/dev/null)" == "$SAFE_PANE_ID" ]]
+}
+
+# display-message -t exits 0 even for a dead pane (it falls back to another
+# target), so liveness needs an exact match against the real pane list.
+pane_alive() {
+    tmux list-panes -a -F '#{pane_id}' 2>/dev/null | grep -qx "$PANE_ID"
+}
+
+# If the bound pane disappears, tear the whole mode down (workers exit once
+# stream.pane is gone) so a closed window can't leave orphan loops behind.
+teardown_dead_pane() {
+    if mode_active; then
+        rm -f "$STREAM_PANE_FILE"
+    fi
+    local f pid
+    for f in "$SPOOL/synth.pid" "$SPOOL/player.pid"; do
+        pid="$(cat "$f" 2>/dev/null)"
+        [[ -n "$pid" ]] && kill_tree "$pid"
+        rm -f "$f"
+    done
+    local active_file="$TTS_DIR/active.pane"
+    if [[ "$(cat "$active_file" 2>/dev/null)" == "$SAFE_PANE_ID" ]]; then
+        rm -f "$active_file"
+    fi
+    rm -rf "$SPOOL"
+    tmux refresh-client -S 2>/dev/null || true
+}
+
+while mode_active; do
+    if ! pane_alive; then
+        teardown_dead_pane
+        exit 0
+    fi
+
+    tmux capture-pane -t "$PANE_ID" -p -S - 2>/dev/null \
+        | "$SCRIPT_DIR/filter-pane-text.sh" > "$SPOOL/cur.txt.part" \
+        && mv "$SPOOL/cur.txt.part" "$SPOOL/cur.txt"
+
+    if ! python3 "$SCRIPT_DIR/stream-step.py" "$SPOOL" 2>> "$SPOOL/error.log"; then
+        printf '%s  stream-step.py failed\n' "$(date '+%H:%M:%S')" >> "$SPOOL/error.log"
+    fi
+
+    sleep "$POLL_INTERVAL"
+done
