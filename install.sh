@@ -454,7 +454,7 @@ set -g status-right-length 120
 
 # Pane border titles (shows Claude state per pane)
 set -g pane-border-status top
-set -g pane-border-format '#{?pane_active,#[reverse],} #{window_index}: #{?#{@speak_on},#[fg=green#,bold]🔊SPEAK#[fg=default#,nobold] ,}#{@pane_display} #{?pane_active,#[noreverse],}'
+set -g pane-border-format '#{?pane_active,#[reverse],} #{window_index}: #{?#{@speak_on},#[bg=colour201#,fg=colour231#,bold] 🔊 SPEAKING #[bg=default#,fg=default#,nobold] ,}#{@pane_display} #{?pane_active,#[noreverse],}'
 # end para-llm-directory
 EOF
 echo "Added bindings to ~/.tmux.conf"

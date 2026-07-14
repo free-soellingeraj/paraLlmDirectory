@@ -13,7 +13,7 @@ safe="$(cat "$STREAM_PANE_FILE" 2>/dev/null)"
 
 watcher_pid="$(cat "$TTS_DIR/$safe.stream/watcher.pid" 2>/dev/null)"
 if [[ -n "$watcher_pid" ]] && kill -0 "$watcher_pid" 2>/dev/null; then
-    echo "#[fg=green,bold]🔊SPEAK %$safe#[default]"
+    echo "#[bg=colour201,fg=colour231,bold] 🔊SPEAK %$safe #[default]"
 else
     # Stale mode file (watcher gone) — clear it so the indicator can't lie.
     rm -f "$STREAM_PANE_FILE"

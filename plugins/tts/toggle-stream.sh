@@ -71,14 +71,16 @@ release_toggle_lock() {
 }
 trap release_toggle_lock EXIT
 
-# Pane-border indicator: green border + 🔊SPEAK marker on the bound pane
-# (pane-border-format shows @speak_on; see install.sh). Options are per-pane
-# and vanish with the pane, so death cleanup is automatic.
+# Pane-border indicator: magenta border + solid "🔊 SPEAKING" chip on the
+# bound pane (pane-border-format shows @speak_on; see install.sh). Magenta
+# because the default active border is already green (and yellow/red mean
+# copy-mode/sync) — the speak pane must stand apart from all three. Options
+# are per-pane and vanish with the pane, so death cleanup is automatic.
 mark_pane() {
     local pane="$1"
     tmux set-option -pt "$pane" @speak_on 1 2>/dev/null || true
-    tmux set-option -pt "$pane" pane-border-style 'fg=green' 2>/dev/null || true
-    tmux set-option -pt "$pane" pane-active-border-style 'fg=green,bold' 2>/dev/null || true
+    tmux set-option -pt "$pane" pane-border-style 'fg=colour201,bold' 2>/dev/null || true
+    tmux set-option -pt "$pane" pane-active-border-style 'fg=colour201,bold' 2>/dev/null || true
 }
 
 unmark_pane() {
