@@ -138,7 +138,7 @@ stop_stream_for_pane() {
     fi
 
     local f pid
-    for f in "$spool/watcher.pid" "$spool/synth.pid" "$spool/player.pid" "$spool/framing.pid" "$spool/rewrite.pid"; do
+    for f in "$spool/watcher.pid" "$spool/synth.pid" "$spool/player.pid" "$spool/framing.pid" "$spool/rewrite.pid" "$spool/wake.pid" "$spool/whisper-stream.pid" "$spool/dictation-rec.pid"; do
         pid="$(cat "$f" 2>/dev/null)"
         [[ -n "$pid" ]] && kill_tree "$pid"
     done
@@ -207,6 +207,12 @@ start_stream() {
     if [[ -f "$spool/framing.lock" ]]; then
         nohup "$SCRIPT_DIR/stream-framing.sh" "$PANE_ID" "$spool" >/dev/null 2>&1 &
         echo "$!" > "$spool/framing.pid"
+    fi
+    # Hands-free dictation: listen for "start/stop transcription" while the
+    # mode is on (see plugins/stt/wake-listener.sh).
+    if [[ "${STT_WAKE_ENABLED:-1}" != "0" ]]; then
+        nohup "$SCRIPT_DIR/../stt/wake-listener.sh" "$PANE_ID" "$spool" >/dev/null 2>&1 &
+        echo "$!" > "$spool/wake.pid"
     fi
 
     echo "$SAFE_PANE_ID" > "$STREAM_PANE_FILE"

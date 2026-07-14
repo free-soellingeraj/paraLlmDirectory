@@ -361,6 +361,16 @@ prose, skipping tool calls/results, spinners, echoed input, and other chrome.
 - **Never repeats**: a rolling 400-line spoken memory guarantees a line heard
   once is not spoken again (BUG-023); lifecycle + anchor diagnostics persist
   in `/tmp/para-llm-tts/stream.log`.
+- **Hands-free dictation** (`plugins/stt/wake-listener.sh`): while speak mode
+  is on, `whisper-stream` (tiny.en, auto-downloaded) listens continuously.
+  Say **"start transcription"** → chime, playback pauses (SIGSTOP tree),
+  status chip flips to red `🎤DICTATE`, sox records. Say **"stop
+  transcription"** → chime, full-quality transcription (base.en), phrases
+  stripped from the edges, text injected into the bound pane WITHOUT Enter
+  (review before submitting), playback resumes. Safety: silence/RMS guard,
+  120s max dictation, listener dies with the mode, sox + whisper-stream mic
+  sharing verified on macOS. Config: `STT_WAKE_ENABLED` (default 1),
+  `STT_WAKE_START_PHRASE`, `STT_WAKE_STOP_PHRASE`, `STT_WAKE_MAX_DICTATION`.
 
 **File**: `plugins/tts/toggle-stream.sh`, `plugins/tts/stream-watcher.sh`,
 `plugins/tts/stream-step.py`, `plugins/tts/stream-synth.sh`,

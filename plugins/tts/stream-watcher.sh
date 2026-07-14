@@ -66,7 +66,7 @@ teardown_dead_pane() {
     tmux set-option -pt "$PANE_ID" -u @speak_on 2>/dev/null || true
     tmux set-option -pt "$PANE_ID" -u window-style 2>/dev/null || true
     local f pid
-    for f in "$SPOOL/synth.pid" "$SPOOL/player.pid" "$SPOOL/framing.pid" "$SPOOL/rewrite.pid"; do
+    for f in "$SPOOL/synth.pid" "$SPOOL/player.pid" "$SPOOL/framing.pid" "$SPOOL/rewrite.pid" "$SPOOL/wake.pid" "$SPOOL/whisper-stream.pid" "$SPOOL/dictation-rec.pid"; do
         pid="$(cat "$f" 2>/dev/null)"
         [[ -n "$pid" ]] && kill_tree "$pid"
         rm -f "$f"

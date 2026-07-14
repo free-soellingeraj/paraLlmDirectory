@@ -18,7 +18,11 @@ if [[ -n "$watcher_pid" ]] && kill -0 "$watcher_pid" 2>/dev/null; then
     # pane if the bound pane died (tmux falls back instead of failing).
     label="$(cat "$TTS_DIR/$safe.stream/label" 2>/dev/null)"
     [[ -z "$label" ]] && label="pane $safe"
-    echo "#[bg=colour201,fg=colour231,bold] 🔊SPEAK $label #[default]"
+    if [[ "$(cat "$TTS_DIR/$safe.stream/wake.state" 2>/dev/null)" == "dictating" ]]; then
+        echo "#[bg=colour160,fg=colour231,bold] 🎤DICTATE $label #[default]"
+    else
+        echo "#[bg=colour201,fg=colour231,bold] 🔊SPEAK $label #[default]"
+    fi
 else
     # Watcher not (yet) alive. Only treat the mode file as stale after a
     # grace period — this script can run mid-startup (a border-option change
