@@ -76,9 +76,10 @@ DROP_PATTERNS = [
     re.compile(r"^\s*⎿"),                    # tool result marker
     re.compile(r"^\s{4,}"),                  # tool output continuation / code indent
     re.compile(r"^\s*[>❯›]\s?"),             # prompt line / echoed user input
-    re.compile(r"^\s*[✻✽✶✳✢∴☐☒⚒·•▸▪]"),      # spinner / status / todo glyphs
+    re.compile(r"^\s*[✻✽✶✳✢∴☐☒⚒·•▸▪⏵]"),     # spinner / status / todo glyphs
     re.compile(r"^⏺\s+\w[\w-]*\("),          # finalized tool line: "⏺ Bash(ls)"
-    re.compile(r"^⏺.*…\s*$"),                # transient progress: "⏺ Running 2 shell commands…"
+    re.compile(r"…\s*(\(\d[^)]*\))?\s*$"),   # in-progress ellipsis, optional timer: "Running 1 shell command… (3s)"
+    re.compile(r"^\s*Running \d+ shell command"),  # tool header renders with 2-space indent, no ⏺
     re.compile(r"^\s*[─═━┄┈╌\-_=]{4,}\s*$"), # separators / rules
     re.compile(r"\?\s+for shortcuts"),
     re.compile(r"[Bb]ypassing [Pp]ermissions"),
@@ -93,21 +94,24 @@ def speakable(line):
 
 
 def find_anchor_end(lines, anchor):
-    """Index just past the LAST occurrence of the anchor block in lines.
+    """(index, block) just past the LAST occurrence of the anchor in lines.
 
-    Falls back to progressively shorter suffixes of the anchor (dropping the
-    oldest lines first) so an anchor whose top scrolled out of the viewport
-    can still match. Returns None if even the newest single line is gone —
-    that means a real rewrite (clear/screen switch) or an output flood.
+    Tolerates two kinds of drift: the anchor's OLDEST lines scrolling out of
+    the viewport (match progressively shorter suffixes), and its NEWEST lines
+    mutating after they were anchored — the first-poll anchor grabs whatever
+    is on screen, including a paragraph still streaming (trim newest first,
+    so enabling mid-response recovers instead of resyncing forever). Returns
+    the block that actually matched so the caller can rebuild the anchor
+    without the stale lines. (None, None) means a real rewrite or flood.
     """
-    for start in range(len(anchor)):
-        block = anchor[start:]
-        if not block:
-            break
-        for i in range(len(lines) - len(block), -1, -1):
-            if lines[i:i + len(block)] == block:
-                return i + len(block)
-    return None
+    for trim_new in range(len(anchor)):
+        base = anchor[:len(anchor) - trim_new]
+        for start in range(len(base)):
+            block = base[start:]
+            for i in range(len(lines) - len(block), -1, -1):
+                if lines[i:i + len(block)] == block:
+                    return i + len(block), block
+    return None, None
 
 
 cur = read_lines(cur_path) or []
@@ -127,11 +131,11 @@ pending = old_pending
 grew = False
 
 if anchor:
-    i_cur = find_anchor_end(spk_cur, anchor)
-    i_prev = find_anchor_end(spk_prev, anchor)
+    i_cur, matched = find_anchor_end(spk_cur, anchor)
+    i_prev, _ = find_anchor_end(spk_prev, anchor)
 else:
     # Empty anchor (pane was empty at enable): everything is candidate text.
-    i_cur, i_prev = 0, 0
+    i_cur, i_prev, matched = 0, 0, []
 
 if i_cur is None:
     # Anchor vanished: pane cleared, screen switched, or output flooded past
@@ -147,12 +151,16 @@ else:
         if a != b:
             break
         settled.append(a)
+    # Rebuild the anchor from the block that matched — keeping trimmed-away
+    # stale lines would leave a block that can never match again.
     if settled:
         block = "\n".join(settled).strip()
         if block:
             pending = (pending.rstrip() + "\n" + block) if pending.strip() else block
             grew = True
-        anchor = (anchor + settled)[-ANCHOR_LINES:]
+        anchor = (matched + settled)[-ANCHOR_LINES:]
+    elif matched != anchor:
+        anchor = matched
 
 write_text(prev_path, "\n".join(spk_cur))
 write_text(anchor_path, "\n".join(anchor))

@@ -25,7 +25,10 @@ fi
 
 export TTS_SYNTH_CHARS="${TTS_SYNTH_CHARS:-180}"
 export TTS_STREAM_FLUSH_SECS="${TTS_STREAM_FLUSH_SECS:-4}"
-POLL_INTERVAL="${TTS_STREAM_POLL_INTERVAL:-0.7}"
+# 0.4s: a line must survive two consecutive polls to be spoken, and in small
+# command-center tiles (~15 rows on the alternate screen) prose can scroll out
+# of the viewport within a couple of seconds of a tool block rendering.
+POLL_INTERVAL="${TTS_STREAM_POLL_INTERVAL:-0.4}"
 
 source "$SCRIPT_DIR/tts-lib.sh"
 
@@ -58,6 +61,15 @@ teardown_dead_pane() {
     rm -rf "$SPOOL"
     tmux refresh-client -S 2>/dev/null || true
 }
+
+# The mode file is written shortly AFTER we are spawned (see toggle-stream.sh
+# start order) — wait briefly for it instead of exiting on a not-yet-on mode.
+tries=0
+until mode_active; do
+    tries=$((tries + 1))
+    [[ "$tries" -gt 20 ]] && exit 0
+    sleep 0.1
+done
 
 while mode_active; do
     if ! pane_alive; then

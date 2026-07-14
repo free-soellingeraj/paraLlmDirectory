@@ -20,6 +20,15 @@ mode_active() {
     [[ "$(cat "$STREAM_PANE_FILE" 2>/dev/null)" == "$SAFE_PANE_ID" ]]
 }
 
+# The mode file is written shortly AFTER we are spawned (see toggle-stream.sh
+# start order) — wait briefly for it instead of exiting on a not-yet-on mode.
+tries=0
+until mode_active; do
+    tries=$((tries + 1))
+    [[ "$tries" -gt 20 ]] && exit 0
+    sleep 0.1
+done
+
 next=1
 while mode_active; do
     seq="$(printf '%05d' "$next")"

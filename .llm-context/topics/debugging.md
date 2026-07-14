@@ -266,3 +266,10 @@ Quick checks:
   watcher is dead, so a stale `🔊SPEAK` disappears on the next status refresh.
 - Kill switch: press `Ctrl+b o` in the bound pane, or `echo -n > /tmp/para-llm-tts/stream.pane`
   — all three workers exit within ~1s (they re-check the mode file every loop).
+
+**Known limitation — small panes**: Claude Code renders on the alternate
+screen, so the watcher sees only the visible viewport. In a short
+command-center tile (~15 rows), prose can scroll out within a couple of
+seconds once a tool block renders; a line must survive two consecutive polls
+(2 × `TTS_STREAM_POLL_INTERVAL`, default 0.4s) to be spoken. If speech drops
+words in a busy pane, give the pane more height or lower the poll interval.

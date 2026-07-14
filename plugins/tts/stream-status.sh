@@ -26,6 +26,13 @@ if [[ -n "$watcher_pid" ]] && kill -0 "$watcher_pid" 2>/dev/null; then
     label="${label:0:24}"
     echo "#[bg=colour201,fg=colour231,bold] 🔊SPEAK $label #[default]"
 else
-    # Stale mode file (watcher gone) — clear it so the indicator can't lie.
-    rm -f "$STREAM_PANE_FILE"
+    # Watcher not (yet) alive. Only treat the mode file as stale after a
+    # grace period — this script can run mid-startup (a border-option change
+    # in toggle-stream triggers a status redraw), and clearing stream.pane
+    # then kills the mode before it begins (BUG-022).
+    now="$(date +%s)"
+    mtime="$(stat -f %m "$STREAM_PANE_FILE" 2>/dev/null || stat -c %Y "$STREAM_PANE_FILE" 2>/dev/null || echo "$now")"
+    if (( now - mtime > 15 )); then
+        rm -f "$STREAM_PANE_FILE"
+    fi
 fi

@@ -195,7 +195,7 @@ TTS_PROGRESS_INTERVAL="1"        # How often (seconds) to refresh the progress i
 TTS_AUTHORED_MAX_AGE="900"       # Seconds an agent-authored voice script (voice-script.sh) stays playable before falling back to live capture (0 = never expires)
 
 # Speak mode (Ctrl+b o): stream agent output as speech
-TTS_STREAM_POLL_INTERVAL="0.7"   # How often (seconds) to poll the bound pane for new text
+TTS_STREAM_POLL_INTERVAL="0.4"   # How often (seconds) to poll the bound pane for new text
 TTS_STREAM_FLUSH_SECS="4"        # Speak un-terminated text (headers, bullets) after this quiet period
 TTS_STREAM_ENGINE="edge-tts"     # "edge-tts" (network, better voice) or "say" (local, lower latency)
 # STT_LANGUAGE="en"
@@ -454,6 +454,13 @@ set -g status-right-length 120
 
 # Pane border titles (shows Claude state per pane)
 set -g pane-border-status top
+
+# Speak-mode framing: magenta border on the bound pane only. These are window
+# options, so the per-pane targeting lives in the #{?#{@speak_on},...} format,
+# evaluated per pane at draw time (same pattern as tmux's default
+# pane-active-border-style conditionals, which the fallback branch preserves).
+set -g pane-border-style '#{?#{@speak_on},fg=colour201 bold,default}'
+set -g pane-active-border-style '#{?#{@speak_on},fg=colour201 bold,#{?pane_in_mode,fg=yellow,#{?synchronize-panes,fg=red,fg=green}}}'
 set -g pane-border-format '#{?pane_active,#[reverse],} #{window_index}: #{?#{@speak_on},#[bg=colour201#,fg=colour231#,bold] 🔊 SPEAKING #[bg=default#,fg=default#,nobold] ,}#{@pane_display} #{?pane_active,#[noreverse],}'
 # end para-llm-directory
 EOF

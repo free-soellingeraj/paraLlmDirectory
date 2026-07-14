@@ -71,23 +71,20 @@ release_toggle_lock() {
 }
 trap release_toggle_lock EXIT
 
-# Pane-border indicator: magenta border + solid "🔊 SPEAKING" chip on the
-# bound pane (pane-border-format shows @speak_on; see install.sh). Magenta
-# because the default active border is already green (and yellow/red mean
-# copy-mode/sync) — the speak pane must stand apart from all three. Options
-# are per-pane and vanish with the pane, so death cleanup is automatic.
+# Pane-border indicator: the bound pane gets @speak_on, a true pane-scoped
+# user option. The magenta border and "🔊 SPEAKING" chip come from GLOBAL
+# pane-border-style / pane-border-format conditionals on @speak_on (see
+# install.sh) — pane-border-style itself is a window option, so setting it
+# "per pane" here would actually paint every border in the window (BUG-021).
+# The option vanishes with the pane, so death cleanup is automatic.
 mark_pane() {
     local pane="$1"
     tmux set-option -pt "$pane" @speak_on 1 2>/dev/null || true
-    tmux set-option -pt "$pane" pane-border-style 'fg=colour201,bold' 2>/dev/null || true
-    tmux set-option -pt "$pane" pane-active-border-style 'fg=colour201,bold' 2>/dev/null || true
 }
 
 unmark_pane() {
     local pane="$1"
     tmux set-option -pt "$pane" -u @speak_on 2>/dev/null || true
-    tmux set-option -pt "$pane" -u pane-border-style 2>/dev/null || true
-    tmux set-option -pt "$pane" -u pane-active-border-style 2>/dev/null || true
 }
 
 stop_stream_for_pane() {
@@ -141,15 +138,22 @@ start_stream() {
     mkdir -p "$spool/chunks" "$spool/audio"
     echo 1 > "$spool/chunks/.next"
 
-    echo "$SAFE_PANE_ID" > "$STREAM_PANE_FILE"
-    mark_pane "$PANE_ID"
-
+    # Spawn workers and record their PIDs BEFORE announcing the mode in
+    # stream.pane. The status script's stale-cleanup treats "stream.pane set
+    # but watcher.pid dead/missing" as a crashed mode; announcing first opened
+    # a race where a status redraw (triggered by mark_pane itself) cleared
+    # stream.pane before watcher.pid existed, and every worker then exited on
+    # its first mode check (BUG-022). Workers wait up to ~2s for the mode
+    # file, so this order is safe.
     nohup "$SCRIPT_DIR/stream-watcher.sh" "$PANE_ID" "$spool" >/dev/null 2>&1 &
     echo "$!" > "$spool/watcher.pid"
     nohup "$SCRIPT_DIR/stream-synth.sh" "$PANE_ID" "$spool" >/dev/null 2>&1 &
     echo "$!" > "$spool/synth.pid"
     nohup "$SCRIPT_DIR/stream-player.sh" "$PANE_ID" "$spool" >/dev/null 2>&1 &
     echo "$!" > "$spool/player.pid"
+
+    echo "$SAFE_PANE_ID" > "$STREAM_PANE_FILE"
+    mark_pane "$PANE_ID"
 }
 
 acquire_toggle_lock

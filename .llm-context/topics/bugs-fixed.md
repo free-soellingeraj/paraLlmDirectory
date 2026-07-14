@@ -166,6 +166,20 @@ Log of bugs encountered and fixed in the para-llm-directory project. Each entry 
 **Gotcha for future capture work**: `tmux display-message -pt <dead-pane>` exits 0 (falls back to another target) — pane liveness needs `list-panes -a` + exact match (already handled in `stream-watcher.sh`).
 **File**: `plugins/tts/stream-step.py`, `plugins/tts/stream-watcher.sh`
 
+### BUG-021: Speak mode turned ALL pane borders magenta
+**Date**: 2026-07-14
+**Symptom**: Pressing `Ctrl+b o` painted every pane border in the command-center window magenta, not just the bound pane.
+**Cause**: `pane-border-style` / `pane-active-border-style` are **window** options; `tmux set-option -pt <pane>` silently stores them at window scope (verified empirically on tmux 3.6a), so "per-pane" border styling colored the whole window.
+**Fix**: The toggle only sets `@speak_on` (a real pane-scoped user option); the magenta styling lives in GLOBAL `pane-border-style` / `pane-active-border-style` values as `#{?#{@speak_on},fg=colour201 bold,...}` format conditionals evaluated per pane at draw time — the same pattern as tmux's default active-border conditionals, which the fallback branch preserves.
+**File**: `plugins/tts/toggle-stream.sh` (mark_pane/unmark_pane), `install.sh` (global styles)
+
+### BUG-022: Speak mode workers died at startup — status-script race
+**Date**: 2026-07-14
+**Symptom**: `Ctrl+b o` showed the indicator, but nothing was ever spoken; all three workers were dead with no logs, an intact spool, and `stream.pane` cleared.
+**Cause**: `toggle-stream.sh` wrote `stream.pane` first, then `mark_pane` — whose pane-option change triggers a status-line redraw. `stream-status.sh` ran in that window, found `stream.pane` set but `watcher.pid` not yet written, declared the mode stale, and deleted `stream.pane`. Every worker then exited on its first mode check. The race window was widened by mark_pane's tmux round-trips sitting between the two writes.
+**Fix**: Three layers: (1) workers and their PID files are set up BEFORE `stream.pane` is announced; (2) each worker waits up to ~2s for the mode file instead of exiting on a not-yet-on mode; (3) the status script only treats `stream.pane` as stale after a 15s grace period.
+**File**: `plugins/tts/toggle-stream.sh`, `plugins/tts/stream-watcher.sh`, `plugins/tts/stream-synth.sh`, `plugins/tts/stream-player.sh`, `plugins/tts/stream-status.sh`
+
 ---
 
 ## Known Bug-Prone Areas
