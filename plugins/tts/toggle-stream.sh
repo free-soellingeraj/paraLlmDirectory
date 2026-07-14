@@ -138,7 +138,7 @@ stop_stream_for_pane() {
     fi
 
     local f pid
-    for f in "$spool/watcher.pid" "$spool/synth.pid" "$spool/player.pid"; do
+    for f in "$spool/watcher.pid" "$spool/synth.pid" "$spool/player.pid" "$spool/framing.pid" "$spool/rewrite.pid"; do
         pid="$(cat "$f" 2>/dev/null)"
         [[ -n "$pid" ]] && kill_tree "$pid"
     done
@@ -172,8 +172,9 @@ start_stream() {
     local spool label
     spool="$(spool_for "$SAFE_PANE_ID")"
     rm -rf "$spool"
-    mkdir -p "$spool/chunks" "$spool/audio"
+    mkdir -p "$spool/chunks" "$spool/audio" "$spool/raw"
     echo 1 > "$spool/chunks/.next"
+    echo 1 > "$spool/raw/.next"
     label="$(resolve_label)"
     printf '%s\n' "$label" > "$spool/label"
     log_lifecycle "enable: label='$label' path='$(tmux display-message -pt "$PANE_ID" '#{pane_current_path}' 2>/dev/null)'"
@@ -185,12 +186,28 @@ start_stream() {
     # stream.pane before watcher.pid existed, and every worker then exited on
     # its first mode check (BUG-022). Workers wait up to ~2s for the mode
     # file, so this order is safe.
+    # Enable-time recap ("framing"): summarize what's currently happening in
+    # the pane and speak it before live streaming starts. The lock gates the
+    # watcher's chunk emission until the recap is enqueued (or fails/skips) —
+    # it must exist BEFORE the workers start.
+    if [[ "${TTS_STREAM_FRAMING:-1}" != "0" && "${TTS_SUMMARIZE:-1}" != "0" ]]; then
+        touch "$spool/framing.lock"
+    fi
+
     nohup "$SCRIPT_DIR/stream-watcher.sh" "$PANE_ID" "$spool" >/dev/null 2>&1 &
     echo "$!" > "$spool/watcher.pid"
     nohup "$SCRIPT_DIR/stream-synth.sh" "$PANE_ID" "$spool" >/dev/null 2>&1 &
     echo "$!" > "$spool/synth.pid"
     nohup "$SCRIPT_DIR/stream-player.sh" "$PANE_ID" "$spool" >/dev/null 2>&1 &
     echo "$!" > "$spool/player.pid"
+    if [[ "${TTS_STREAM_REWRITE:-1}" != "0" ]]; then
+        nohup "$SCRIPT_DIR/stream-rewrite.sh" "$PANE_ID" "$spool" >/dev/null 2>&1 &
+        echo "$!" > "$spool/rewrite.pid"
+    fi
+    if [[ -f "$spool/framing.lock" ]]; then
+        nohup "$SCRIPT_DIR/stream-framing.sh" "$PANE_ID" "$spool" >/dev/null 2>&1 &
+        echo "$!" > "$spool/framing.pid"
+    fi
 
     echo "$SAFE_PANE_ID" > "$STREAM_PANE_FILE"
     mark_pane "$PANE_ID"

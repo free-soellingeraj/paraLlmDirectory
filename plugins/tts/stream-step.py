@@ -40,9 +40,13 @@ prev_path = os.path.join(spool, "prev.txt")
 anchor_path = os.path.join(spool, "anchor.txt")
 pending_path = os.path.join(spool, "pending.txt")
 spoken_path = os.path.join(spool, "spoken.recent")
-chunks_dir = os.path.join(spool, "chunks")
-next_path = os.path.join(chunks_dir, ".next")
 events_path = os.path.join(spool, "events.log")
+
+# With the rewrite phase on (default), settled text goes to the raw/ queue for
+# stream-rewrite.sh to make listenable; otherwise straight to the audio queue.
+rewrite_on = os.environ.get("TTS_STREAM_REWRITE", "1") != "0"
+chunks_dir = os.path.join(spool, "raw" if rewrite_on else "chunks")
+next_path = os.path.join(chunks_dir, ".next")
 
 # The spool is deleted on teardown, taking events.log with it — mirror the
 # diagnostic events into the persistent per-mode log next to the spool.
@@ -212,6 +216,20 @@ else:
 
 write_text(prev_path, "\n".join(spk_cur))
 write_text(anchor_path, "\n".join(anchor))
+
+# While the enable-time recap is being prepared (framing.lock), keep settling
+# and accumulating but emit nothing — the recap must reach the audio queue
+# first. The lock is broken if stale so a crashed framing job can't mute the
+# stream forever.
+framing_lock = os.path.join(spool, "framing.lock")
+if os.path.exists(framing_lock):
+    lock_age = time.time() - os.path.getmtime(framing_lock)
+    if lock_age < 180:
+        if pending != old_pending:
+            write_text(pending_path, pending)
+        sys.exit(0)
+    os.remove(framing_lock)
+    log_event("broke stale framing.lock (%.0fs old)" % lock_age, persist=True)
 
 
 def normalize(text):

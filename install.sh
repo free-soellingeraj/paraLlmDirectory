@@ -199,6 +199,9 @@ TTS_STREAM_POLL_INTERVAL="0.4"   # How often (seconds) to poll the bound pane fo
 TTS_STREAM_FLUSH_SECS="4"        # Speak un-terminated text (headers, bullets) after this quiet period
 TTS_STREAM_ENGINE="edge-tts"     # "edge-tts" (network, better voice) or "say" (local, lower latency)
 TTS_STREAM_TINT="#3a2044"        # Background tint of the pane being listened to (empty to disable)
+TTS_STREAM_FRAMING=1             # On enable: summarize what's happening in the pane and speak it before streaming
+TTS_STREAM_REWRITE=1             # Rewrite streamed text into listenable narration via codex before speaking (0 = speak raw)
+TTS_STREAM_REWRITE_TIMEOUT="45"  # Max seconds per rewrite batch before falling back to raw text
 # STT_LANGUAGE="en"
 # STT_MODEL_PATH=""  # Override model location (default: $PARA_LLM_ROOT/plugins/stt/models/ggml-base.en.bin)
 EOF

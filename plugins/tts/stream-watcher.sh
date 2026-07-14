@@ -25,6 +25,7 @@ fi
 
 export TTS_SYNTH_CHARS="${TTS_SYNTH_CHARS:-180}"
 export TTS_STREAM_FLUSH_SECS="${TTS_STREAM_FLUSH_SECS:-4}"
+export TTS_STREAM_REWRITE="${TTS_STREAM_REWRITE:-1}"
 # 0.4s: a line must survive two consecutive polls to be spoken, and in small
 # command-center tiles (~15 rows on the alternate screen) prose can scroll out
 # of the viewport within a couple of seconds of a tool block rendering.
@@ -65,7 +66,7 @@ teardown_dead_pane() {
     tmux set-option -pt "$PANE_ID" -u @speak_on 2>/dev/null || true
     tmux set-option -pt "$PANE_ID" -u window-style 2>/dev/null || true
     local f pid
-    for f in "$SPOOL/synth.pid" "$SPOOL/player.pid"; do
+    for f in "$SPOOL/synth.pid" "$SPOOL/player.pid" "$SPOOL/framing.pid" "$SPOOL/rewrite.pid"; do
         pid="$(cat "$f" 2>/dev/null)"
         [[ -n "$pid" ]] && kill_tree "$pid"
         rm -f "$f"

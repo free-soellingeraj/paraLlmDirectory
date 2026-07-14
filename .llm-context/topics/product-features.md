@@ -347,6 +347,17 @@ prose, skipping tool calls/results, spinners, echoed input, and other chrome.
   `TTS_STREAM_FLUSH_SECS` (4 — speak unterminated headers/bullets after this
   quiet period), `TTS_STREAM_ENGINE` (`edge-tts` | `say`),
   `TTS_STREAM_TINT` (bound-pane background colour, empty to disable).
+- **Enable-time recap ("framing")**: on `Ctrl+b o`, the recent transcript is
+  summarized (codex, same backend as `Ctrl+b p`) and spoken first — "Recap.
+  …" — while a Tink cue plays during preparation; live streaming is gated
+  behind it (`framing.lock`) and starts from the moment of enablement.
+  `TTS_STREAM_FRAMING=0` disables. (`stream-framing.sh`)
+- **Listenable rewrite phase**: settled text goes to a `raw/` queue and
+  `stream-rewrite.sh` rewrites each batch into natural narration via codex
+  before synthesis (paths/hashes/code become spoken references, not
+  characters). Batching is self-pacing (~one codex call of lag, 5–20s); on
+  codex failure/timeout the batch passes through raw so the stream never
+  stalls. `TTS_STREAM_REWRITE=0` reverts to raw + heuristics.
 - **Never repeats**: a rolling 400-line spoken memory guarantees a line heard
   once is not spoken again (BUG-023); lifecycle + anchor diagnostics persist
   in `/tmp/para-llm-tts/stream.log`.
