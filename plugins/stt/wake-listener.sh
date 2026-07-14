@@ -32,8 +32,8 @@ if [[ -f "$BOOTSTRAP_FILE" ]]; then
     fi
 fi
 
-STT_WAKE_START_PHRASE="${STT_WAKE_START_PHRASE:-start transcription}"
-STT_WAKE_STOP_PHRASE="${STT_WAKE_STOP_PHRASE:-stop transcription}"
+STT_WAKE_START_PHRASE="${STT_WAKE_START_PHRASE:-start transcribe}"
+STT_WAKE_STOP_PHRASE="${STT_WAKE_STOP_PHRASE:-stop transcribe}"
 STT_WAKE_MODEL="${STT_WAKE_MODEL:-ggml-tiny.en.bin}"
 STT_WAKE_STEP_MS="${STT_WAKE_STEP_MS:-2000}"
 STT_WAKE_MAX_DICTATION="${STT_WAKE_MAX_DICTATION:-120}"
@@ -141,6 +141,31 @@ fi
 START_NORM="$(normalize "$STT_WAKE_START_PHRASE")"
 STOP_NORM="$(normalize "$STT_WAKE_STOP_PHRASE")"
 
+# Whisper often clips the first word of a short command utterance (observed
+# live: saying "start transcription" produced only " transcription."), so a
+# full-phrase match alone is too strict. Fallback: a SHORT utterance (<=4
+# words) containing the key stem also triggers — the current state says
+# whether that means start or stop. The stem is the first 8 chars of the
+# phrase's last word, so "transcribe" also matches "transcription"/"transcribed".
+stem_of() {
+    local last="${1##* }"
+    printf '%s' "${last:0:8}"
+}
+START_STEM="$(stem_of "$START_NORM")"
+STOP_STEM="$(stem_of "$STOP_NORM")"
+
+# $1 = joined two-line window, $2 = current line, $3 = full phrase, $4 = stem
+matches_phrase() {
+    local joined="$1" line="$2" phrase="$3" stem="$4"
+    case "$joined" in *"$phrase"*) return 0 ;; esac
+    [[ -n "$stem" && ${#stem} -ge 4 ]] || return 1
+    local words
+    words="$(printf '%s' "$line" | wc -w | tr -d ' ')"
+    [[ "$words" -le 4 ]] || return 1
+    case "$line" in *"$stem"*) return 0 ;; esac
+    return 1
+}
+
 : > "$WAKE_LOG"
 whisper-stream -m "$MODEL_PATH" -t 4 --step "$STT_WAKE_STEP_MS" --length 6000 \
     -f "$WAKE_LOG" >/dev/null 2>> "$SPOOL/error.log" &
@@ -237,16 +262,21 @@ exec 3< <(tail -n 0 -F "$WAKE_LOG" 2>/dev/null)
 
 while mode_active; do
     if read -t 1 -u 3 -r line; then
+        norm_line="$(normalize "$line")"
         joined="$(normalize "$prev_line $line")"
         prev_line="$line"
         if [[ "$state" == "listening" ]]; then
-            case "$joined" in
-                *"$START_NORM"*) begin_dictation; prev_line="" ;;
-            esac
+            if matches_phrase "$joined" "$norm_line" "$START_NORM" "$START_STEM"; then
+                log_lifecycle "start trigger: '$line'"
+                begin_dictation
+                prev_line=""
+            fi
         else
-            case "$joined" in
-                *"$STOP_NORM"*) end_dictation; prev_line="" ;;
-            esac
+            if matches_phrase "$joined" "$norm_line" "$STOP_NORM" "$STOP_STEM"; then
+                log_lifecycle "stop trigger: '$line'"
+                end_dictation
+                prev_line=""
+            fi
         fi
     fi
     if [[ "$state" == "dictating" && "$STT_WAKE_MAX_DICTATION" != "0" ]] \
