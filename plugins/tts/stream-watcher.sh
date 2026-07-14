@@ -37,17 +37,32 @@ mode_active() {
 }
 
 # display-message -t exits 0 even for a dead pane (it falls back to another
-# target), so liveness needs an exact match against the real pane list.
+# target), so liveness needs an exact match against the real pane list. The
+# list is captured into a variable first: piping tmux straight into grep -q
+# can kill tmux with SIGPIPE, and under pipefail that reads as "pane dead".
 pane_alive() {
-    tmux list-panes -a -F '#{pane_id}' 2>/dev/null | grep -qx "$PANE_ID"
+    local panes
+    panes="$(tmux list-panes -a -F '#{pane_id}' 2>/dev/null)"
+    grep -qx "$PANE_ID" <<< "$panes"
+}
+
+# Lifecycle events go to a persistent log OUTSIDE the spool — teardown deletes
+# the spool, which would otherwise destroy the evidence of why it ran.
+log_lifecycle() {
+    printf '%s  watcher[%s]  %s\n' "$(date '+%F %T')" "$PANE_ID" "$*" \
+        >> "$TTS_DIR/stream.log" 2>/dev/null || true
 }
 
 # If the bound pane disappears, tear the whole mode down (workers exit once
 # stream.pane is gone) so a closed window can't leave orphan loops behind.
 teardown_dead_pane() {
+    log_lifecycle "teardown: pane no longer in list-panes (panes now: $(tmux list-panes -a -F '#{pane_id}' 2>/dev/null | tr '\n' ' '))"
     if mode_active; then
         rm -f "$STREAM_PANE_FILE"
     fi
+    # The pane is gone so its options usually died with it, but unmark anyway
+    # in case the id was reused — a stale @speak_on would frame a random pane.
+    tmux set-option -pt "$PANE_ID" -u @speak_on 2>/dev/null || true
     local f pid
     for f in "$SPOOL/synth.pid" "$SPOOL/player.pid"; do
         pid="$(cat "$f" 2>/dev/null)"

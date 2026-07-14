@@ -13,17 +13,11 @@ safe="$(cat "$STREAM_PANE_FILE" 2>/dev/null)"
 
 watcher_pid="$(cat "$TTS_DIR/$safe.stream/watcher.pid" 2>/dev/null)"
 if [[ -n "$watcher_pid" ]] && kill -0 "$watcher_pid" 2>/dev/null; then
-    # Label the bound pane by its branch (how envs are identified here),
-    # falling back to the directory name — a raw pane id like %4 means
-    # nothing in the status line.
-    dir="$(tmux display-message -pt "%$safe" '#{pane_current_path}' 2>/dev/null)"
-    label=""
-    if [[ -n "$dir" ]]; then
-        label="$(git -C "$dir" branch --show-current 2>/dev/null)"
-        [[ -z "$label" ]] && label="${dir##*/}"
-    fi
+    # The label was resolved once at enable time by toggle-stream.sh —
+    # re-deriving it here via display-message would silently read a DIFFERENT
+    # pane if the bound pane died (tmux falls back instead of failing).
+    label="$(cat "$TTS_DIR/$safe.stream/label" 2>/dev/null)"
     [[ -z "$label" ]] && label="pane $safe"
-    label="${label:0:24}"
     echo "#[bg=colour201,fg=colour231,bold] 🔊SPEAK $label #[default]"
 else
     # Watcher not (yet) alive. Only treat the mode file as stale after a

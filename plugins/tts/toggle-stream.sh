@@ -49,6 +49,31 @@ spool_for() {
     echo "$TTS_DIR/$1.stream"
 }
 
+# Lifecycle events persist outside the spool (teardown deletes the spool).
+log_lifecycle() {
+    printf '%s  toggle[%s]  %s\n' "$(date '+%F %T')" "$PANE_ID" "$*" \
+        >> "$TTS_DIR/stream.log" 2>/dev/null || true
+}
+
+# Human-meaningful name for the bound pane, resolved ONCE at enable time while
+# the pane is guaranteed alive: git branch, else env dir name, else basename.
+# The status script reads the stored result — re-deriving it later through a
+# dead pane id would silently read a DIFFERENT pane (display-message falls
+# back instead of failing).
+resolve_label() {
+    local pane_path label
+    pane_path="$(tmux display-message -pt "$PANE_ID" '#{pane_current_path}' 2>/dev/null)"
+    label="$(git -C "$pane_path" branch --show-current 2>/dev/null)"
+    if [[ -z "$label" && -n "$pane_path" ]]; then
+        case "$pane_path" in
+            */envs/*) label="${pane_path#*/envs/}"; label="${label%%/*}" ;;
+            *)        label="${pane_path##*/}" ;;
+        esac
+    fi
+    [[ -z "$label" ]] && label="pane $SAFE_PANE_ID"
+    echo "${label:0:24}"
+}
+
 # Serialize concurrent prefix-o presses; mkdir is atomic.
 acquire_toggle_lock() {
     local tries=0
@@ -132,11 +157,14 @@ start_stream() {
     stop_playback_for_pane "$SAFE_PANE_ID"
     echo "$SAFE_PANE_ID" > "$ACTIVE_FILE"
 
-    local spool
+    local spool label
     spool="$(spool_for "$SAFE_PANE_ID")"
     rm -rf "$spool"
     mkdir -p "$spool/chunks" "$spool/audio"
     echo 1 > "$spool/chunks/.next"
+    label="$(resolve_label)"
+    printf '%s\n' "$label" > "$spool/label"
+    log_lifecycle "enable: label='$label' path='$(tmux display-message -pt "$PANE_ID" '#{pane_current_path}' 2>/dev/null)'"
 
     # Spawn workers and record their PIDs BEFORE announcing the mode in
     # stream.pane. The status script's stale-cleanup treats "stream.pane set
@@ -160,10 +188,12 @@ acquire_toggle_lock
 
 owner="$(cat "$STREAM_PANE_FILE" 2>/dev/null)"
 if [[ "$owner" == "$SAFE_PANE_ID" ]]; then
+    log_lifecycle "disable by user"
     stop_stream_for_pane "$SAFE_PANE_ID"
     tmux refresh-client -S 2>/dev/null || true
     tmux display-message "Speak mode OFF"
 elif [[ -n "$owner" ]]; then
+    log_lifecycle "move from %$owner"
     stop_stream_for_pane "$owner"
     start_stream
     tmux refresh-client -S 2>/dev/null || true
