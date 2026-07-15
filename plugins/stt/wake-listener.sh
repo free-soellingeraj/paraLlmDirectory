@@ -293,6 +293,8 @@ begin_dictation() {
 }
 
 end_dictation() {
+    local stop_word="${1:-$STT_WAKE_TRANSCRIBE_WORD}"
+    INJECTED=0
     state="listening"
     dict_ended=$SECONDS
     echo "listening" > "$STATE_FILE"
@@ -323,7 +325,7 @@ end_dictation() {
     if [[ -n "$text" ]]; then
         # The stop phrase lands in the recording tail (and the start phrase
         # occasionally in the head) — strip them from the edges.
-        text="$(python3 - "$text" "$STT_WAKE_TRANSCRIBE_WORD" "$STT_WAKE_TRANSCRIBE_WORD" <<'PY'
+        text="$(python3 - "$text" "$STT_WAKE_TRANSCRIBE_WORD" "$stop_word" <<'PY'
 import re, sys
 text, start, stop = sys.argv[1], sys.argv[2], sys.argv[3]
 
@@ -337,9 +339,14 @@ def clipped_core(phrase):
     if any(s.startswith("transcri") for s in stems):
         stems.append("subscrib")  # common whisper mishearing
     shorts = [re.escape(w) for w in words if len(w) < 6]
-    if not stems:
+    if stems:
+        core = r"(?:%s)\w*" % "|".join(stems)
+    elif words:
+        # Short command word ("send"): exact-word match, no suffix expansion.
+        core = r"(?:%s)\b" % "|".join(re.escape(w) for w in words)
+        shorts = []
+    else:
         return None
-    core = r"(?:%s)\w*" % "|".join(stems)
     # Habit tolerance: "stop transcribe." at the tail should strip fully even
     # though the command word is just "transcribe".
     shorts = shorts or ["start", "stop", "begin", "end"]
@@ -370,7 +377,7 @@ PY
         return 0
     fi
 
-    tmux send-keys -t "$PANE_ID" -l "$text" 2>/dev/null || true
+    tmux send-keys -t "$PANE_ID" -l "$text" 2>/dev/null && INJECTED=1
     local preview="$text"
     [[ ${#preview} -gt 60 ]] && preview="${preview:0:60}..."
     tmux display-message -t "$PANE_ID" "Transcribed: $preview" 2>/dev/null || true
@@ -453,6 +460,20 @@ do_window() {
 }
 
 PAUSED=0
+INJECTED=0
+
+# "send" while dictating: stricter than the transcribe-end rule — an utterance
+# of at most TWO words ending with the send word ("send." / "and send"), so
+# dictated prose that merely mentions sending stays content.
+ends_with_send() {
+    local line="$1" count=0 last="" w
+    [[ -n "$SEND_STEM" ]] || return 1
+    for w in $line; do
+        count=$((count + 1))
+        last="$w"
+    done
+    [[ "$last" == "$SEND_STEM"* && "$count" -le 2 ]]
+}
 
 kill_inflight_afplay() {
     local pid child
@@ -592,6 +613,16 @@ while mode_active; do
                 log_lifecycle "transcribe-end trigger: '$line'"
                 end_dictation
                 echo_stem="$TRANSCRIBE_STEM"
+            elif [[ "$echo_stem" != "$SEND_STEM" ]] \
+                && ends_with_send "$norm_line"; then
+                # "send" closes the take AND submits — no second "transcribe".
+                log_lifecycle "send-end trigger: '$line'"
+                end_dictation "$STT_WAKE_SEND_WORD"
+                if [[ "$INJECTED" == "1" ]]; then
+                    sleep 0.4   # let the injected text settle in the input box
+                    do_send
+                fi
+                echo_stem="$SEND_STEM"
             fi
         fi
     fi
