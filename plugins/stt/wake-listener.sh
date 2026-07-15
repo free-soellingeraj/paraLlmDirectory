@@ -50,8 +50,6 @@ STT_WAKE_FAIL_SOUND="${STT_WAKE_FAIL_SOUND-/System/Library/Sounds/Basso.aiff}"
 STT_WAKE_MODEL="${STT_WAKE_MODEL:-ggml-tiny.en.bin}"
 STT_WAKE_STEP_MS="${STT_WAKE_STEP_MS:-2000}"
 STT_WAKE_MAX_DICTATION="${STT_WAKE_MAX_DICTATION:-120}"
-STT_WAKE_START_SOUND="${STT_WAKE_START_SOUND:-/System/Library/Sounds/Glass.aiff}"
-STT_WAKE_STOP_SOUND="${STT_WAKE_STOP_SOUND:-/System/Library/Sounds/Bottle.aiff}"
 
 WAKE_LOG="$SPOOL/wake.log"
 STATE_FILE="$SPOOL/wake.state"
@@ -249,7 +247,9 @@ matches_word() {
     elif player_speaking; then
         [[ "$found" -eq 0 && "$count" -eq 1 ]]
     else
-        [[ "$found" -eq 0 && "$count" -le 3 ]]
+        # Commands are spoken as lone words; <=2 tolerates a filler ("uh
+        # send") but keeps fragments of continuous speech from triggering.
+        [[ "$found" -eq 0 && "$count" -le 2 ]]
     fi
 }
 
@@ -283,7 +283,7 @@ begin_dictation() {
     echo "dictating" > "$STATE_FILE"
     dict_started=$SECONDS
     pause_playback
-    chime "$STT_WAKE_START_SOUND"
+    ack
     rm -f "$DICT_WAV"
     rec -b 16 -c 1 -r 16000 "$DICT_WAV" 2>"$SPOOL/dictation-rec.log" &
     echo "$!" > "$REC_PID_FILE"
@@ -302,7 +302,6 @@ end_dictation() {
     rec_pid="$(cat "$REC_PID_FILE" 2>/dev/null)"
     [[ -n "$rec_pid" ]] && kill_recorder "$rec_pid"
     rm -f "$REC_PID_FILE"
-    chime "$STT_WAKE_STOP_SOUND"
 
     local text=""
     local size
@@ -378,6 +377,7 @@ PY
     fi
 
     tmux send-keys -t "$PANE_ID" -l "$text" 2>/dev/null && INJECTED=1
+    if [[ "$INJECTED" == "1" ]]; then ack; else buzz; fi
     local preview="$text"
     [[ ${#preview} -gt 60 ]] && preview="${preview:0:60}..."
     tmux display-message -t "$PANE_ID" "Transcribed: $preview" 2>/dev/null || true
@@ -456,6 +456,17 @@ do_window() {
     fi
     log_lifecycle "window: moving speak mode to $target"
     ack
+    # Announce where we landed — env name if the pane lives in an env,
+    # else the tmux window name.
+    local tpath tlabel
+    tpath="$(tmux display-message -pt "$target" '#{pane_current_path}' 2>/dev/null)"
+    case "$tpath" in
+        */envs/*) tlabel="${tpath#*/envs/}"; tlabel="${tlabel%%/*}" ;;
+        *)        tlabel="$(tmux display-message -pt "$target" '#{window_name}' 2>/dev/null)" ;;
+    esac
+    if [[ -n "$tlabel" ]] && command -v say >/dev/null 2>&1; then
+        ( say "$tlabel" >/dev/null 2>&1 & )
+    fi
     nohup "$SCRIPT_DIR/../tts/toggle-stream.sh" "$target" >/dev/null 2>&1 &
 }
 
