@@ -26,6 +26,13 @@ fi
 export TTS_SYNTH_CHARS="${TTS_SYNTH_CHARS:-180}"
 export TTS_STREAM_FLUSH_SECS="${TTS_STREAM_FLUSH_SECS:-4}"
 export TTS_STREAM_REWRITE="${TTS_STREAM_REWRITE:-1}"
+
+# Attention chimes: when the bound pane's Claude transitions to "ready for
+# input" or "needs action" (permission prompt / question), play a sound so
+# headphone users know without watching the pane. Uses the claude-state
+# monitor's per-pane display files. Empty sound path disables.
+TTS_STREAM_READY_SOUND="${TTS_STREAM_READY_SOUND-/System/Library/Sounds/Ping.aiff}"
+TTS_STREAM_ACTION_SOUND="${TTS_STREAM_ACTION_SOUND-/System/Library/Sounds/Funk.aiff}"
 # 0.4s: a line must survive two consecutive polls to be spoken, and in small
 # command-center tiles (~15 rows on the alternate screen) prose can scroll out
 # of the viewport within a couple of seconds of a tool block rendering.
@@ -79,6 +86,44 @@ teardown_dead_pane() {
     tmux refresh-client -S 2>/dev/null || true
 }
 
+# Classify the bound pane's Claude state from the state monitor's display
+# file (e.g. "#[fg=green]Waiting for Input | repo | branch#[default]").
+pane_state() {
+    local f content=""
+    for f in "${PARA_LLM_ROOT:-$HOME/.para-llm-directory}/recovery/pane-display/$SAFE_PANE_ID" \
+             "/tmp/claude-pane-display/$SAFE_PANE_ID"; do
+        [[ -f "$f" ]] && { content="$(cat "$f" 2>/dev/null)"; break; }
+    done
+    case "$content" in
+        *"Needs Action"*)       echo action ;;
+        *"Waiting for Input"*)  echo ready ;;
+        *)                      echo other ;;
+    esac
+}
+
+LAST_PANE_STATE=""
+LAST_CHIME=0
+maybe_chime_state() {
+    local now_state
+    now_state="$(pane_state)"
+    if [[ "$now_state" != "$LAST_PANE_STATE" ]]; then
+        # Skip the very first observation (enabling the mode on an idle pane
+        # should not chime) and debounce flappy transitions.
+        if [[ -n "$LAST_PANE_STATE" ]] && (( SECONDS - LAST_CHIME >= 10 )); then
+            local sound=""
+            case "$now_state" in
+                ready)  sound="$TTS_STREAM_READY_SOUND" ;;
+                action) sound="$TTS_STREAM_ACTION_SOUND" ;;
+            esac
+            if [[ -n "$sound" && -f "$sound" ]] && command -v afplay >/dev/null 2>&1; then
+                afplay "$sound" >/dev/null 2>&1 &
+                LAST_CHIME=$SECONDS
+            fi
+        fi
+        LAST_PANE_STATE="$now_state"
+    fi
+}
+
 # The mode file is written shortly AFTER we are spawned (see toggle-stream.sh
 # start order) — wait briefly for it instead of exiting on a not-yet-on mode.
 tries=0
@@ -102,5 +147,6 @@ while mode_active; do
         printf '%s  stream-step.py failed\n' "$(date '+%H:%M:%S')" >> "$SPOOL/error.log"
     fi
 
+    maybe_chime_state
     sleep "$POLL_INTERVAL"
 done

@@ -141,6 +141,17 @@ def find_anchor_end(lines, anchor):
 
 
 cur = read_lines(cur_path) or []
+
+# Cut the input-box region: Claude Code renders it between two full-width
+# rules near the bottom (rule, "❯ " + typed text with UNMARKED wrap lines,
+# rule, tab bar). Only the first typed line carries the ❯ marker, so wrapped
+# typing would otherwise settle and be SPOKEN. Structural cut beats per-line
+# heuristics here.
+SEP_RE = re.compile(r"^\s*[─═━]{20,}\s*$")
+sep_idx = [i for i, l in enumerate(cur) if SEP_RE.match(l)]
+if len(sep_idx) >= 2 and sep_idx[-2] >= len(cur) - 15:
+    cur = cur[:sep_idx[-2]]
+
 spk_cur = [l for l in cur if speakable(l)]
 spk_prev = read_lines(prev_path)
 anchor = read_lines(anchor_path) or []

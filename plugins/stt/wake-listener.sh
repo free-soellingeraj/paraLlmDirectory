@@ -191,23 +191,29 @@ player_speaking() {
 
 # A command fires when a SHORT utterance contains a word starting with the
 # stem — word-prefix, not substring, so "send" never matches inside "ascend".
-# Thresholds tighten when leak risk is higher: while TTS audio is in flight
-# (the mic may hear the played voice) the utterance must be exactly one word,
-# and while dictating ($3 = strict) likewise — a lone "transcribe" ends the
-# take, but a sentence that merely mentions transcription stays content.
+# Modes:
+#   normal — <=3 words containing the stem; while TTS audio is in flight
+#            (mic leak risk) exactly one word.
+#   end    — ending a dictation: the stop word often lands in the SAME
+#            whisper segment as the last dictated words ("...make it purple
+#            transcribe"), so require the utterance to END with the stem
+#            (<=6 words). A sentence that merely mentions transcription
+#            mid-utterance stays content.
 matches_word() {
-    local line="$1" stem="$2" strict="${3:-}"
+    local line="$1" stem="$2" mode="${3:-normal}"
     [[ -n "$stem" && ${#stem} -ge 3 ]] || return 1
-    local count=0 found=1 w
+    local count=0 found=1 w last=""
     for w in $line; do
         count=$((count + 1))
+        last="$w"
         [[ "$w" == "$stem"* ]] && found=0
     done
-    [[ "$found" -eq 0 ]] || return 1
-    if [[ -n "$strict" ]] || player_speaking; then
-        [[ "$count" -eq 1 ]]
+    if [[ "$mode" == "end" ]]; then
+        [[ "$last" == "$stem"* && "$count" -le 6 ]]
+    elif player_speaking; then
+        [[ "$found" -eq 0 && "$count" -eq 1 ]]
     else
-        [[ "$count" -le 3 ]]
+        [[ "$found" -eq 0 && "$count" -le 3 ]]
     fi
 }
 
@@ -370,12 +376,11 @@ while mode_active; do
             echo_stem=""
         fi
         if [[ "$state" == "listening" ]]; then
-            # Cooldown after a dictation ends: the toggle word's audio tail
-            # and the resumed playback are still in whisper's window and must
-            # not immediately re-trigger.
-            if (( SECONDS - dict_ended < 3 )); then
-                :
-            elif [[ "$echo_stem" != "$TRANSCRIBE_STEM" ]] \
+            # The dictation cooldown only guards the transcribe re-trigger
+            # (its audio tail lingers in whisper's window) — "send" spoken a
+            # couple of seconds after stopping must go straight through.
+            if [[ "$echo_stem" != "$TRANSCRIBE_STEM" ]] \
+                && (( SECONDS - dict_ended >= 3 )) \
                 && matches_word "$norm_line" "$TRANSCRIBE_STEM"; then
                 log_lifecycle "transcribe trigger: '$line'"
                 begin_dictation
@@ -393,7 +398,7 @@ while mode_active; do
             fi
         else
             if [[ "$echo_stem" != "$TRANSCRIBE_STEM" ]] \
-                && matches_word "$norm_line" "$TRANSCRIBE_STEM" strict; then
+                && matches_word "$norm_line" "$TRANSCRIBE_STEM" end; then
                 log_lifecycle "transcribe-end trigger: '$line'"
                 end_dictation
                 echo_stem="$TRANSCRIBE_STEM"
