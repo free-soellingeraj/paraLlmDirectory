@@ -20,6 +20,8 @@ if [[ -n "$watcher_pid" ]] && kill -0 "$watcher_pid" 2>/dev/null; then
     [[ -z "$label" ]] && label="pane $safe"
     if [[ "$(cat "$TTS_DIR/$safe.stream/wake.state" 2>/dev/null)" == "dictating" ]]; then
         echo "#[bg=colour160,fg=colour231,bold] 🎤DICTATE $label #[default]"
+    elif [[ -f "$TTS_DIR/$safe.stream/paused" ]]; then
+        echo "#[bg=colour240,fg=colour231,bold] ⏸PAUSED $label #[default]"
     else
         echo "#[bg=colour201,fg=colour231,bold] 🔊SPEAK $label #[default]"
     fi

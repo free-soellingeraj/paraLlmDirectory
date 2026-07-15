@@ -38,6 +38,12 @@ STT_WAKE_TRANSCRIBE_WORD="${STT_WAKE_TRANSCRIBE_WORD:-transcribe}"
 STT_WAKE_REPEAT_WORD="${STT_WAKE_REPEAT_WORD:-repeat}"
 STT_WAKE_SEND_WORD="${STT_WAKE_SEND_WORD:-send}"
 STT_WAKE_WINDOW_WORD="${STT_WAKE_WINDOW_WORD:-window}"
+# Playback transport + input clearing.
+STT_WAKE_PAUSE_WORD="${STT_WAKE_PAUSE_WORD:-pause}"
+STT_WAKE_PLAY_WORD="${STT_WAKE_PLAY_WORD:-play}"
+STT_WAKE_FORWARD_WORD="${STT_WAKE_FORWARD_WORD:-forward}"
+STT_WAKE_REWIND_WORD="${STT_WAKE_REWIND_WORD:-rewind}"
+STT_WAKE_CLEAR_WORD="${STT_WAKE_CLEAR_WORD:-text box}"
 # Every accepted command clicks; every failed action buzzes.
 STT_WAKE_ACK_SOUND="${STT_WAKE_ACK_SOUND-/System/Library/Sounds/Pop.aiff}"
 STT_WAKE_FAIL_SOUND="${STT_WAKE_FAIL_SOUND-/System/Library/Sounds/Basso.aiff}"
@@ -182,9 +188,31 @@ stem8() {
     printf '%s' "${n:0:8}"
 }
 TRANSCRIBE_STEM="$(stem8 "$STT_WAKE_TRANSCRIBE_WORD")"
+# Whisper regularly mishears "transcribe" as "subscribe" (observed in real
+# dictations) — accept it as an alias for the toggle word.
+TRANSCRIBE_ALT_STEM="subscrib"
+
+matches_transcribe() {
+    matches_word "$1" "$TRANSCRIBE_STEM" "${2:-normal}" \
+        || matches_word "$1" "$TRANSCRIBE_ALT_STEM" "${2:-normal}"
+}
 REPEAT_STEM="$(stem8 "$STT_WAKE_REPEAT_WORD")"
 SEND_STEM="$(stem8 "$STT_WAKE_SEND_WORD")"
 WINDOW_STEM="$(stem8 "$STT_WAKE_WINDOW_WORD")"
+PAUSE_STEM="$(stem8 "$STT_WAKE_PAUSE_WORD")"
+PLAY_STEM="$(stem8 "$STT_WAKE_PLAY_WORD")"
+FORWARD_STEM="$(stem8 "$STT_WAKE_FORWARD_WORD")"
+REWIND_STEM="$(stem8 "$STT_WAKE_REWIND_WORD")"
+CLEAR_STEM="$(stem8 "${STT_WAKE_CLEAR_WORD%% *}")"
+CLEAR_NORM="$(normalize "$STT_WAKE_CLEAR_WORD")"
+
+# Multi-word command ("text box"): contains-match on a short utterance.
+matches_clear() {
+    local line="$1" count
+    [[ "$line" == *"$CLEAR_NORM"* ]] || return 1
+    count="$(printf '%s' "$line" | wc -w | tr -d ' ')"
+    [[ "$count" -le 4 ]]
+}
 
 ack() { chime "$STT_WAKE_ACK_SOUND"; }
 buzz() { chime "$STT_WAKE_FAIL_SOUND"; }
@@ -306,6 +334,8 @@ text, start, stop = sys.argv[1], sys.argv[2], sys.argv[3]
 def clipped_core(phrase):
     words = phrase.split()
     stems = [re.escape(w[:8]) for w in words if len(w) >= 6]
+    if any(s.startswith("transcri") for s in stems):
+        stems.append("subscrib")  # common whisper mishearing
     shorts = [re.escape(w) for w in words if len(w) < 6]
     if not stems:
         return None
@@ -327,7 +357,10 @@ PY
 )"
     fi
 
-    resume_playback
+    # Respect an explicit user pause: dictation ending must not unpause.
+    if [[ "$PAUSED" != "1" ]]; then
+        resume_playback
+    fi
     tmux refresh-client -S 2>/dev/null || true
 
     if [[ -z "$text" ]]; then
@@ -419,6 +452,76 @@ do_window() {
     nohup "$SCRIPT_DIR/../tts/toggle-stream.sh" "$target" >/dev/null 2>&1 &
 }
 
+PAUSED=0
+
+kill_inflight_afplay() {
+    local pid child
+    pid="$(player_pid)"
+    [[ -n "$pid" ]] || return 0
+    for child in $(pgrep -P "$pid" -x afplay 2>/dev/null); do
+        kill -9 "$child" 2>/dev/null || true
+    done
+}
+
+# "pause": stop talking NOW and stay quiet until "play". Queued audio ages out
+# via the stale-skip, so resume lands on current content, not the backlog.
+do_pause() {
+    if [[ "$PAUSED" == "1" ]]; then
+        buzz
+        return 0
+    fi
+    PAUSED=1
+    touch "$SPOOL/paused"
+    pause_playback
+    ack
+    log_lifecycle "pause"
+    tmux display-message -t "$PANE_ID" "⏸ Paused — say '$STT_WAKE_PLAY_WORD' to resume" 2>/dev/null || true
+    tmux refresh-client -S 2>/dev/null || true
+}
+
+do_play() {
+    if [[ "$PAUSED" != "1" ]]; then
+        buzz
+        return 0
+    fi
+    PAUSED=0
+    rm -f "$SPOOL/paused"
+    resume_playback
+    ack
+    log_lifecycle "play"
+    tmux refresh-client -S 2>/dev/null || true
+}
+
+# Seeks are chunk-based (~1 chunk ≈ 10-15s of speech): the listener writes a
+# command for the player loop and kills the in-flight afplay so it reacts now.
+do_forward() {
+    echo "skip 1" > "$SPOOL/player.cmd"
+    kill_inflight_afplay
+    ack
+    log_lifecycle "forward"
+}
+
+do_rewind() {
+    echo "back 2" > "$SPOOL/player.cmd"
+    kill_inflight_afplay
+    ack
+    log_lifecycle "rewind"
+}
+
+# "text box": clear the dictated blob from Claude Code's input. A single
+# Ctrl+C clears a non-empty input box (and merely warns on an empty one —
+# never sent twice, so it cannot exit the REPL).
+do_clear() {
+    if tmux send-keys -t "$PANE_ID" C-c 2>/dev/null; then
+        ack
+        log_lifecycle "clear: input box cleared"
+        tmux display-message -t "$PANE_ID" "🗑 Input cleared" 2>/dev/null || true
+    else
+        buzz
+        log_lifecycle "clear FAILED: send-keys error"
+    fi
+}
+
 # Follow the whisper-stream transcript. read -t keeps the loop ticking so the
 # max-dictation timeout and mode checks run even when nobody is speaking.
 # Matching uses the last two lines joined, so a phrase split across two
@@ -438,7 +541,7 @@ while mode_active; do
             # couple of seconds after stopping must go straight through.
             if [[ "$echo_stem" != "$TRANSCRIBE_STEM" ]] \
                 && (( SECONDS - dict_ended >= 3 )) \
-                && matches_word "$norm_line" "$TRANSCRIBE_STEM"; then
+                && matches_transcribe "$norm_line"; then
                 log_lifecycle "transcribe trigger: '$line'"
                 begin_dictation
                 echo_stem="$TRANSCRIBE_STEM"
@@ -457,10 +560,35 @@ while mode_active; do
                 log_lifecycle "window trigger: '$line'"
                 do_window
                 echo_stem="$WINDOW_STEM"
+            elif [[ "$echo_stem" != "$PAUSE_STEM" ]] \
+                && matches_word "$norm_line" "$PAUSE_STEM"; then
+                log_lifecycle "pause trigger: '$line'"
+                do_pause
+                echo_stem="$PAUSE_STEM"
+            elif [[ "$echo_stem" != "$PLAY_STEM" ]] \
+                && matches_word "$norm_line" "$PLAY_STEM"; then
+                log_lifecycle "play trigger: '$line'"
+                do_play
+                echo_stem="$PLAY_STEM"
+            elif [[ "$echo_stem" != "$FORWARD_STEM" ]] \
+                && matches_word "$norm_line" "$FORWARD_STEM"; then
+                log_lifecycle "forward trigger: '$line'"
+                do_forward
+                echo_stem="$FORWARD_STEM"
+            elif [[ "$echo_stem" != "$REWIND_STEM" ]] \
+                && matches_word "$norm_line" "$REWIND_STEM"; then
+                log_lifecycle "rewind trigger: '$line'"
+                do_rewind
+                echo_stem="$REWIND_STEM"
+            elif [[ "$echo_stem" != "$CLEAR_STEM" ]] \
+                && matches_clear "$norm_line"; then
+                log_lifecycle "clear trigger: '$line'"
+                do_clear
+                echo_stem="$CLEAR_STEM"
             fi
         else
             if [[ "$echo_stem" != "$TRANSCRIBE_STEM" ]] \
-                && matches_word "$norm_line" "$TRANSCRIBE_STEM" end; then
+                && matches_transcribe "$norm_line" end; then
                 log_lifecycle "transcribe-end trigger: '$line'"
                 end_dictation
                 echo_stem="$TRANSCRIBE_STEM"

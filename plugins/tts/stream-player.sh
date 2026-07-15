@@ -45,8 +45,51 @@ until mode_active; do
     sleep 0.1
 done
 
+# Recently played chunks are kept (last 4) so "rewind" can restore them; the
+# wake listener requests seeks by writing "back N" / "skip N" to player.cmd
+# and killing the in-flight afplay so this loop reacts promptly.
+PLAYED="$SPOOL/played"
+CMD="$SPOOL/player.cmd"
+mkdir -p "$PLAYED"
+
+log_player() {
+    printf '%s  player: %s\n' "$(date '+%H:%M:%S')" "$*" >> "$SPOOL/error.log" 2>/dev/null || true
+}
+
+handle_cmd() {
+    [[ -s "$CMD" ]] || return 0
+    local cmd n i seqp f
+    read -r cmd n < "$CMD" || true
+    : > "$CMD"
+    case "$cmd" in
+        back)
+            for ((i = 0; i < ${n:-1}; i++)); do
+                seqp="$(printf '%05d' $((next - 1)))"
+                f="$(ls "$PLAYED/$seqp".* 2>/dev/null | head -1)"
+                [[ -n "$f" ]] || break
+                mv "$f" "$AUDIO/"
+                # Fresh mtime, or the stale-skip would discard the rewind.
+                touch "$AUDIO/$(basename "$f")"
+                next=$((next - 1))
+            done
+            log_player "rewound to chunk $next"
+            ;;
+        skip)
+            for ((i = 0; i < ${n:-1}; i++)); do
+                seqp="$(printf '%05d' "$next")"
+                f="$(ls "$AUDIO/$seqp".* 2>/dev/null | head -1)"
+                [[ -n "$f" ]] || break
+                rm -f "$f"
+                next=$((next + 1))
+            done
+            log_player "skipped forward to chunk $next"
+            ;;
+    esac
+}
+
 next=1
 while mode_active; do
+    handle_cmd
     seq="$(printf '%05d' "$next")"
     file=""
     for candidate in "$AUDIO/$seq.mp3" "$AUDIO/$seq.aiff"; do
@@ -63,8 +106,7 @@ while mode_active; do
 
     if [[ "$TTS_STREAM_MAX_LAG_SECS" != "0" ]] \
         && [[ "$(file_age "$file")" -gt "$TTS_STREAM_MAX_LAG_SECS" ]]; then
-        printf '%s  player: skipped stale chunk %s\n' "$(date '+%H:%M:%S')" "$seq" \
-            >> "$SPOOL/error.log" 2>/dev/null || true
+        log_player "skipped stale chunk $seq"
         rm -f "$file"
         next=$((next + 1))
         continue
@@ -72,10 +114,13 @@ while mode_active; do
 
     age="$(file_age "$file")"
     if [[ "$age" -gt 15 ]]; then
-        printf '%s  player: chunk %s played %ss late\n' "$(date '+%H:%M:%S')" "$seq" "$age" \
-            >> "$SPOOL/error.log" 2>/dev/null || true
+        log_player "chunk $seq played ${age}s late"
     fi
     afplay "$file" 2>> "$SPOOL/error.log" || true
-    rm -f "$file"
+    mv "$file" "$PLAYED/" 2>/dev/null || rm -f "$file"
     next=$((next + 1))
+    # Prune the rewind buffer to the last 4 chunks.
+    while [[ "$(ls -1 "$PLAYED" 2>/dev/null | wc -l | tr -d ' ')" -gt 4 ]]; do
+        rm -f "$PLAYED/$(ls -1 "$PLAYED" | sort | head -1)"
+    done
 done

@@ -211,6 +211,11 @@ STT_WAKE_TRANSCRIBE_WORD="transcribe"  # Toggles dictation: say it to start, say
 STT_WAKE_REPEAT_WORD="repeat"    # Re-runs the recap (spoken summary of the pane)
 STT_WAKE_SEND_WORD="send"        # Presses Enter in the bound pane
 STT_WAKE_WINDOW_WORD="window"    # Moves speak mode to the next window (or next pane if one window)
+STT_WAKE_PAUSE_WORD="pause"      # Stops playback until "play"; queued speech ages out so resume is current
+STT_WAKE_PLAY_WORD="play"        # Resumes paused playback
+STT_WAKE_FORWARD_WORD="forward"  # Skips ~15s ahead ("fast forward" works too)
+STT_WAKE_REWIND_WORD="rewind"    # Replays ~15s (last two spoken chunks)
+STT_WAKE_CLEAR_WORD="text box"   # Clears the dictated text from the input box (sends one Ctrl+C)
 STT_WAKE_MAX_DICTATION="120"     # Force-end dictation after this many seconds (0 = no cap)
 STT_WAKE_ACK_SOUND="/System/Library/Sounds/Pop.aiff"    # Played when a voice command is accepted (empty = off)
 STT_WAKE_FAIL_SOUND="/System/Library/Sounds/Basso.aiff" # Played when a voice command fails (empty = off)
