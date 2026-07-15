@@ -48,6 +48,10 @@ STT_WAKE_DIGEST_WORD="${STT_WAKE_DIGEST_WORD:-digest}"
 # Every accepted command clicks; every failed action buzzes.
 STT_WAKE_ACK_SOUND="${STT_WAKE_ACK_SOUND-/System/Library/Sounds/Pop.aiff}"
 STT_WAKE_FAIL_SOUND="${STT_WAKE_FAIL_SOUND-/System/Library/Sounds/Basso.aiff}"
+# Dictation keeps its own distinct pair (user preference): Glass = mic open,
+# Bottle = transcript landed.
+STT_WAKE_START_SOUND="${STT_WAKE_START_SOUND:-/System/Library/Sounds/Glass.aiff}"
+STT_WAKE_STOP_SOUND="${STT_WAKE_STOP_SOUND:-/System/Library/Sounds/Bottle.aiff}"
 STT_WAKE_MODEL="${STT_WAKE_MODEL:-ggml-tiny.en.bin}"
 STT_WAKE_STEP_MS="${STT_WAKE_STEP_MS:-1500}"
 STT_WAKE_MAX_DICTATION="${STT_WAKE_MAX_DICTATION:-120}"
@@ -285,7 +289,7 @@ begin_dictation() {
     echo "dictating" > "$STATE_FILE"
     dict_started=$SECONDS
     pause_playback
-    ack
+    chime "$STT_WAKE_START_SOUND"
     rm -f "$DICT_WAV"
     rec -b 16 -c 1 -r 16000 "$DICT_WAV" 2>"$SPOOL/dictation-rec.log" &
     echo "$!" > "$REC_PID_FILE"
@@ -379,7 +383,7 @@ PY
     fi
 
     tmux send-keys -t "$PANE_ID" -l "$text" 2>/dev/null && INJECTED=1
-    if [[ "$INJECTED" == "1" ]]; then ack; else buzz; fi
+    if [[ "$INJECTED" == "1" ]]; then chime "$STT_WAKE_STOP_SOUND"; else buzz; fi
     local preview="$text"
     [[ ${#preview} -gt 60 ]] && preview="${preview:0:60}..."
     tmux display-message -t "$PANE_ID" "Transcribed: $preview" 2>/dev/null || true
