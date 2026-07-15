@@ -25,7 +25,8 @@ fi
 
 export TTS_SYNTH_CHARS="${TTS_SYNTH_CHARS:-180}"
 export TTS_STREAM_FLUSH_SECS="${TTS_STREAM_FLUSH_SECS:-4}"
-export TTS_STREAM_REWRITE="${TTS_STREAM_REWRITE:-1}"
+# Opt-in: codex rewrite adds 30-60s of latency per batch (measured live).
+export TTS_STREAM_REWRITE="${TTS_STREAM_REWRITE:-0}"
 
 # Attention chimes: when the bound pane's Claude transitions to "ready for
 # input" or "needs action" (permission prompt / question), play a sound so

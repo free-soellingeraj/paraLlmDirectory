@@ -42,9 +42,11 @@ pending_path = os.path.join(spool, "pending.txt")
 spoken_path = os.path.join(spool, "spoken.recent")
 events_path = os.path.join(spool, "events.log")
 
-# With the rewrite phase on (default), settled text goes to the raw/ queue for
-# stream-rewrite.sh to make listenable; otherwise straight to the audio queue.
-rewrite_on = os.environ.get("TTS_STREAM_REWRITE", "1") != "0"
+# With the rewrite phase on (OPT-IN: a codex call takes 30-60s, which makes
+# speech arrive absurdly late — measured live), settled text goes to the raw/
+# queue for stream-rewrite.sh; otherwise straight to the audio queue with the
+# local speechify pass in normalize() below.
+rewrite_on = os.environ.get("TTS_STREAM_REWRITE", "0") != "0"
 chunks_dir = os.path.join(spool, "raw" if rewrite_on else "chunks")
 next_path = os.path.join(chunks_dir, ".next")
 
@@ -249,8 +251,14 @@ if os.path.exists(framing_lock):
 
 
 def normalize(text):
+    """Local speechify pass — instant, unlike the opt-in codex rewrite."""
     text = text.replace("⏺", " ").replace("●", " ")
-    text = re.sub(r"[*_`#|]+", " ", text)
+    text = re.sub(r"https?://\S+", " link ", text)
+    text = re.sub(r"\b[0-9a-f]{7,40}\b", " ", text)        # commit hashes
+    text = re.sub(r"(?:[\w.-]+/)+([\w.-]+)", r"\1", text)  # paths -> basename
+    text = re.sub(r"->|=>|→", " to ", text)
+    text = re.sub(r"&&", " and ", text)
+    text = re.sub(r"[*_`#|~]+", " ", text)
     text = re.sub(r"\s+", " ", text)
     return text.strip()
 

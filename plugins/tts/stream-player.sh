@@ -24,7 +24,7 @@ fi
 # Freshness beats completeness: audio synthesized longer ago than this is
 # stale commentary — skip it so speech stays near-live and pauses (during
 # which voice commands match leniently) actually occur. 0 disables.
-TTS_STREAM_MAX_LAG_SECS="${TTS_STREAM_MAX_LAG_SECS:-30}"
+TTS_STREAM_MAX_LAG_SECS="${TTS_STREAM_MAX_LAG_SECS:-45}"
 
 file_age() {
     local m
@@ -70,6 +70,11 @@ while mode_active; do
         continue
     fi
 
+    age="$(file_age "$file")"
+    if [[ "$age" -gt 15 ]]; then
+        printf '%s  player: chunk %s played %ss late\n' "$(date '+%H:%M:%S')" "$seq" "$age" \
+            >> "$SPOOL/error.log" 2>/dev/null || true
+    fi
     afplay "$file" 2>> "$SPOOL/error.log" || true
     rm -f "$file"
     next=$((next + 1))
