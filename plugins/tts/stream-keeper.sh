@@ -32,6 +32,7 @@ echo "$$" > "$PIDF"
 log_keeper "started"
 
 fails=0
+unhealthy=0
 while [[ -f "$KEEP" ]]; do
     safe="$(sed -n 1p "$KEEP" 2>/dev/null)"
     want_path="$(sed -n 2p "$KEEP" 2>/dev/null)"
@@ -44,6 +45,16 @@ while [[ -f "$KEEP" ]]; do
     wpid="$(cat "$TTS_DIR/$safe.stream/watcher.pid" 2>/dev/null)"
     if [[ "$cur" == "$safe" && -n "$wpid" ]] && kill -0 "$wpid" 2>/dev/null; then
         fails=0
+        unhealthy=0
+        sleep 10
+        continue
+    fi
+
+    # Require TWO consecutive unhealthy checks before intervening: a mode
+    # mid-move (keepalive being rewritten for the new pane) looks unhealthy
+    # for a moment, and reviving into it fights the move (observed live).
+    unhealthy=$((unhealthy + 1))
+    if [[ "$unhealthy" -lt 2 ]]; then
         sleep 10
         continue
     fi

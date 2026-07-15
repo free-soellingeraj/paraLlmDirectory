@@ -545,17 +545,17 @@ while mode_active; do
                 log_lifecycle "transcribe trigger: '$line'"
                 begin_dictation
                 echo_stem="$TRANSCRIBE_STEM"
-            elif [[ "$echo_stem" != "$REPEAT_STEM" ]] \
+            elif ! player_speaking && [[ "$echo_stem" != "$REPEAT_STEM" ]] \
                 && matches_word "$norm_line" "$REPEAT_STEM"; then
                 log_lifecycle "repeat trigger: '$line'"
                 do_repeat
                 echo_stem="$REPEAT_STEM"
-            elif [[ "$echo_stem" != "$SEND_STEM" ]] \
+            elif ! player_speaking && [[ "$echo_stem" != "$SEND_STEM" ]] \
                 && matches_word "$norm_line" "$SEND_STEM"; then
                 log_lifecycle "send trigger: '$line'"
                 do_send
                 echo_stem="$SEND_STEM"
-            elif [[ "$echo_stem" != "$WINDOW_STEM" ]] \
+            elif ! player_speaking && [[ "$echo_stem" != "$WINDOW_STEM" ]] \
                 && matches_word "$norm_line" "$WINDOW_STEM"; then
                 log_lifecycle "window trigger: '$line'"
                 do_window
@@ -565,7 +565,7 @@ while mode_active; do
                 log_lifecycle "pause trigger: '$line'"
                 do_pause
                 echo_stem="$PAUSE_STEM"
-            elif [[ "$echo_stem" != "$PLAY_STEM" ]] \
+            elif ! player_speaking && [[ "$echo_stem" != "$PLAY_STEM" ]] \
                 && matches_word "$norm_line" "$PLAY_STEM"; then
                 log_lifecycle "play trigger: '$line'"
                 do_play
@@ -580,7 +580,7 @@ while mode_active; do
                 log_lifecycle "rewind trigger: '$line'"
                 do_rewind
                 echo_stem="$REWIND_STEM"
-            elif [[ "$echo_stem" != "$CLEAR_STEM" ]] \
+            elif ! player_speaking && [[ "$echo_stem" != "$CLEAR_STEM" ]] \
                 && matches_clear "$norm_line"; then
                 log_lifecycle "clear trigger: '$line'"
                 do_clear
