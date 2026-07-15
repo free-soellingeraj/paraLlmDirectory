@@ -107,7 +107,18 @@ fi
 mode_active || exit 0
 
 # Lead-in so the recap is audibly distinct from the live stream that follows.
-printf 'Recap. %s\n' "$(cat "$SPOOL/framing.speech")" > "$SPOOL/framing.final"
+# Cap the recap at ~2 sentences-worth of audio: a minute-long recap monologue
+# starves the live stream (everything arriving meanwhile goes stale).
+python3 - "$SPOOL/framing.speech" "${TTS_STREAM_RECAP_CHARS:-400}" > "$SPOOL/framing.final" <<'CAPPY'
+import re, sys
+text = open(sys.argv[1], errors="replace").read().strip()
+limit = int(sys.argv[2])
+text = re.sub(r"\s+", " ", text)
+if len(text) > limit:
+    cut = text.rfind(". ", 0, limit)
+    text = text[:cut + 1] if cut > 40 else text[:limit]
+print("Recap. " + text)
+CAPPY
 
 chunk_dir="$SPOOL/framing.chunks"
 if ! split_speech_for_synthesis "$SPOOL/framing.final" "$chunk_dir" "$TTS_SYNTH_CHARS"; then

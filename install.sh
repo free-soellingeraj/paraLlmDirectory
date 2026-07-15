@@ -214,7 +214,9 @@ STT_WAKE_WINDOW_WORD="window"    # Moves speak mode to the next window (or next 
 STT_WAKE_MAX_DICTATION="120"     # Force-end dictation after this many seconds (0 = no cap)
 STT_WAKE_ACK_SOUND="/System/Library/Sounds/Pop.aiff"    # Played when a voice command is accepted (empty = off)
 STT_WAKE_FAIL_SOUND="/System/Library/Sounds/Basso.aiff" # Played when a voice command fails (empty = off)
-TTS_STREAM_MAX_LAG_SECS="45"     # Skip queued speech older than this so playback stays near-live (0 = never skip)
+TTS_STREAM_MAX_LAG_SECS="20"     # Max speech lag: older queued audio is skipped ("repeat" recovers detail; 0 = never skip)
+TTS_STREAM_RATE="+10%"           # Stream-mode speaking rate (reading speed is the throughput bottleneck)
+TTS_STREAM_RECAP_CHARS="400"     # Cap recap length so it does not starve the live stream
 # STT_LANGUAGE="en"
 # STT_MODEL_PATH=""  # Override model location (default: $PARA_LLM_ROOT/plugins/stt/models/ggml-base.en.bin)
 EOF

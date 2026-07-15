@@ -30,7 +30,10 @@ TTS_VOLUME="${TTS_VOLUME:-+0%}"
 TTS_PITCH="${TTS_PITCH:-+0Hz}"
 TTS_SYNTH_TIMEOUT="${TTS_SYNTH_TIMEOUT:-20}"
 TTS_STREAM_ENGINE="${TTS_STREAM_ENGINE:-edge-tts}"
-TTS_STREAM_MAX_LAG_SECS="${TTS_STREAM_MAX_LAG_SECS:-45}"
+TTS_STREAM_MAX_LAG_SECS="${TTS_STREAM_MAX_LAG_SECS:-20}"
+# Stream mode speaks slightly faster than one-shot playback: reading speed is
+# the pipeline's bottleneck, and +10% meaningfully raises throughput.
+TTS_RATE="${TTS_STREAM_RATE:-+10%}"
 
 source "$SCRIPT_DIR/tts-lib.sh"
 

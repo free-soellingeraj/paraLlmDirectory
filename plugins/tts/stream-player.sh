@@ -24,7 +24,7 @@ fi
 # Freshness beats completeness: audio synthesized longer ago than this is
 # stale commentary — skip it so speech stays near-live and pauses (during
 # which voice commands match leniently) actually occur. 0 disables.
-TTS_STREAM_MAX_LAG_SECS="${TTS_STREAM_MAX_LAG_SECS:-45}"
+TTS_STREAM_MAX_LAG_SECS="${TTS_STREAM_MAX_LAG_SECS:-20}"
 
 file_age() {
     local m
