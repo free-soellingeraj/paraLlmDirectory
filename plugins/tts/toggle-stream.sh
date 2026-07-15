@@ -190,8 +190,22 @@ start_stream() {
     # the pane and speak it before live streaming starts. The lock gates the
     # watcher's chunk emission until the recap is enqueued (or fails/skips) —
     # it must exist BEFORE the workers start.
-    if [[ "${TTS_STREAM_FRAMING:-1}" != "0" && "${TTS_SUMMARIZE:-1}" != "0" ]]; then
+    if [[ "${TTS_STREAM_FRAMING:-1}" != "0" && "${TTS_SUMMARIZE:-1}" != "0" \
+        && "${TTS_STREAM_NO_FRAMING:-0}" != "1" ]]; then
         touch "$spool/framing.lock"
+    fi
+
+    # Persistence: record the binding intent; the keeper revives the mode
+    # after any death that isn't the explicit user toggle-off below. Gate
+    # with TTS_STREAM_PERSIST=0 to restore fire-and-forget behavior.
+    if [[ "${TTS_STREAM_PERSIST:-1}" != "0" ]]; then
+        printf '%s\n%s\n' "$SAFE_PANE_ID" \
+            "$(tmux display-message -pt "$PANE_ID" '#{pane_current_path}' 2>/dev/null)" \
+            > "$TTS_DIR/keepalive"
+        keeper_pid="$(cat "$TTS_DIR/keeper.pid" 2>/dev/null)"
+        if [[ -z "$keeper_pid" ]] || ! kill -0 "$keeper_pid" 2>/dev/null; then
+            nohup "$SCRIPT_DIR/stream-keeper.sh" >/dev/null 2>&1 &
+        fi
     fi
 
     nohup "$SCRIPT_DIR/stream-watcher.sh" "$PANE_ID" "$spool" >/dev/null 2>&1 &
@@ -224,6 +238,9 @@ acquire_toggle_lock
 owner="$(cat "$STREAM_PANE_FILE" 2>/dev/null)"
 if [[ "$owner" == "$SAFE_PANE_ID" ]]; then
     log_lifecycle "disable by user"
+    # The ONLY path that clears the persistence marker — everything else the
+    # keeper treats as a crash to heal.
+    rm -f "$TTS_DIR/keepalive"
     stop_stream_for_pane "$SAFE_PANE_ID"
     tmux refresh-client -S 2>/dev/null || true
     tmux display-message "Speak mode OFF"
