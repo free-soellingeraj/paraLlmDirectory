@@ -210,7 +210,11 @@ STT_WAKE_ENABLED=1               # Listen for the words below while speak mode i
 STT_WAKE_TRANSCRIBE_WORD="transcribe"  # Toggles dictation: say it to start, say it again to inject (no Enter)
 STT_WAKE_REPEAT_WORD="repeat"    # Re-runs the recap (spoken summary of the pane)
 STT_WAKE_SEND_WORD="send"        # Presses Enter in the bound pane
+STT_WAKE_WINDOW_WORD="window"    # Moves speak mode to the next window (or next pane if one window)
 STT_WAKE_MAX_DICTATION="120"     # Force-end dictation after this many seconds (0 = no cap)
+STT_WAKE_ACK_SOUND="/System/Library/Sounds/Pop.aiff"    # Played when a voice command is accepted (empty = off)
+STT_WAKE_FAIL_SOUND="/System/Library/Sounds/Basso.aiff" # Played when a voice command fails (empty = off)
+TTS_STREAM_MAX_LAG_SECS="30"     # Skip queued speech older than this so playback stays near-live (0 = never skip)
 # STT_LANGUAGE="en"
 # STT_MODEL_PATH=""  # Override model location (default: $PARA_LLM_ROOT/plugins/stt/models/ggml-base.en.bin)
 EOF

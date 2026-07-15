@@ -30,6 +30,7 @@ TTS_VOLUME="${TTS_VOLUME:-+0%}"
 TTS_PITCH="${TTS_PITCH:-+0Hz}"
 TTS_SYNTH_TIMEOUT="${TTS_SYNTH_TIMEOUT:-20}"
 TTS_STREAM_ENGINE="${TTS_STREAM_ENGINE:-edge-tts}"
+TTS_STREAM_MAX_LAG_SECS="${TTS_STREAM_MAX_LAG_SECS:-30}"
 
 source "$SCRIPT_DIR/tts-lib.sh"
 
@@ -62,6 +63,17 @@ while mode_active; do
     if [[ ! -f "$chunk" ]]; then
         sleep 0.3
         continue
+    fi
+
+    # Don't waste synthesis on stale commentary (see stream-player.sh).
+    if [[ "$TTS_STREAM_MAX_LAG_SECS" != "0" ]]; then
+        chunk_mtime="$(stat -f %m "$chunk" 2>/dev/null || stat -c %Y "$chunk" 2>/dev/null || echo 0)"
+        if (( $(date +%s) - chunk_mtime > TTS_STREAM_MAX_LAG_SECS )); then
+            log_error "skipped stale text chunk $seq"
+            rm -f "$chunk"
+            next=$((next + 1))
+            continue
+        fi
     fi
 
     done_file=""

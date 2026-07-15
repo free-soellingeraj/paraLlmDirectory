@@ -37,6 +37,10 @@ fi
 STT_WAKE_TRANSCRIBE_WORD="${STT_WAKE_TRANSCRIBE_WORD:-transcribe}"
 STT_WAKE_REPEAT_WORD="${STT_WAKE_REPEAT_WORD:-repeat}"
 STT_WAKE_SEND_WORD="${STT_WAKE_SEND_WORD:-send}"
+STT_WAKE_WINDOW_WORD="${STT_WAKE_WINDOW_WORD:-window}"
+# Every accepted command clicks; every failed action buzzes.
+STT_WAKE_ACK_SOUND="${STT_WAKE_ACK_SOUND-/System/Library/Sounds/Pop.aiff}"
+STT_WAKE_FAIL_SOUND="${STT_WAKE_FAIL_SOUND-/System/Library/Sounds/Basso.aiff}"
 STT_WAKE_MODEL="${STT_WAKE_MODEL:-ggml-tiny.en.bin}"
 STT_WAKE_STEP_MS="${STT_WAKE_STEP_MS:-2000}"
 STT_WAKE_MAX_DICTATION="${STT_WAKE_MAX_DICTATION:-120}"
@@ -180,6 +184,10 @@ stem8() {
 TRANSCRIBE_STEM="$(stem8 "$STT_WAKE_TRANSCRIBE_WORD")"
 REPEAT_STEM="$(stem8 "$STT_WAKE_REPEAT_WORD")"
 SEND_STEM="$(stem8 "$STT_WAKE_SEND_WORD")"
+WINDOW_STEM="$(stem8 "$STT_WAKE_WINDOW_WORD")"
+
+ack() { chime "$STT_WAKE_ACK_SOUND"; }
+buzz() { chime "$STT_WAKE_FAIL_SOUND"; }
 
 # True while the player has an afplay in flight — i.e., TTS audio is coming
 # out of the speakers, which the mic may hear (feedback).
@@ -325,6 +333,7 @@ PY
     if [[ -z "$text" ]]; then
         tmux display-message -t "$PANE_ID" "STT: no speech detected" 2>/dev/null || true
         log_lifecycle "dictation ended: no speech"
+        buzz
         return 0
     fi
 
@@ -342,24 +351,72 @@ do_repeat() {
     local fpid
     fpid="$(framing_pid)"
     if [[ -n "$fpid" ]] && kill -0 "$fpid" 2>/dev/null; then
-        log_lifecycle "repeat-that ignored: recap already running"
+        log_lifecycle "repeat ignored: recap already running"
+        buzz
         return 0
     fi
-    log_lifecycle "repeat-that: recap requested"
-    chime "$STT_WAKE_START_SOUND"
+    log_lifecycle "repeat: recap requested"
+    ack
     touch "$SPOOL/framing.lock"
     nohup "$SCRIPT_DIR/../tts/stream-framing.sh" "$PANE_ID" "$SPOOL" >/dev/null 2>&1 &
     echo "$!" > "$SPOOL/framing.pid"
     tmux display-message -t "$PANE_ID" "🔁 Recapping…" 2>/dev/null || true
 }
 
-# "send that": press Enter in the bound pane — submits whatever the earlier
+# "send": press Enter in the bound pane — submits whatever the earlier
 # dictation left in the input box.
 do_send() {
-    log_lifecycle "send-that: Enter sent"
-    chime "$STT_WAKE_STOP_SOUND"
-    tmux send-keys -t "$PANE_ID" Enter 2>/dev/null || true
-    tmux display-message -t "$PANE_ID" "📨 Sent" 2>/dev/null || true
+    if tmux send-keys -t "$PANE_ID" Enter 2>/dev/null; then
+        log_lifecycle "send: Enter sent"
+        ack
+        tmux display-message -t "$PANE_ID" "📨 Sent" 2>/dev/null || true
+    else
+        log_lifecycle "send FAILED: send-keys error"
+        buzz
+    fi
+}
+
+# "window": move the speak-mode binding (and the purple) onward — next window
+# in the bound pane's session, or next pane when there's only one window
+# (command-center layout). Re-binding goes through toggle-stream's move path,
+# which also replaces this listener; the recap frames the new pane.
+do_window() {
+    local sess wins target=""
+    sess="$(tmux display-message -pt "$PANE_ID" '#{session_name}' 2>/dev/null)"
+    if [[ -z "$sess" ]]; then
+        log_lifecycle "window FAILED: no session for $PANE_ID"
+        buzz
+        return 0
+    fi
+    wins="$(tmux list-windows -t "$sess" 2>/dev/null | wc -l | tr -d ' ')"
+    if [[ "$wins" -gt 1 ]]; then
+        if ! tmux select-window -t "$sess:+" 2>/dev/null; then
+            log_lifecycle "window FAILED: select-window"
+            buzz
+            return 0
+        fi
+        target="$(tmux display-message -pt "$sess:" '#{pane_id}' 2>/dev/null)"
+    else
+        # Single window: cycle to the pane after the bound one, wrapping.
+        local panes=() p i=0 idx=-1
+        while IFS= read -r p; do
+            panes+=("$p")
+            [[ "$p" == "$PANE_ID" ]] && idx=$i
+            i=$((i + 1))
+        done < <(tmux list-panes -t "$sess:" -F '#{pane_id}' 2>/dev/null)
+        if [[ "$idx" -ge 0 && "${#panes[@]}" -gt 1 ]]; then
+            target="${panes[$(( (idx + 1) % ${#panes[@]} ))]}"
+            tmux select-pane -t "$target" 2>/dev/null || true
+        fi
+    fi
+    if [[ -z "$target" || "$target" == "$PANE_ID" ]]; then
+        log_lifecycle "window FAILED: no other pane/window to move to"
+        buzz
+        return 0
+    fi
+    log_lifecycle "window: moving speak mode to $target"
+    ack
+    nohup "$SCRIPT_DIR/../tts/toggle-stream.sh" "$target" >/dev/null 2>&1 &
 }
 
 # Follow the whisper-stream transcript. read -t keeps the loop ticking so the
@@ -395,6 +452,11 @@ while mode_active; do
                 log_lifecycle "send trigger: '$line'"
                 do_send
                 echo_stem="$SEND_STEM"
+            elif [[ "$echo_stem" != "$WINDOW_STEM" ]] \
+                && matches_word "$norm_line" "$WINDOW_STEM"; then
+                log_lifecycle "window trigger: '$line'"
+                do_window
+                echo_stem="$WINDOW_STEM"
             fi
         else
             if [[ "$echo_stem" != "$TRANSCRIBE_STEM" ]] \
