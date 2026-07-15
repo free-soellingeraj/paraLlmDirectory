@@ -24,7 +24,7 @@ fi
 # Freshness beats completeness: audio synthesized longer ago than this is
 # stale commentary — skip it so speech stays near-live and pauses (during
 # which voice commands match leniently) actually occur. 0 disables.
-TTS_STREAM_MODE="${TTS_STREAM_MODE:-digest}"
+TTS_STREAM_MODE="${TTS_STREAM_MODE:-stream}"
 if [[ "$TTS_STREAM_MODE" == "digest" ]]; then
     # Digests are enqueued as one batch and must play out in full.
     TTS_STREAM_MAX_LAG_SECS="${TTS_STREAM_MAX_LAG_SECS:-120}"
@@ -110,7 +110,7 @@ while mode_active; do
         continue
     fi
 
-    if [[ "$TTS_STREAM_MAX_LAG_SECS" != "0" ]] \
+    if [[ "$TTS_STREAM_MAX_LAG_SECS" != "0" && ! -f "$AUDIO/$seq.keep" ]] \
         && [[ "$(file_age "$file")" -gt "$TTS_STREAM_MAX_LAG_SECS" ]]; then
         log_player "skipped stale chunk $seq"
         rm -f "$file"
@@ -123,6 +123,7 @@ while mode_active; do
         log_player "chunk $seq played ${age}s late"
     fi
     afplay "$file" 2>> "$SPOOL/error.log" || true
+    rm -f "$AUDIO/$seq.keep"
     mv "$file" "$PLAYED/" 2>/dev/null || rm -f "$file"
     next=$((next + 1))
     # Prune the rewind buffer to the last 4 chunks.

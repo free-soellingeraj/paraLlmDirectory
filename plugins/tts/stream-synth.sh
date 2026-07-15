@@ -30,7 +30,7 @@ TTS_VOLUME="${TTS_VOLUME:-+0%}"
 TTS_PITCH="${TTS_PITCH:-+0Hz}"
 TTS_SYNTH_TIMEOUT="${TTS_SYNTH_TIMEOUT:-20}"
 TTS_STREAM_ENGINE="${TTS_STREAM_ENGINE:-edge-tts}"
-TTS_STREAM_MODE="${TTS_STREAM_MODE:-digest}"
+TTS_STREAM_MODE="${TTS_STREAM_MODE:-stream}"
 if [[ "$TTS_STREAM_MODE" == "digest" ]]; then
     # Digests are enqueued as one batch and must play out in full.
     TTS_STREAM_MAX_LAG_SECS="${TTS_STREAM_MAX_LAG_SECS:-120}"
@@ -75,7 +75,8 @@ while mode_active; do
     fi
 
     # Don't waste synthesis on stale commentary (see stream-player.sh).
-    if [[ "$TTS_STREAM_MAX_LAG_SECS" != "0" ]]; then
+    # Recap/digest chunks carry a .keep marker and are never skipped.
+    if [[ "$TTS_STREAM_MAX_LAG_SECS" != "0" && ! -f "$CHUNKS/$seq.keep" ]]; then
         chunk_mtime="$(stat -f %m "$chunk" 2>/dev/null || stat -c %Y "$chunk" 2>/dev/null || echo 0)"
         if (( $(date +%s) - chunk_mtime > TTS_STREAM_MAX_LAG_SECS )); then
             log_error "skipped stale text chunk $seq"
@@ -113,6 +114,9 @@ while mode_active; do
         fi
     fi
 
-    rm -f "$chunk"
+    if [[ -f "$CHUNKS/$seq.keep" && -n "$done_file" ]]; then
+        touch "$AUDIO/$seq.keep"
+    fi
+    rm -f "$chunk" "$CHUNKS/$seq.keep"
     next=$((next + 1))
 done

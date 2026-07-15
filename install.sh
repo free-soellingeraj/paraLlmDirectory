@@ -216,10 +216,11 @@ STT_WAKE_PLAY_WORD="play"        # Resumes paused playback
 STT_WAKE_FORWARD_WORD="forward"  # Skips ~15s ahead ("fast forward" works too)
 STT_WAKE_REWIND_WORD="rewind"    # Replays ~15s (last two spoken chunks)
 STT_WAKE_CLEAR_WORD="text box"   # Clears the dictated text from the input box (sends one Ctrl+C)
+STT_WAKE_DIGEST_WORD="digest"    # Speaks a full turn digest on demand ("you asked X; the agent did Y")
 STT_WAKE_MAX_DICTATION="120"     # Force-end dictation after this many seconds (0 = no cap)
 STT_WAKE_ACK_SOUND="/System/Library/Sounds/Pop.aiff"    # Played when a voice command is accepted (empty = off)
 STT_WAKE_FAIL_SOUND="/System/Library/Sounds/Basso.aiff" # Played when a voice command fails (empty = off)
-TTS_STREAM_MODE="digest"         # "digest": speak a turn summary when the agent finishes; "stream": live sentence narration
+TTS_STREAM_MODE="stream"         # "stream": continuous live narration; "digest": only speak turn summaries automatically
 TTS_STREAM_DIGEST_CHARS="900"    # Max digest length (chars of speakable prose)
 # TTS_STREAM_MAX_LAG_SECS="20"   # Freshness cap; unset = mode-aware default (120 digest / 20 stream)
 TTS_STREAM_RATE="+10%"           # Stream-mode speaking rate (reading speed is the throughput bottleneck)

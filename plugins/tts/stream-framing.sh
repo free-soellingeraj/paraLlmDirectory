@@ -109,7 +109,7 @@ mode_active || exit 0
 # Lead-in so the recap is audibly distinct from the live stream that follows.
 # Cap the recap at ~2 sentences-worth of audio: a minute-long recap monologue
 # starves the live stream (everything arriving meanwhile goes stale).
-TTS_STREAM_MODE="${TTS_STREAM_MODE:-digest}"
+TTS_STREAM_MODE="${TTS_STREAM_MODE:-stream}"
 RECAP_DEFAULT=900
 [[ "$TTS_STREAM_MODE" == "stream" ]] && RECAP_DEFAULT=400
 python3 - "$SPOOL/framing.speech" "${TTS_STREAM_RECAP_CHARS:-$RECAP_DEFAULT}" > "$SPOOL/framing.final" <<'CAPPY'
@@ -139,6 +139,8 @@ for chunk in "$chunk_dir"/chunk-*.txt; do
     [[ -f "$chunk" ]] || continue
     final="$SPOOL/chunks/$(printf '%05d' "$next").txt"
     mv "$chunk" "$final"
+    # Recap/digest chunks must play out in full — exempt from freshness skips.
+    touch "${final%.txt}.keep"
     next=$((next + 1))
     count=$((count + 1))
 done

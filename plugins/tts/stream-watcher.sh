@@ -44,7 +44,7 @@ POLL_INTERVAL="${TTS_STREAM_POLL_INTERVAL:-0.4}"
 # transitions to ready — nothing gets chopped by freshness skipping and the
 # voice is silent while you think. "stream": the sentence-by-sentence live
 # narration (freshness-capped, may skip under firehose output).
-TTS_STREAM_MODE="${TTS_STREAM_MODE:-digest}"
+TTS_STREAM_MODE="${TTS_STREAM_MODE:-stream}"
 
 source "$SCRIPT_DIR/tts-lib.sh"
 

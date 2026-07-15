@@ -44,6 +44,7 @@ STT_WAKE_PLAY_WORD="${STT_WAKE_PLAY_WORD:-play}"
 STT_WAKE_FORWARD_WORD="${STT_WAKE_FORWARD_WORD:-forward}"
 STT_WAKE_REWIND_WORD="${STT_WAKE_REWIND_WORD:-rewind}"
 STT_WAKE_CLEAR_WORD="${STT_WAKE_CLEAR_WORD:-text box}"
+STT_WAKE_DIGEST_WORD="${STT_WAKE_DIGEST_WORD:-digest}"
 # Every accepted command clicks; every failed action buzzes.
 STT_WAKE_ACK_SOUND="${STT_WAKE_ACK_SOUND-/System/Library/Sounds/Pop.aiff}"
 STT_WAKE_FAIL_SOUND="${STT_WAKE_FAIL_SOUND-/System/Library/Sounds/Basso.aiff}"
@@ -201,6 +202,7 @@ PAUSE_STEM="$(stem8 "$STT_WAKE_PAUSE_WORD")"
 PLAY_STEM="$(stem8 "$STT_WAKE_PLAY_WORD")"
 FORWARD_STEM="$(stem8 "$STT_WAKE_FORWARD_WORD")"
 REWIND_STEM="$(stem8 "$STT_WAKE_REWIND_WORD")"
+DIGEST_STEM="$(stem8 "$STT_WAKE_DIGEST_WORD")"
 CLEAR_STEM="$(stem8 "${STT_WAKE_CLEAR_WORD%% *}")"
 CLEAR_NORM="$(normalize "$STT_WAKE_CLEAR_WORD")"
 
@@ -398,7 +400,8 @@ do_repeat() {
     log_lifecycle "repeat: recap requested"
     ack
     touch "$SPOOL/framing.lock"
-    nohup "$SCRIPT_DIR/../tts/stream-framing.sh" "$PANE_ID" "$SPOOL" >/dev/null 2>&1 &
+    TTS_STREAM_RECAP_CHARS="${TTS_STREAM_DIGEST_CHARS:-900}" \
+        nohup "$SCRIPT_DIR/../tts/stream-framing.sh" "$PANE_ID" "$SPOOL" >/dev/null 2>&1 &
     echo "$!" > "$SPOOL/framing.pid"
     tmux display-message -t "$PANE_ID" "🔁 Recapping…" 2>/dev/null || true
 }
@@ -577,11 +580,16 @@ while mode_active; do
                 log_lifecycle "transcribe trigger: '$line'"
                 begin_dictation
                 echo_stem="$TRANSCRIBE_STEM"
-            elif ! player_speaking && [[ "$echo_stem" != "$REPEAT_STEM" ]] \
+            elif [[ "$echo_stem" != "$REPEAT_STEM" ]] \
                 && matches_word "$norm_line" "$REPEAT_STEM"; then
                 log_lifecycle "repeat trigger: '$line'"
                 do_repeat
                 echo_stem="$REPEAT_STEM"
+            elif [[ "$echo_stem" != "$DIGEST_STEM" ]] \
+                && matches_word "$norm_line" "$DIGEST_STEM"; then
+                log_lifecycle "digest trigger: '$line'"
+                do_repeat
+                echo_stem="$DIGEST_STEM"
             elif [[ "$echo_stem" != "$SEND_STEM" ]] \
                 && matches_word "$norm_line" "$SEND_STEM"; then
                 log_lifecycle "send trigger: '$line'"
