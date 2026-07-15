@@ -109,7 +109,10 @@ mode_active || exit 0
 # Lead-in so the recap is audibly distinct from the live stream that follows.
 # Cap the recap at ~2 sentences-worth of audio: a minute-long recap monologue
 # starves the live stream (everything arriving meanwhile goes stale).
-python3 - "$SPOOL/framing.speech" "${TTS_STREAM_RECAP_CHARS:-400}" > "$SPOOL/framing.final" <<'CAPPY'
+TTS_STREAM_MODE="${TTS_STREAM_MODE:-digest}"
+RECAP_DEFAULT=900
+[[ "$TTS_STREAM_MODE" == "stream" ]] && RECAP_DEFAULT=400
+python3 - "$SPOOL/framing.speech" "${TTS_STREAM_RECAP_CHARS:-$RECAP_DEFAULT}" > "$SPOOL/framing.final" <<'CAPPY'
 import re, sys
 text = open(sys.argv[1], errors="replace").read().strip()
 limit = int(sys.argv[2])

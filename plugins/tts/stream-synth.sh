@@ -30,7 +30,13 @@ TTS_VOLUME="${TTS_VOLUME:-+0%}"
 TTS_PITCH="${TTS_PITCH:-+0Hz}"
 TTS_SYNTH_TIMEOUT="${TTS_SYNTH_TIMEOUT:-20}"
 TTS_STREAM_ENGINE="${TTS_STREAM_ENGINE:-edge-tts}"
-TTS_STREAM_MAX_LAG_SECS="${TTS_STREAM_MAX_LAG_SECS:-20}"
+TTS_STREAM_MODE="${TTS_STREAM_MODE:-digest}"
+if [[ "$TTS_STREAM_MODE" == "digest" ]]; then
+    # Digests are enqueued as one batch and must play out in full.
+    TTS_STREAM_MAX_LAG_SECS="${TTS_STREAM_MAX_LAG_SECS:-120}"
+else
+    TTS_STREAM_MAX_LAG_SECS="${TTS_STREAM_MAX_LAG_SECS:-20}"
+fi
 # Stream mode speaks slightly faster than one-shot playback: reading speed is
 # the pipeline's bottleneck, and +10% meaningfully raises throughput.
 TTS_RATE="${TTS_STREAM_RATE:-+10%}"

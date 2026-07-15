@@ -24,7 +24,13 @@ fi
 # Freshness beats completeness: audio synthesized longer ago than this is
 # stale commentary — skip it so speech stays near-live and pauses (during
 # which voice commands match leniently) actually occur. 0 disables.
-TTS_STREAM_MAX_LAG_SECS="${TTS_STREAM_MAX_LAG_SECS:-20}"
+TTS_STREAM_MODE="${TTS_STREAM_MODE:-digest}"
+if [[ "$TTS_STREAM_MODE" == "digest" ]]; then
+    # Digests are enqueued as one batch and must play out in full.
+    TTS_STREAM_MAX_LAG_SECS="${TTS_STREAM_MAX_LAG_SECS:-120}"
+else
+    TTS_STREAM_MAX_LAG_SECS="${TTS_STREAM_MAX_LAG_SECS:-20}"
+fi
 
 file_age() {
     local m

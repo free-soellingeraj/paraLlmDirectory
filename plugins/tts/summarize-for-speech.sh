@@ -43,6 +43,7 @@ Prepare this terminal/chat text for text-to-speech as a smart spoken briefing.
 
 Rules:
 - Return only speakable prose.
+- Begin with ONE short sentence restating what the user most recently asked, e.g. "You asked to fix the login test." Then summarize the response that followed. (This is the one exception to the ignore-user-input rule below.)
 - First identify recent turn boundaries: human/user turns and assistant/model turns.
 - Treat the latest human/user turn as an endpoint. The target to speak is the assistant/model response that follows that human turn.
 - If multiple assistant/model turns appear after the latest human turn, speak the most recent substantive one.

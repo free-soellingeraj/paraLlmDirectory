@@ -39,6 +39,13 @@ TTS_STREAM_ACTION_SOUND="${TTS_STREAM_ACTION_SOUND-/System/Library/Sounds/Funk.a
 # of the viewport within a couple of seconds of a tool block rendering.
 POLL_INTERVAL="${TTS_STREAM_POLL_INTERVAL:-0.4}"
 
+# "digest" (default): stay quiet while the agent works, then speak a codex
+# summary of the whole turn ("You asked X; the agent did Y") when the pane
+# transitions to ready — nothing gets chopped by freshness skipping and the
+# voice is silent while you think. "stream": the sentence-by-sentence live
+# narration (freshness-capped, may skip under firehose output).
+TTS_STREAM_MODE="${TTS_STREAM_MODE:-digest}"
+
 source "$SCRIPT_DIR/tts-lib.sh"
 
 mode_active() {
@@ -102,15 +109,36 @@ pane_state() {
     esac
 }
 
+# Digest mode: when a turn completes (pane held a working state >=10s, then
+# turned ready), summarize the whole turn and speak it. Reuses the framing
+# pipeline; the lock gates any stream emission while the digest prepares.
+trigger_digest() {
+    local fpid
+    fpid="$(cat "$SPOOL/framing.pid" 2>/dev/null)"
+    if [[ -n "$fpid" ]] && kill -0 "$fpid" 2>/dev/null; then
+        return 0
+    fi
+    log_lifecycle "digest: turn completed, summarizing"
+    touch "$SPOOL/framing.lock"
+    TTS_STREAM_RECAP_CHARS="${TTS_STREAM_DIGEST_CHARS:-900}" \
+        nohup "$SCRIPT_DIR/stream-framing.sh" "$PANE_ID" "$SPOOL" >/dev/null 2>&1 &
+    echo "$!" > "$SPOOL/framing.pid"
+}
+
 LAST_PANE_STATE=""
+STATE_SINCE=0
 LAST_CHIME=0
 maybe_chime_state() {
     local now_state
     now_state="$(pane_state)"
     if [[ "$now_state" != "$LAST_PANE_STATE" ]]; then
+        local prev="$LAST_PANE_STATE" held=$((SECONDS - STATE_SINCE))
+        LAST_PANE_STATE="$now_state"
+        STATE_SINCE=$SECONDS
         # Skip the very first observation (enabling the mode on an idle pane
         # should not chime) and debounce flappy transitions.
-        if [[ -n "$LAST_PANE_STATE" ]] && (( SECONDS - LAST_CHIME >= 10 )); then
+        [[ -n "$prev" ]] || return 0
+        if (( SECONDS - LAST_CHIME >= 10 )); then
             local sound=""
             case "$now_state" in
                 ready)  sound="$TTS_STREAM_READY_SOUND" ;;
@@ -121,7 +149,10 @@ maybe_chime_state() {
                 LAST_CHIME=$SECONDS
             fi
         fi
-        LAST_PANE_STATE="$now_state"
+        if [[ "$TTS_STREAM_MODE" == "digest" && "$now_state" == "ready" \
+            && "$prev" != "ready" && "$held" -ge 10 ]]; then
+            trigger_digest
+        fi
     fi
 }
 
@@ -140,12 +171,14 @@ while mode_active; do
         exit 0
     fi
 
-    tmux capture-pane -t "$PANE_ID" -p -S - 2>/dev/null \
-        | "$SCRIPT_DIR/filter-pane-text.sh" > "$SPOOL/cur.txt.part" \
-        && mv "$SPOOL/cur.txt.part" "$SPOOL/cur.txt"
+    if [[ "$TTS_STREAM_MODE" != "digest" ]]; then
+        tmux capture-pane -t "$PANE_ID" -p -S - 2>/dev/null \
+            | "$SCRIPT_DIR/filter-pane-text.sh" > "$SPOOL/cur.txt.part" \
+            && mv "$SPOOL/cur.txt.part" "$SPOOL/cur.txt"
 
-    if ! python3 "$SCRIPT_DIR/stream-step.py" "$SPOOL" 2>> "$SPOOL/error.log"; then
-        printf '%s  stream-step.py failed\n' "$(date '+%H:%M:%S')" >> "$SPOOL/error.log"
+        if ! python3 "$SCRIPT_DIR/stream-step.py" "$SPOOL" 2>> "$SPOOL/error.log"; then
+            printf '%s  stream-step.py failed\n' "$(date '+%H:%M:%S')" >> "$SPOOL/error.log"
+        fi
     fi
 
     maybe_chime_state

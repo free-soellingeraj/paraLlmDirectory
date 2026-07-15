@@ -48,7 +48,7 @@ STT_WAKE_CLEAR_WORD="${STT_WAKE_CLEAR_WORD:-text box}"
 STT_WAKE_ACK_SOUND="${STT_WAKE_ACK_SOUND-/System/Library/Sounds/Pop.aiff}"
 STT_WAKE_FAIL_SOUND="${STT_WAKE_FAIL_SOUND-/System/Library/Sounds/Basso.aiff}"
 STT_WAKE_MODEL="${STT_WAKE_MODEL:-ggml-tiny.en.bin}"
-STT_WAKE_STEP_MS="${STT_WAKE_STEP_MS:-2000}"
+STT_WAKE_STEP_MS="${STT_WAKE_STEP_MS:-1500}"
 STT_WAKE_MAX_DICTATION="${STT_WAKE_MAX_DICTATION:-120}"
 
 WAKE_LOG="$SPOOL/wake.log"
@@ -582,7 +582,7 @@ while mode_active; do
                 log_lifecycle "repeat trigger: '$line'"
                 do_repeat
                 echo_stem="$REPEAT_STEM"
-            elif ! player_speaking && [[ "$echo_stem" != "$SEND_STEM" ]] \
+            elif [[ "$echo_stem" != "$SEND_STEM" ]] \
                 && matches_word "$norm_line" "$SEND_STEM"; then
                 log_lifecycle "send trigger: '$line'"
                 do_send
