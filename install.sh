@@ -223,8 +223,8 @@ STT_WAKE_FAIL_SOUND="/System/Library/Sounds/Basso.aiff" # Played when a voice co
 TTS_STREAM_MODE="stream"         # "stream": continuous live narration; "digest": only speak turn summaries automatically
 TTS_STREAM_DIGEST_CHARS="900"    # Max digest length (chars of speakable prose)
 # TTS_STREAM_MAX_LAG_SECS="30"   # Freshness cap; unset = mode-aware default (120 digest / 30 stream)
-TTS_STREAM_CATCHUP_RATE="+25%"   # Voice rate when 3+ chunks behind (speeds up instead of dropping)
-TTS_STREAM_SPRINT_RATE="+40%"    # Voice rate when 6+ chunks behind
+TTS_STREAM_CATCHUP_RATE="+15%"   # Voice rate when 4+ chunks behind (speeds up instead of dropping)
+TTS_STREAM_SPRINT_RATE="+30%"    # Voice rate when 8+ chunks behind
 TTS_STREAM_RATE="+10%"           # Stream-mode speaking rate (reading speed is the throughput bottleneck)
 TTS_STREAM_RECAP_CHARS="400"     # Cap recap length so it does not starve the live stream
 TTS_STREAM_PERSIST=1             # Speak mode self-heals after crashes/restores; only Ctrl+b o on the bound pane ends it

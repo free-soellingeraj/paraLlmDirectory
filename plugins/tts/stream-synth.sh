@@ -42,8 +42,8 @@ fi
 # further to CATCH UP instead of dropping content (age-skips remain the last
 # resort) — continuous coverage beats fragments.
 BASE_RATE="${TTS_STREAM_RATE:-+10%}"
-CATCHUP_RATE="${TTS_STREAM_CATCHUP_RATE:-+25%}"
-SPRINT_RATE="${TTS_STREAM_SPRINT_RATE:-+40%}"
+CATCHUP_RATE="${TTS_STREAM_CATCHUP_RATE:-+15%}"
+SPRINT_RATE="${TTS_STREAM_SPRINT_RATE:-+30%}"
 TTS_RATE="$BASE_RATE"
 
 source "$SCRIPT_DIR/tts-lib.sh"
@@ -97,9 +97,9 @@ while mode_active; do
 
     # Adaptive rate: text waiting + audio queued = how far behind the ears are.
     backlog=$(( $(ls "$CHUNKS" 2>/dev/null | grep -c 'txt$')               + $(ls "$AUDIO" 2>/dev/null | grep -c -e 'mp3$' -e 'aiff$') ))
-    if (( backlog >= 6 )); then
+    if (( backlog >= 8 )); then
         new_rate="$SPRINT_RATE"
-    elif (( backlog >= 3 )); then
+    elif (( backlog >= 4 )); then
         new_rate="$CATCHUP_RATE"
     else
         new_rate="$BASE_RATE"
