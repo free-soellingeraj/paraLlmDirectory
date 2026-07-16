@@ -81,6 +81,10 @@ while mode_active; do
         if (( $(date +%s) - chunk_mtime > TTS_STREAM_MAX_LAG_SECS )); then
             log_error "skipped stale text chunk $seq"
             rm -f "$chunk"
+            # Tombstone: the player waits for this exact sequence number and
+            # would deadlock forever on the hole (observed live: 24 queued
+            # files behind one skipped number).
+            touch "$AUDIO/$seq.skip"
             next=$((next + 1))
             continue
         fi
@@ -111,6 +115,7 @@ while mode_active; do
         else
             rm -f "$out.part.aiff"
             log_error "all engines failed for chunk $seq; skipping: $(cat "$chunk" 2>/dev/null | head -c 80)"
+            touch "$AUDIO/$seq.skip"
         fi
     fi
 

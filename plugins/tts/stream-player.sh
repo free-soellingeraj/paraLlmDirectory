@@ -97,6 +97,13 @@ next=1
 while mode_active; do
     handle_cmd
     seq="$(printf '%05d' "$next")"
+    # A tombstone marks a sequence number the synth skipped — consume it or
+    # the strict in-order wait below deadlocks on the hole.
+    if [[ -f "$AUDIO/$seq.skip" ]]; then
+        rm -f "$AUDIO/$seq.skip"
+        next=$((next + 1))
+        continue
+    fi
     file=""
     for candidate in "$AUDIO/$seq.mp3" "$AUDIO/$seq.aiff"; do
         if [[ -f "$candidate" ]]; then
