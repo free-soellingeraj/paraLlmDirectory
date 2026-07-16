@@ -147,6 +147,7 @@ echo ""
 echo "Setting up voice input/output..."
 echo "  STT: Ctrl+b a records and transcribes with whisper.cpp"
 echo "  TTS: Ctrl+b p speaks/stops latest pane output with Microsoft edge-tts"
+echo "  Speak mode: Ctrl+b o streams agent output as speech for one pane"
 
 # Check/install sox
 if ! command -v rec &>/dev/null; then
@@ -192,6 +193,39 @@ TTS_SYNTH_TIMEOUT="20"           # Max seconds for each edge-tts chunk before fa
 TTS_PROGRESS_ENABLED=1           # Show live "TTS: <stage> (Ns)" progress in the status line
 TTS_PROGRESS_INTERVAL="1"        # How often (seconds) to refresh the progress indicator
 TTS_AUTHORED_MAX_AGE="900"       # Seconds an agent-authored voice script (voice-script.sh) stays playable before falling back to live capture (0 = never expires)
+
+# Speak mode (Ctrl+b o): stream agent output as speech
+TTS_STREAM_POLL_INTERVAL="0.4"   # How often (seconds) to poll the bound pane for new text
+TTS_STREAM_FLUSH_SECS="4"        # Speak un-terminated text (headers, bullets) after this quiet period
+TTS_STREAM_ENGINE="edge-tts"     # "edge-tts" (network, better voice) or "say" (local, lower latency)
+TTS_STREAM_TINT="#3a2044"        # Background tint of the pane being listened to (empty to disable)
+TTS_STREAM_FRAMING=1             # On enable: summarize what's happening in the pane and speak it before streaming
+TTS_STREAM_READY_SOUND="/System/Library/Sounds/Ping.aiff"   # Chime when the bound pane's Claude becomes ready for input (empty = off)
+TTS_STREAM_ACTION_SOUND="/System/Library/Sounds/Funk.aiff"  # Chime when it needs action (permission/question) (empty = off)
+TTS_STREAM_REWRITE=0             # 1 = rewrite streamed text via codex before speaking — adds 30-60s lag; default is instant local cleanup
+TTS_STREAM_REWRITE_TIMEOUT="45"  # Max seconds per rewrite batch before falling back to raw text
+
+# Hands-free voice commands while speak mode is on (wake-listener.sh)
+STT_WAKE_ENABLED=1               # Listen for the words below while speak mode is on (0 = off)
+STT_WAKE_TRANSCRIBE_WORD="transcribe"  # Toggles dictation: say it to start, say it again to inject (no Enter)
+STT_WAKE_REPEAT_WORD="repeat"    # Re-runs the recap (spoken summary of the pane)
+STT_WAKE_SEND_WORD="send"        # Presses Enter in the bound pane
+STT_WAKE_WINDOW_WORD="window"    # Moves speak mode to the next window (or next pane if one window)
+STT_WAKE_PAUSE_WORD="pause"      # Stops playback until "play"; queued speech ages out so resume is current
+STT_WAKE_PLAY_WORD="play"        # Resumes paused playback
+STT_WAKE_FORWARD_WORD="forward"  # Skips ~15s ahead ("fast forward" works too)
+STT_WAKE_REWIND_WORD="rewind"    # Replays ~15s (last two spoken chunks)
+STT_WAKE_CLEAR_WORD="text box"   # Clears the dictated text from the input box (sends one Ctrl+C)
+STT_WAKE_DIGEST_WORD="digest"    # Speaks a full turn digest on demand ("you asked X; the agent did Y")
+STT_WAKE_MAX_DICTATION="120"     # Force-end dictation after this many seconds (0 = no cap)
+STT_WAKE_ACK_SOUND="/System/Library/Sounds/Pop.aiff"    # Played when a voice command is accepted (empty = off)
+STT_WAKE_FAIL_SOUND="/System/Library/Sounds/Basso.aiff" # Played when a voice command fails (empty = off)
+TTS_STREAM_MODE="stream"         # "stream": continuous live narration; "digest": only speak turn summaries automatically
+TTS_STREAM_DIGEST_CHARS="900"    # Max digest length (chars of speakable prose)
+# TTS_STREAM_MAX_LAG_SECS="20"   # Freshness cap; unset = mode-aware default (120 digest / 20 stream)
+TTS_STREAM_RATE="+10%"           # Stream-mode speaking rate (reading speed is the throughput bottleneck)
+TTS_STREAM_RECAP_CHARS="400"     # Cap recap length so it does not starve the live stream
+TTS_STREAM_PERSIST=1             # Speak mode self-heals after crashes/restores; only Ctrl+b o on the bound pane ends it
 # STT_LANGUAGE="en"
 # STT_MODEL_PATH=""  # Override model location (default: $PARA_LLM_ROOT/plugins/stt/models/ggml-base.en.bin)
 EOF
@@ -410,6 +444,10 @@ bind-key a run-shell -b "$SCRIPT_DIR/plugins/stt/toggle-stt.sh"
 
 # Ctrl+b p: Toggle text-to-speech playback for the active pane
 bind-key p run-shell -b "$SCRIPT_DIR/plugins/tts/toggle-tts.sh"
+
+# Ctrl+b o: Toggle speak mode (stream agent output as speech, bound to one pane)
+# NOTE: overrides tmux's default "o" binding (cycle to next pane)
+bind-key o run-shell -b "$SCRIPT_DIR/plugins/tts/toggle-stream.sh '#{pane_id}'"
 EOF
 
 cat >> ~/.tmux.conf << EOF
@@ -432,6 +470,10 @@ bind-key r run-shell '$PARA_LLM_ROOT/scripts/para-llm-restore.sh'
 # Claude Code status in status line (shows aggregate state)
 # Appends to existing status-right, preserving user customizations
 set -ga status-right ' #($SCRIPT_DIR/plugins/claude-state-monitor/tmux-status.sh)'
+
+# Voice indicators: REC while dictating, SPEAK while speak mode is bound
+set -ga status-right ' #($SCRIPT_DIR/plugins/stt/stt-status.sh)'
+set -ga status-right ' #($SCRIPT_DIR/plugins/tts/stream-status.sh)'
 EOF
 
 cat >> ~/.tmux.conf << EOF
@@ -440,7 +482,14 @@ set -g status-right-length 120
 
 # Pane border titles (shows Claude state per pane)
 set -g pane-border-status top
-set -g pane-border-format '#{?pane_active,#[reverse],} #{window_index}: #{@pane_display} #{?pane_active,#[noreverse],}'
+
+# Speak-mode framing: magenta border on the bound pane only. These are window
+# options, so the per-pane targeting lives in the #{?#{@speak_on},...} format,
+# evaluated per pane at draw time (same pattern as tmux's default
+# pane-active-border-style conditionals, which the fallback branch preserves).
+set -g pane-border-style '#{?#{@speak_on},fg=colour201 bold,default}'
+set -g pane-active-border-style '#{?#{@speak_on},fg=colour201 bold,#{?pane_in_mode,fg=yellow,#{?synchronize-panes,fg=red,fg=green}}}'
+set -g pane-border-format '#{?pane_active,#[reverse],} #{window_index}: #{?#{@speak_on},#[bg=colour201#,fg=colour231#,bold] 🔊 SPEAKING #[bg=default#,fg=default#,nobold] ,}#{@pane_display} #{?pane_active,#[noreverse],}'
 # end para-llm-directory
 EOF
 echo "Added bindings to ~/.tmux.conf"
@@ -478,6 +527,7 @@ echo "  Ctrl+b t  - Remote management (add/test/toggle remotes)"
 echo "  Ctrl+b y  - Choose/switch Claude Code or Codex for active worktree"
 echo "  Ctrl+b a  - Voice input: record/transcribe into active pane"
 echo "  Ctrl+b p  - Voice playback: speak/stop latest pane output"
+echo "  Ctrl+b o  - Speak mode: stream agent output as speech (toggle, one pane)"
 echo "  Ctrl+b r  - Manual restore managed AI terminal sessions"
 echo ""
 echo "Recovery:"

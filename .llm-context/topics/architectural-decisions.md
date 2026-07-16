@@ -288,3 +288,23 @@ $PARA_LLM_ROOT/remotes/
 **Trade-off**: If `codex` is not installed, TTS no longer summarizes — it speaks the raw pane text (same as `TTS_SUMMARIZE=0`). Accepted: a degraded-but-free default beats a silent paid one. Users who still want LLM summarization need `codex` on PATH. Restoring `claude -p` is a `git revert` away if Anthropic changes the policy.
 
 **File**: `plugins/tts/summarize-for-speech.sh` (codex-only), `plugins/tts/toggle-tts.sh` (default backend, decoupled from REPL)
+
+## ADR-010: Poll-and-Diff capture-pane for Streaming TTS (Speak Mode)
+
+**Decision**: Speak mode (`Ctrl+b o`) turns a redrawing TUI into an append-only speech stream by polling `tmux capture-pane -p -S -` (~0.7s), filtering chrome, and speaking only lines that are **settled** — identical across two consecutive polls. Chunks flow through a file-spool pipeline (watcher → synth → player) under `/tmp/para-llm-tts/<pane>.stream/`.
+
+**Context**: Claude Code / Codex TUIs redraw the spinner, input box, and the currently-streaming paragraph constantly, so `tmux pipe-pane` output is unusable ANSI redraw noise. Claude Code hooks have no streaming-text event (Stop fires at end of turn), and headless `--output-format stream-json` doesn't apply to an interactive pane. Polling the pane's text content is the only capture path that works for any REPL in the pane.
+
+**Key mechanics**:
+- *Settling*: a line is safe to speak once it's unchanged between two polls; this excludes the mutating tail without understanding the TUI.
+- *Content anchoring* (not indices): Claude Code's TUI runs on the **alternate screen**, so the capture is just the viewport and line positions shift as output scrolls (BUG-020). The last ≤8 consumed lines are stored as a content block and located (last occurrence; progressively shorter suffixes tolerate scroll-off) in each new capture; whatever follows is candidate text. If the anchor vanishes entirely (clear, screen switch, output flood) → re-anchor without re-speaking history.
+- *Churn filtering before diffing*: spinners, prompts, separators, tool lines, token counters are dropped before the diff, not after — otherwise their per-second churn destabilizes settling.
+- *No summarization*: unlike `Ctrl+b p`, the point is to hear what the agent actually wrote, with minimal (2–4s) lag.
+- *Single owner*: the mode binds one pane; it claims the same `active.pane` playback slot as one-shot TTS, and `toggle-tts.sh` refuses while it's on — one audio channel, no overlap.
+- *Ordered spool*: `chunks/NNNNN.txt` → `audio/NNNNN.mp3` with `.part`+rename writes, so each worker only ever sees complete files and playback order is strict.
+
+**Trade-off**: a few seconds of lag and heuristic chrome filters (tool output can occasionally leak a line) versus zero coupling to any REPL's internals. Accepted; filters live in one shared place (`filter-pane-text.sh` + `stream-step.py` DROP_PATTERNS) to iterate on.
+
+**Gotcha worth keeping**: `tmux display-message -pt <dead-pane>` exits 0 (falls back to another target); pane liveness must be checked with `tmux list-panes -a` + exact match. The watcher does this and tears the whole mode down when the bound pane dies.
+
+**File**: `plugins/tts/toggle-stream.sh`, `plugins/tts/stream-step.py`, `plugins/tts/stream-watcher.sh`

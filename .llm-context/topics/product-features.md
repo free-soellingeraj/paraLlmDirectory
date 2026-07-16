@@ -316,6 +316,76 @@ call), and more accurate.
 
 ---
 
+### 11. Speak Mode — Streaming Voice Playback (`Ctrl+b o`)
+
+`Ctrl+b o` toggles **speak mode**: a per-pane mode that speaks the agent's
+output as it streams into the pane, a few seconds behind the text. Unlike the
+one-shot `Ctrl+b p`, it does not summarize — it reads the actual response
+prose, skipping tool calls/results, spinners, echoed input, and other chrome.
+
+- **Binding**: bound to exactly one pane at a time. Press in the bound pane to
+  turn it off; press in a different pane to move the mode there. (Note:
+  `Ctrl+b o` overrides tmux's default "cycle panes" binding.)
+- **Indicators** (all focus-independent): the bound pane's background is
+  tinted purple (`TTS_STREAM_TINT`, per-pane window-style), its border title
+  shows a magenta `🔊 SPEAKING` chip, and the status line shows
+  `🔊SPEAK <env-name>` (label = env dir name, resolved at enable time).
+  Updates instantly on toggle via `tmux refresh-client -S`.
+- **Pipeline** (three workers per bound pane, spool under
+  `/tmp/para-llm-tts/<pane>.stream/`):
+  - `stream-watcher.sh` polls `capture-pane` (default 0.7s), filters chrome
+    via the shared `filter-pane-text.sh`, and runs `stream-step.py`, which
+    speaks only *settled* lines (identical across two consecutive polls) and
+    cuts them into sentence chunks.
+  - `stream-synth.sh` converts chunks to audio in order (edge-tts, one retry,
+    then local `say` fallback), running ahead of playback.
+  - `stream-player.sh` plays chunks strictly in sequence with `afplay`.
+- **Interplay**: speak mode owns the audio channel — enabling it stops any
+  one-shot playback, and `Ctrl+b p` is refused while speak mode is on.
+  Closing the bound pane tears the whole mode down automatically.
+- **Config** (`$PARA_LLM_ROOT/config`): `TTS_STREAM_POLL_INTERVAL` (0.4),
+  `TTS_STREAM_FLUSH_SECS` (4 — speak unterminated headers/bullets after this
+  quiet period), `TTS_STREAM_ENGINE` (`edge-tts` | `say`),
+  `TTS_STREAM_TINT` (bound-pane background colour, empty to disable).
+- **Enable-time recap ("framing")**: on `Ctrl+b o`, the recent transcript is
+  summarized (codex, same backend as `Ctrl+b p`) and spoken first — "Recap.
+  …" — while a Tink cue plays during preparation; live streaming is gated
+  behind it (`framing.lock`) and starts from the moment of enablement.
+  `TTS_STREAM_FRAMING=0` disables. (`stream-framing.sh`)
+- **Listenable rewrite phase**: settled text goes to a `raw/` queue and
+  `stream-rewrite.sh` rewrites each batch into natural narration via codex
+  before synthesis (paths/hashes/code become spoken references, not
+  characters). Batching is self-pacing (~one codex call of lag, 5–20s); on
+  codex failure/timeout the batch passes through raw so the stream never
+  stalls. `TTS_STREAM_REWRITE=0` reverts to raw + heuristics.
+- **Never repeats**: a rolling 400-line spoken memory guarantees a line heard
+  once is not spoken again (BUG-023); lifecycle + anchor diagnostics persist
+  in `/tmp/para-llm-tts/stream.log`.
+- **Hands-free voice commands** (`plugins/stt/wake-listener.sh`): while speak
+  mode is on, `whisper-stream` (tiny.en, auto-downloaded) listens
+  continuously for three single words (stem-matched on short utterances, so
+  "transcription"/"transcribed" also work):
+  - **"transcribe"** — toggles dictation. Start: chime, playback truly
+    silenced (loop frozen + in-flight afplay killed), red `🎤DICTATE` chip,
+    sox records. Again: chime, full-quality transcription (base.en), toggle
+    word stripped from the edges (clipped/courtesy "stop" variants too),
+    text injected into the bound pane WITHOUT Enter, playback resumes.
+  - **"repeat"** — re-runs the recap (spoken summary of the pane), through
+    the mode's own audio queue.
+  - **"send"** — presses Enter in the bound pane (submits the dictation).
+  Feedback protection: while TTS audio is in flight only a one-word
+  utterance triggers; 3s cooldown after each dictation; word-prefix matching
+  (never substring). Safety: silence/RMS guard, 120s max dictation, listener
+  dies with the mode, sox + whisper-stream mic sharing verified on macOS.
+  Config: `STT_WAKE_ENABLED` (default 1), `STT_WAKE_TRANSCRIBE_WORD`,
+  `STT_WAKE_REPEAT_WORD`, `STT_WAKE_SEND_WORD`, `STT_WAKE_MAX_DICTATION`.
+
+**File**: `plugins/tts/toggle-stream.sh`, `plugins/tts/stream-watcher.sh`,
+`plugins/tts/stream-step.py`, `plugins/tts/stream-synth.sh`,
+`plugins/tts/stream-player.sh`, `plugins/tts/stream-status.sh`
+
+---
+
 ## Key Bindings Summary
 
 | Binding | Action |
@@ -325,6 +395,9 @@ call), and more accurate.
 | `Ctrl+b v` | Command Center (tiled view) |
 | `Ctrl+b t` | Remote management menu |
 | `Ctrl+b r` | Manual restore Claude sessions |
+| `Ctrl+b a` | Voice input: record, then transcribe into pane |
+| `Ctrl+b p` | Voice playback: speak/stop latest pane output |
+| `Ctrl+b o` | Speak mode: stream agent output as speech (one pane) |
 
 ---
 

@@ -158,6 +158,50 @@ Log of bugs encountered and fixed in the para-llm-directory project. Each entry 
 **Follow-up**: A wedged orphan (`STAT=S`, alive ~24h) survived the in-script `kill` — sox installs its own SIGTERM handler and can ignore TERM during CoreAudio teardown, so adoption alone didn't clear it. Added `kill_recorder()` which sends SIGTERM, waits ~3s, then escalates to an uncatchable `kill -9`. Used by both `stop_and_transcribe` and the pre-start orphan guard (the guard now loops `pgrep`→`kill_recorder` instead of a single `pkill -TERM`). User-side: a stuck pre-fix orphan needs `kill -9 <pid>` once (`kill` alone won't take it).
 **File**: `plugins/stt/toggle-stt.sh:38-54` (orphan adoption), `:57-72` (kill_recorder), `:84-91` (escalating orphan guard), `:104-108` (stop path)
 
+### BUG-020: Speak mode (Ctrl+b o) silent on real Claude Code panes
+**Date**: 2026-07-14
+**Symptom**: Speak mode showed its 🔊SPEAK status indicator but never spoke anything from a pane running Claude Code, even as responses streamed. Worked fine in plain shell panes during development testing.
+**Cause**: Two compounding issues. (1) Claude Code's TUI runs on the **alternate screen** (`alternate_on=1`, empty history), so `capture-pane -S -` returns only the ~viewport, and every line **shifts position** as output scrolls — the index-based common-prefix anchor could never hold. (2) The current Claude Code chrome (spinner `✶ Working… (12s · ↓ 6.1k tokens)`, `❯` prompt, `──` separators, live tool timers) was not filtered before diffing, so 4–5 tail lines churned every poll; the churn always exceeded the 3-line tail tolerance, so every poll took the "screen rewrite" resync path and re-anchored past all new text — swallowing everything.
+**Fix**: `stream-step.py` rewritten: (1) all churn-prone chrome is dropped **before** diffing (spinners, prompts, separators, tool lines, token counters, keyboard hints), so cur/prev only contain speakable transcript lines; (2) anchoring is now by **content** — the last ≤8 consumed lines are located as a block (last occurrence, progressively shorter suffixes for scroll-off) in each new capture, making the diff immune to line-index shifts from alternate-screen scrolling. Verified by replaying real Claude Code captures and an alt-screen fake-TUI simulator end-to-end.
+**Gotcha for future capture work**: `tmux display-message -pt <dead-pane>` exits 0 (falls back to another target) — pane liveness needs `list-panes -a` + exact match (already handled in `stream-watcher.sh`).
+**File**: `plugins/tts/stream-step.py`, `plugins/tts/stream-watcher.sh`
+
+### BUG-021: Speak mode turned ALL pane borders magenta
+**Date**: 2026-07-14
+**Symptom**: Pressing `Ctrl+b o` painted every pane border in the command-center window magenta, not just the bound pane.
+**Cause**: `pane-border-style` / `pane-active-border-style` are **window** options; `tmux set-option -pt <pane>` silently stores them at window scope (verified empirically on tmux 3.6a), so "per-pane" border styling colored the whole window.
+**Fix**: The toggle only sets `@speak_on` (a real pane-scoped user option); the magenta styling lives in GLOBAL `pane-border-style` / `pane-active-border-style` values as `#{?#{@speak_on},fg=colour201 bold,...}` format conditionals evaluated per pane at draw time — the same pattern as tmux's default active-border conditionals, which the fallback branch preserves.
+**File**: `plugins/tts/toggle-stream.sh` (mark_pane/unmark_pane), `install.sh` (global styles)
+
+### BUG-022: Speak mode workers died at startup — status-script race
+**Date**: 2026-07-14
+**Symptom**: `Ctrl+b o` showed the indicator, but nothing was ever spoken; all three workers were dead with no logs, an intact spool, and `stream.pane` cleared.
+**Cause**: `toggle-stream.sh` wrote `stream.pane` first, then `mark_pane` — whose pane-option change triggers a status-line redraw. `stream-status.sh` ran in that window, found `stream.pane` set but `watcher.pid` not yet written, declared the mode stale, and deleted `stream.pane`. Every worker then exited on its first mode check. The race window was widened by mark_pane's tmux round-trips sitting between the two writes.
+**Fix**: Three layers: (1) workers and their PID files are set up BEFORE `stream.pane` is announced; (2) each worker waits up to ~2s for the mode file instead of exiting on a not-yet-on mode; (3) the status script only treats `stream.pane` as stale after a 15s grace period.
+**File**: `plugins/tts/toggle-stream.sh`, `plugins/tts/stream-watcher.sh`, `plugins/tts/stream-synth.sh`, `plugins/tts/stream-player.sh`, `plugins/tts/stream-status.sh`
+
+### BUG-023: Speak mode looped the same messages repeatedly
+**Date**: 2026-07-14
+**Symptom**: Speak mode re-spoke the same Claude messages over and over instead of only new text.
+**Cause**: When the anchor's newest lines flicker (overlay, re-render, expanding tool output pushing prose out of the viewport and back), the anchor match falls back to an earlier block and still-visible text "re-settles" — every flicker cycle replayed it.
+**Fix**: Rolling spoken-lines memory (`spoken.recent`, last 400 lines) in `stream-step.py`: a settled line heard before is never queued again, so anchor confusion degrades to a silent no-op. The anchor still advances over ALL settled lines to track screen position. Suppression/resync events are mirrored to the persistent `/tmp/para-llm-tts/stream.log` (the in-spool events.log dies with the spool on teardown, which had destroyed post-mortem evidence twice).
+**Trade-off**: an identical line genuinely repeated within recent memory stays silent.
+**File**: `plugins/tts/stream-step.py`
+
+### BUG-024: Speak indicator — frame vanished on focus change; label showed an unknown branch
+**Date**: 2026-07-14
+**Symptom**: The magenta frame disappeared as soon as another pane was focused, leaving no way to tell which pane was bound; the status chip read "SPEAK accounts-local-identity", a name the user didn't recognize.
+**Cause**: (1) Tiled pane borders are SHARED between neighbours; on focus change the active pane's frame overpaints the shared segments, so a border is inherently focus-dependent. (2) The label used `git branch --show-current`, but agents switch branches inside env worktrees mid-session — the chip showed the agent's transient branch, not the env.
+**Fix**: (1) The bound pane gets a purple background tint via per-pane `window-style` (verified truly pane-scoped, unlike `pane-border-style`/BUG-021; applied with `set-option -p`, not `select-pane -P`, which can move focus). Focus-independent; `TTS_STREAM_TINT` configures it, empty disables. (2) Label priority is now env dir name > branch > basename, resolved once at enable time.
+**File**: `plugins/tts/toggle-stream.sh`, `plugins/tts/stream-watcher.sh`
+
+### BUG-025: Speak mode went permanently silent — anchor pinned to the tab bar
+**Date**: 2026-07-14
+**Symptom**: `Ctrl+b o` played its recap, then never spoke again as Claude streamed new text. No resyncs, no errors; the watcher just never settled anything (`raw/.next` stayed 1).
+**Cause**: Two compounding issues. (1) Claude Code's bottom tab bar (`⧉ coverage · …`) and todo chrome (`✔ …`, `… +77 completed`) weren't filtered, and the tab bar is always the LAST captured line. (2) The anchor-shrink path (`anchor = matched` when nothing settled) let repeated trims whittle the 24-line anchor down to just that tab-bar line — whose last occurrence is the end of the transcript, so "after the anchor" was permanently empty and nothing could ever settle.
+**Fix**: `⧉ ✔ ✖ ✗` and leading-`…` lines added to the streaming drops; the anchor no longer shrinks on no-settle polls (find_anchor_end re-trims stale lines each poll anyway — the anchor only advances when text is consumed). Regression case "tabbar" pins the scenario.
+**File**: `plugins/tts/stream-step.py`
+
 ---
 
 ## Known Bug-Prone Areas
