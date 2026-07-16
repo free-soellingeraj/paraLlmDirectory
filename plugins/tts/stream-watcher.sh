@@ -24,9 +24,11 @@ if [[ -f "$BOOTSTRAP_FILE" ]]; then
 fi
 
 export TTS_SYNTH_CHARS="${TTS_SYNTH_CHARS:-180}"
-export TTS_STREAM_FLUSH_SECS="${TTS_STREAM_FLUSH_SECS:-4}"
-# Opt-in: codex rewrite adds 30-60s of latency per batch (measured live).
-export TTS_STREAM_REWRITE="${TTS_STREAM_REWRITE:-0}"
+export TTS_STREAM_PAUSE_SECS="${TTS_STREAM_PAUSE_SECS:-3}"
+export TTS_STREAM_MAX_PENDING="${TTS_STREAM_MAX_PENDING:-1500}"
+# Scriptify: pause-batched blocks are coherent thoughts, worth the codex
+# rewrite (30-60s per block; falls back to raw pass-through on failure).
+export TTS_STREAM_REWRITE="${TTS_STREAM_REWRITE:-1}"
 
 # Attention chimes: when the bound pane's Claude transitions to "ready for
 # input" or "needs action" (permission prompt / question), play a sound so

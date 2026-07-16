@@ -27,7 +27,6 @@ import time
 
 spool = sys.argv[1]
 max_chars = max(80, int(os.environ.get("TTS_SYNTH_CHARS", "180") or "180"))
-flush_secs = float(os.environ.get("TTS_STREAM_FLUSH_SECS", "4") or "4")
 
 # Deep anchor: Claude Code can restructure its whole active region at once
 # (tool blocks expanding/collapsing), wiping every recent line. A deep anchor
@@ -46,7 +45,7 @@ events_path = os.path.join(spool, "events.log")
 # speech arrive absurdly late — measured live), settled text goes to the raw/
 # queue for stream-rewrite.sh; otherwise straight to the audio queue with the
 # local speechify pass in normalize() below.
-rewrite_on = os.environ.get("TTS_STREAM_REWRITE", "0") != "0"
+rewrite_on = os.environ.get("TTS_STREAM_REWRITE", "1") != "0"
 chunks_dir = os.path.join(spool, "raw" if rewrite_on else "chunks")
 next_path = os.path.join(chunks_dir, ".next")
 
@@ -263,26 +262,38 @@ def normalize(text):
     return text.strip()
 
 
-text = normalize(pending)
-if not text:
+if not pending.strip():
     if old_pending:
         write_text(pending_path, "")
     sys.exit(0)
 
-# Split into sentences; whole sentences go to the synth queue now, the
-# trailing fragment waits for its ending — unless it has been sitting quiet
-# for flush_secs (headers and bullets often lack terminal punctuation).
+# Pause-batched emission: accumulate while Claude is actively streaming and
+# emit the WHOLE block once output has been quiet for pause_secs — batches
+# align with the agent's natural rhythm (thinking, tool runs), which is
+# exactly when the voice has slack to speak, and each block is a coherent
+# thought for the scriptify/rewrite stage. A nonstop stream force-flushes at
+# max_pending chars so silence stays bounded.
+pause_secs = float(os.environ.get("TTS_STREAM_PAUSE_SECS", "3") or "3")
+max_pending = int(os.environ.get("TTS_STREAM_MAX_PENDING", "1500") or "1500")
+
+age = 0.0
+if not grew and os.path.exists(pending_path):
+    age = time.time() - os.path.getmtime(pending_path)
+quiet = (not grew) and age >= pause_secs
+force = len(pending) >= max_pending
+
+if not (quiet or force):
+    if pending != old_pending:
+        write_text(pending_path, pending)
+    sys.exit(0)
+
+text = normalize(pending)
 parts = re.split(r"(?<=[.!?:;])\s+", text)
-if re.search(r"[.!?:;]$", parts[-1]):
+if quiet or re.search(r"[.!?:;]$", parts[-1]):
+    # Quiet window: the block is done — emit everything, fragments included.
     complete, remainder = parts, ""
 else:
     complete, remainder = parts[:-1], parts[-1]
-
-if remainder and not grew and os.path.exists(pending_path):
-    age = time.time() - os.path.getmtime(pending_path)
-    if age >= flush_secs:
-        complete = complete + [remainder]
-        remainder = ""
 
 chunks = []
 buf = ""

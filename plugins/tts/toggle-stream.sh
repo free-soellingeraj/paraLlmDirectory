@@ -214,7 +214,7 @@ start_stream() {
     echo "$!" > "$spool/synth.pid"
     nohup "$SCRIPT_DIR/stream-player.sh" "$PANE_ID" "$spool" >/dev/null 2>&1 &
     echo "$!" > "$spool/player.pid"
-    if [[ "${TTS_STREAM_REWRITE:-0}" != "0" ]]; then
+    if [[ "${TTS_STREAM_REWRITE:-1}" != "0" ]]; then
         nohup "$SCRIPT_DIR/stream-rewrite.sh" "$PANE_ID" "$spool" >/dev/null 2>&1 &
         echo "$!" > "$spool/rewrite.pid"
     fi

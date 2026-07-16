@@ -196,13 +196,14 @@ TTS_AUTHORED_MAX_AGE="900"       # Seconds an agent-authored voice script (voice
 
 # Speak mode (Ctrl+b o): stream agent output as speech
 TTS_STREAM_POLL_INTERVAL="0.4"   # How often (seconds) to poll the bound pane for new text
-TTS_STREAM_FLUSH_SECS="4"        # Speak un-terminated text (headers, bullets) after this quiet period
+TTS_STREAM_PAUSE_SECS="3"        # Emit a batch once Claude's output has been quiet this long (natural boundaries)
+TTS_STREAM_MAX_PENDING="1500"    # Force-flush a nonstop stream after this many pending chars
 TTS_STREAM_ENGINE="edge-tts"     # "edge-tts" (network, better voice) or "say" (local, lower latency)
 TTS_STREAM_TINT="#3a2044"        # Background tint of the pane being listened to (empty to disable)
 TTS_STREAM_FRAMING=1             # On enable: summarize what's happening in the pane and speak it before streaming
 TTS_STREAM_READY_SOUND="/System/Library/Sounds/Ping.aiff"   # Chime when the bound pane's Claude becomes ready for input (empty = off)
 TTS_STREAM_ACTION_SOUND="/System/Library/Sounds/Funk.aiff"  # Chime when it needs action (permission/question) (empty = off)
-TTS_STREAM_REWRITE=0             # 1 = rewrite streamed text via codex before speaking — adds 30-60s lag; default is instant local cleanup
+TTS_STREAM_REWRITE=1             # Scriptify each pause-batch via codex before speaking (0 = instant local cleanup only)
 TTS_STREAM_REWRITE_TIMEOUT="45"  # Max seconds per rewrite batch before falling back to raw text
 
 # Hands-free voice commands while speak mode is on (wake-listener.sh)
