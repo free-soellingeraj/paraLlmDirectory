@@ -35,11 +35,16 @@ if [[ "$TTS_STREAM_MODE" == "digest" ]]; then
     # Digests are enqueued as one batch and must play out in full.
     TTS_STREAM_MAX_LAG_SECS="${TTS_STREAM_MAX_LAG_SECS:-120}"
 else
-    TTS_STREAM_MAX_LAG_SECS="${TTS_STREAM_MAX_LAG_SECS:-20}"
+    TTS_STREAM_MAX_LAG_SECS="${TTS_STREAM_MAX_LAG_SECS:-30}"
 fi
 # Stream mode speaks slightly faster than one-shot playback: reading speed is
-# the pipeline's bottleneck, and +10% meaningfully raises throughput.
-TTS_RATE="${TTS_STREAM_RATE:-+10%}"
+# the pipeline's bottleneck. When the queue backs up, the voice speeds up
+# further to CATCH UP instead of dropping content (age-skips remain the last
+# resort) — continuous coverage beats fragments.
+BASE_RATE="${TTS_STREAM_RATE:-+10%}"
+CATCHUP_RATE="${TTS_STREAM_CATCHUP_RATE:-+25%}"
+SPRINT_RATE="${TTS_STREAM_SPRINT_RATE:-+40%}"
+TTS_RATE="$BASE_RATE"
 
 source "$SCRIPT_DIR/tts-lib.sh"
 
@@ -88,6 +93,20 @@ while mode_active; do
             next=$((next + 1))
             continue
         fi
+    fi
+
+    # Adaptive rate: text waiting + audio queued = how far behind the ears are.
+    backlog=$(( $(ls "$CHUNKS" 2>/dev/null | grep -c 'txt$')               + $(ls "$AUDIO" 2>/dev/null | grep -c -e 'mp3$' -e 'aiff$') ))
+    if (( backlog >= 6 )); then
+        new_rate="$SPRINT_RATE"
+    elif (( backlog >= 3 )); then
+        new_rate="$CATCHUP_RATE"
+    else
+        new_rate="$BASE_RATE"
+    fi
+    if [[ "$new_rate" != "$TTS_RATE" ]]; then
+        TTS_RATE="$new_rate"
+        log_error "rate -> $TTS_RATE (backlog $backlog)"
     fi
 
     done_file=""

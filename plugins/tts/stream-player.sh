@@ -29,7 +29,7 @@ if [[ "$TTS_STREAM_MODE" == "digest" ]]; then
     # Digests are enqueued as one batch and must play out in full.
     TTS_STREAM_MAX_LAG_SECS="${TTS_STREAM_MAX_LAG_SECS:-120}"
 else
-    TTS_STREAM_MAX_LAG_SECS="${TTS_STREAM_MAX_LAG_SECS:-20}"
+    TTS_STREAM_MAX_LAG_SECS="${TTS_STREAM_MAX_LAG_SECS:-30}"
 fi
 
 file_age() {
