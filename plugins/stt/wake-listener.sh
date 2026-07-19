@@ -147,7 +147,7 @@ normalize() {
     # while-speaking limits and can even trigger commands ("[MUSIC PLAYING]"
     # once matched "play").
     printf '%s' "$1" \
-        | sed -E 's/\[[^][]*\]//g; s/\([^()]*\)//g' \
+        | sed -E 's/\[[^][]*\]//g; s/\([^()]*\)//g; s/\*[^*]*\*//g' \
         | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z ' | tr -s ' '
 }
 
