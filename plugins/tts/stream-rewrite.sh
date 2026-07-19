@@ -30,7 +30,15 @@ if [[ -f "$BOOTSTRAP_FILE" ]]; then
 fi
 
 TTS_SYNTH_CHARS="${TTS_SYNTH_CHARS:-180}"
-TTS_STREAM_REWRITE_TIMEOUT="${TTS_STREAM_REWRITE_TIMEOUT:-45}"
+# 20s, not 45: narration lagging 45s behind the pane is worse than raw text
+# spoken promptly (user-reported "horribly slow", 2026-07-19).
+TTS_STREAM_REWRITE_TIMEOUT="${TTS_STREAM_REWRITE_TIMEOUT:-20}"
+# Batches below this size with no technical residue skip codex entirely —
+# the call overhead (5-30s) dwarfs any listenability gain on plain prose.
+TTS_STREAM_REWRITE_MIN_CHARS="${TTS_STREAM_REWRITE_MIN_CHARS:-220}"
+# After a codex failure/timeout, pass batches through raw for this long
+# instead of stalling every batch on a degraded backend.
+TTS_STREAM_REWRITE_COOLDOWN="${TTS_STREAM_REWRITE_COOLDOWN:-120}"
 
 source "$SCRIPT_DIR/tts-lib.sh"
 
@@ -82,6 +90,16 @@ PROMPT_EOF
     [[ "$status" -eq 0 && -s "$out" ]]
 }
 
+# True when the batch is worth a codex pass: big enough, or carrying
+# technical residue (paths, code punctuation, long tokens like hashes) that
+# reads badly as speech. Plain short prose goes straight through.
+batch_needs_rewrite() {
+    local file="$1" chars
+    chars="$(wc -c < "$file" | tr -d ' ')"
+    if (( chars >= TTS_STREAM_REWRITE_MIN_CHARS )); then return 0; fi
+    grep -qE '[/\\`_{}<>=#]|[[:alnum:]]{18,}' "$file"
+}
+
 # Heuristic fallback: the pre-rewrite behavior (normalize already ran in
 # stream-step), just pass the text along.
 enqueue_text() {
@@ -113,6 +131,7 @@ done
 mkdir -p "$RAW"
 batch="$SPOOL/rewrite.batch"
 spoken="$SPOOL/rewrite.out"
+last_fail=0
 
 while mode_active; do
     # The recap owns the chunk queue while framing.lock exists.
@@ -136,10 +155,17 @@ while mode_active; do
         consumed+=("$f")
     done
 
-    if rewrite_batch "$batch" "$spoken"; then
+    now="$(date +%s)"
+    if (( now - last_fail < TTS_STREAM_REWRITE_COOLDOWN )); then
+        # Circuit breaker: a degraded codex must not tax every batch.
+        enqueue_text "$batch" || log_error "failed to enqueue raw (cooldown)"
+    elif ! batch_needs_rewrite "$batch"; then
+        enqueue_text "$batch" || log_error "failed to enqueue raw (plain prose)"
+    elif rewrite_batch "$batch" "$spoken"; then
         enqueue_text "$spoken" || log_error "failed to enqueue rewritten batch"
     else
-        log_error "codex rewrite failed; passing batch through raw"
+        last_fail="$(date +%s)"
+        log_error "codex rewrite failed; raw pass-through for ${TTS_STREAM_REWRITE_COOLDOWN}s"
         enqueue_text "$batch" || log_error "failed to enqueue raw fallback"
     fi
     rm -f "${consumed[@]}" "$spoken"

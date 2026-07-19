@@ -355,9 +355,13 @@ prose, skipping tool calls/results, spinners, echoed input, and other chrome.
 - **Listenable rewrite phase**: settled text goes to a `raw/` queue and
   `stream-rewrite.sh` rewrites each batch into natural narration via codex
   before synthesis (paths/hashes/code become spoken references, not
-  characters). Batching is self-pacing (~one codex call of lag, 5–20s); on
-  codex failure/timeout the batch passes through raw so the stream never
-  stalls. `TTS_STREAM_REWRITE=0` reverts to raw + heuristics.
+  characters). Batching is self-pacing (~one codex call of lag); latency
+  guards keep it honest: short plain-prose batches (< `TTS_STREAM_REWRITE_MIN_CHARS`,
+  220) skip codex entirely, calls are capped at `TTS_STREAM_REWRITE_TIMEOUT`
+  (20s), and any failure/timeout trips a `TTS_STREAM_REWRITE_COOLDOWN` (120s)
+  circuit breaker during which batches pass through raw — a degraded codex
+  taxes at most one batch, not every batch. `TTS_STREAM_REWRITE=0` reverts
+  to raw + heuristics permanently.
 - **Never repeats**: a rolling 400-line spoken memory guarantees a line heard
   once is not spoken again (BUG-023); lifecycle + anchor diagnostics persist
   in `/tmp/para-llm-tts/stream.log`.
