@@ -371,8 +371,16 @@ prose, skipping tool calls/results, spinners, echoed input, and other chrome.
     word stripped from the edges (clipped/courtesy "stop" variants too),
     text injected into the bound pane WITHOUT Enter, playback resumes.
   - **"repeat"** — re-runs the recap (spoken summary of the pane), through
-    the mode's own audio queue.
+    the mode's own audio queue. Implies "play": a standing pause is cleared
+    so the recap is always audible (BUG-026).
   - **"send"** — presses Enter in the bound pane (submits the dictation).
+    Accepts the "sent" mishearing and repeated bursts ("send send send");
+    confirms with its own distinct sound (`STT_WAKE_SEND_SOUND`, default
+    Hero.aiff) so submission is unmistakable over narration (BUG-027).
+  - **"diagnostic"** — speaks a pipeline health report (worker liveness,
+    queue depths, pause/suspend state, edge-tts reachability, codex
+    presence) via local `say`, deliberately bypassing the stream queue so
+    it works even when the pipeline is what's broken.
   Feedback protection: while TTS audio is in flight only a one-word
   utterance triggers; 3s cooldown after each dictation; word-prefix matching
   (never substring). Safety: silence/RMS guard, 120s max dictation, listener

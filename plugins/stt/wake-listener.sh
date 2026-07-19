@@ -45,9 +45,14 @@ STT_WAKE_FORWARD_WORD="${STT_WAKE_FORWARD_WORD:-forward}"
 STT_WAKE_REWIND_WORD="${STT_WAKE_REWIND_WORD:-rewind}"
 STT_WAKE_CLEAR_WORD="${STT_WAKE_CLEAR_WORD:-text box}"
 STT_WAKE_DIGEST_WORD="${STT_WAKE_DIGEST_WORD:-digest}"
+STT_WAKE_DIAGNOSTIC_WORD="${STT_WAKE_DIAGNOSTIC_WORD:-diagnostic}"
 # Every accepted command clicks; every failed action buzzes.
 STT_WAKE_ACK_SOUND="${STT_WAKE_ACK_SOUND-/System/Library/Sounds/Pop.aiff}"
 STT_WAKE_FAIL_SOUND="${STT_WAKE_FAIL_SOUND-/System/Library/Sounds/Basso.aiff}"
+# "send" gets its own, more audible confirmation: Pop is too subtle to hear
+# over in-flight narration, and "did it submit?" is the one signal that can't
+# be missed (BUG-027).
+STT_WAKE_SEND_SOUND="${STT_WAKE_SEND_SOUND-/System/Library/Sounds/Hero.aiff}"
 # Dictation keeps its own distinct pair (user preference): Glass = mic open,
 # Bottle = transcript landed.
 STT_WAKE_START_SOUND="${STT_WAKE_START_SOUND:-/System/Library/Sounds/Glass.aiff}"
@@ -136,7 +141,14 @@ resume_playback() {
 }
 
 normalize() {
-    printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z ' | tr -s ' '
+    # whisper-stream emits noise annotations — "[BLANK_AUDIO]", "[MUSIC
+    # PLAYING]", "(clicking)" — that are metadata, not speech. Drop them
+    # BEFORE word-counting: they inflate utterance length past the strict
+    # while-speaking limits and can even trigger commands ("[MUSIC PLAYING]"
+    # once matched "play").
+    printf '%s' "$1" \
+        | sed -E 's/\[[^][]*\]//g; s/\([^()]*\)//g' \
+        | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z ' | tr -s ' '
 }
 
 cleanup() {
@@ -201,12 +213,44 @@ matches_transcribe() {
 }
 REPEAT_STEM="$(stem8 "$STT_WAKE_REPEAT_WORD")"
 SEND_STEM="$(stem8 "$STT_WAKE_SEND_WORD")"
+# Whisper often renders a clipped "send" as "sent" — accept it as an exact
+# word only (never as a prefix: "sentence" must not submit).
+word_is_send() { [[ "$1" == "$SEND_STEM"* || "$1" == "sent" ]]; }
+
+# "send send send" — the frustrated repeat — must always land (BUG-027).
+all_words_send() {
+    local w count=0
+    for w in $1; do
+        count=$((count + 1))
+        word_is_send "$w" || return 1
+    done
+    (( count >= 1 ))
+}
+
+# Send-specific matcher, same shape as matches_word but with the "sent"
+# alias and the repeated-send escape hatch. The all-sends bypass is only
+# honored while no TTS audio is in flight — narration ABOUT the send command
+# must never press Enter (the a028ec9 cascade class).
+matches_send() {
+    local line="$1" count=0 found=1 w
+    for w in $line; do
+        count=$((count + 1))
+        word_is_send "$w" && found=0
+    done
+    (( found == 0 )) || return 1
+    if player_speaking; then
+        [[ "$count" -eq 1 ]]
+    else
+        [[ "$count" -le 2 ]] || all_words_send "$line"
+    fi
+}
 WINDOW_STEM="$(stem8 "$STT_WAKE_WINDOW_WORD")"
 PAUSE_STEM="$(stem8 "$STT_WAKE_PAUSE_WORD")"
 PLAY_STEM="$(stem8 "$STT_WAKE_PLAY_WORD")"
 FORWARD_STEM="$(stem8 "$STT_WAKE_FORWARD_WORD")"
 REWIND_STEM="$(stem8 "$STT_WAKE_REWIND_WORD")"
 DIGEST_STEM="$(stem8 "$STT_WAKE_DIGEST_WORD")"
+DIAGNOSTIC_STEM="$(stem8 "$STT_WAKE_DIAGNOSTIC_WORD")"
 CLEAR_STEM="$(stem8 "${STT_WAKE_CLEAR_WORD%% *}")"
 CLEAR_NORM="$(normalize "$STT_WAKE_CLEAR_WORD")"
 
@@ -401,6 +445,15 @@ do_repeat() {
         buzz
         return 0
     fi
+    # Asking to hear the recap is an unambiguous request for audio — it
+    # overrides a standing pause. Without this, the recap is enqueued into a
+    # SIGSTOPped player and plays nothing (BUG-026).
+    if [[ "$PAUSED" == "1" ]]; then
+        PAUSED=0
+        rm -f "$SPOOL/paused"
+        resume_playback
+        log_lifecycle "repeat: implicit play (was paused)"
+    fi
     log_lifecycle "repeat: recap requested"
     ack
     touch "$SPOOL/framing.lock"
@@ -415,12 +468,55 @@ do_repeat() {
 do_send() {
     if tmux send-keys -t "$PANE_ID" Enter 2>/dev/null; then
         log_lifecycle "send: Enter sent"
-        ack
+        chime "$STT_WAKE_SEND_SOUND"
         tmux display-message -t "$PANE_ID" "📨 Sent" 2>/dev/null || true
     else
         log_lifecycle "send FAILED: send-keys error"
         buzz
     fi
+}
+
+# "diagnostic": speak a pipeline health report through a DIRECT local path
+# (macOS `say`), deliberately bypassing the stream queue — when the pipeline
+# is the thing that's broken, the report must not depend on it. Checks
+# workers, queue depths, pause/suspend state, and edge-tts reachability (the
+# usual no-network casualty).
+do_diagnostic() {
+    ack
+    local report="" dead="" f pid
+    for f in watcher synth player rewrite wake; do
+        pid="$(cat "$SPOOL/$f.pid" 2>/dev/null)"
+        { [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; } || dead="$dead $f"
+    done
+    if [[ -n "$dead" ]]; then
+        report="Dead workers:${dead}."
+    else
+        report="All workers alive."
+    fi
+    if [[ "$PAUSED" == "1" ]]; then
+        report="$report Playback is paused, say ${STT_WAKE_PLAY_WORD} to resume."
+    else
+        pid="$(player_pid)"
+        if [[ -n "$pid" ]] && ps -o stat= -p "$pid" 2>/dev/null | grep -q T; then
+            report="$report Player is suspended unexpectedly."
+        fi
+    fi
+    local nraw nchunk naudio
+    nraw="$(ls "$SPOOL/raw" 2>/dev/null | grep -c '\.txt$')"
+    nchunk="$(ls "$SPOOL/chunks" 2>/dev/null | grep -c '\.txt$')"
+    naudio="$(ls "$SPOOL/audio" 2>/dev/null | grep -c '\.mp3$')"
+    report="$report Queues: $nraw raw, $nchunk text, $naudio audio."
+    if curl -s -m 3 -o /dev/null "https://speech.platform.bing.com" 2>/dev/null; then
+        report="$report Speech service reachable."
+    else
+        report="$report Speech service unreachable, check network."
+    fi
+    command -v codex >/dev/null 2>&1 || report="$report Codex is missing."
+    log_lifecycle "diagnostic: $report"
+    if command -v say >/dev/null 2>&1; then
+        ( say "Diagnostic. $report" >/dev/null 2>&1 & )
+    fi
+    tmux display-message -t "$PANE_ID" "🩺 $report" 2>/dev/null || true
 }
 
 # "window": move the speak-mode binding (and the purple) onward — next window
@@ -480,17 +576,27 @@ do_window() {
 PAUSED=0
 INJECTED=0
 
-# "send" while dictating: stricter than the transcribe-end rule — an utterance
-# of at most TWO words ending with the send word ("send." / "and send"), so
-# dictated prose that merely mentions sending stays content.
+# "send" while dictating: the closing word often lands in the SAME whisper
+# segment as the last dictated words ("...make it purple. Send.") — the old
+# <=2-word rule missed those, and missed "send send send" bursts entirely
+# (six sends in one segment can never be <=2 words). Accept:
+#   (a) a short utterance (<=2 words) ending send-ish,
+#   (b) a segment that is nothing but send-words, any count,
+#   (c) the RAW segment ending with "Send."/"Sent." as its OWN sentence
+#       (whisper punctuates the command apart from the prose; plain prose
+#       that happens to end "...was sent." lacks the preceding boundary),
+#       capped at 12 words so long prose merely mentioning it stays content.
 ends_with_send() {
-    local line="$1" count=0 last="" w
+    local norm="$1" raw="$2" count=0 last="" w
     [[ -n "$SEND_STEM" ]] || return 1
-    for w in $line; do
+    for w in $norm; do
         count=$((count + 1))
         last="$w"
     done
-    [[ "$last" == "$SEND_STEM"* && "$count" -le 2 ]]
+    if word_is_send "$last" && (( count <= 2 )); then return 0; fi
+    all_words_send "$norm" && return 0
+    local re='[.!?,;:][[:space:]]*[Ss][Ee][Nn][DdTt][.!]*[[:space:]]*$'
+    [[ "$raw" =~ $re ]] && (( count <= 12 ))
 }
 
 kill_inflight_afplay() {
@@ -595,10 +701,15 @@ while mode_active; do
                 do_repeat
                 echo_stem="$DIGEST_STEM"
             elif [[ "$echo_stem" != "$SEND_STEM" ]] \
-                && matches_word "$norm_line" "$SEND_STEM"; then
+                && matches_send "$norm_line"; then
                 log_lifecycle "send trigger: '$line'"
                 do_send
                 echo_stem="$SEND_STEM"
+            elif [[ "$echo_stem" != "$DIAGNOSTIC_STEM" ]] \
+                && matches_word "$norm_line" "$DIAGNOSTIC_STEM"; then
+                log_lifecycle "diagnostic trigger: '$line'"
+                do_diagnostic
+                echo_stem="$DIAGNOSTIC_STEM"
             elif ! player_speaking && [[ "$echo_stem" != "$WINDOW_STEM" ]] \
                 && matches_word "$norm_line" "$WINDOW_STEM"; then
                 log_lifecycle "window trigger: '$line'"
@@ -637,7 +748,7 @@ while mode_active; do
                 end_dictation
                 echo_stem="$TRANSCRIBE_STEM"
             elif [[ "$echo_stem" != "$SEND_STEM" ]] \
-                && ends_with_send "$norm_line"; then
+                && ends_with_send "$norm_line" "$line"; then
                 # "send" closes the take AND submits — no second "transcribe".
                 log_lifecycle "send-end trigger: '$line'"
                 end_dictation "$STT_WAKE_SEND_WORD"

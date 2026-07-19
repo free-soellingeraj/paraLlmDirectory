@@ -202,9 +202,41 @@ Log of bugs encountered and fixed in the para-llm-directory project. Each entry 
 **Fix**: `⧉ ✔ ✖ ✗` and leading-`…` lines added to the streaming drops; the anchor no longer shrinks on no-settle polls (find_anchor_end re-trims stale lines each poll anyway — the anchor only advances when text is consumed). Regression case "tabbar" pins the scenario.
 **File**: `plugins/tts/stream-step.py`
 
+### BUG-026: "repeat" while paused played beeps but no recap
+**Date**: 2026-07-19
+**Symptom**: Saying "repeat" played the ack and the preparing Tinks, the recap was generated and enqueued ("enqueued recap: 2 chunk(s)" in stream.log) — but nothing was ever spoken.
+**Cause**: The user had said "pause" minutes earlier (player SIGSTOPped, `paused` flag set) and never "play". `do_repeat` didn't check `PAUSED` — it enqueued the recap into a frozen player. The beeps come from the listener/framing processes directly, so they play regardless, which made the mode look alive while its output channel was suspended.
+**Fix**: Asking to hear the recap is an unambiguous request for audio: `do_repeat` (also serving "digest") now clears the pause and resumes playback before framing runs.
+**File**: `plugins/stt/wake-listener.sh` (do_repeat)
+
+### BUG-027: "send" often didn't fire — and when it did, the tone was inaudible
+**Date**: 2026-07-19
+**Symptom**: Saying "send" frequently produced no tone, so eyes-free there was no way to know whether the prompt was submitted. Repeating "send" in frustration ("Send. Send. Send. Send.") never triggered either — the words landed inside the dictation as content. Historical log check: every send that *triggered* also sent Enter and acked (94/94), so all silent failures were recognition misses.
+**Cause**: Four compounding issues. (1) whisper-stream noise annotations (`[BLANK_AUDIO]`, `[MUSIC PLAYING]`, `(clicking)`) were counted as words, so the strict one-word-while-speaking rule rejected real sends (and `[MUSIC PLAYING]` once *triggered* "play"). (2) Whisper renders clipped "send" as "sent"/"sand" etc.; the word-prefix stem match rejected all of them — the mishearing-alias treatment existed for "transcribe" ("subscrib") but not for the shortest, most collision-prone word in the set. (3) The dictation-close rule required ≤2 words ending in "send", while transcribe-end tolerates ≤6 — a same-segment close ("...make it purple. Send.") or any send-burst could never match. (4) `do_send` was the only command whose ack plays while narration continues (pause/forward/rewind silence the player first), and Pop.aiff is the subtlest of the system sounds — masked.
+**Fix**: `normalize()` strips bracketed/parenthesized annotations before matching; "sent" accepted as an exact-word alias (never a prefix — "sentence" must not submit); all-send bursts match in any state except while TTS audio is in flight (narration about the send command must never press Enter — the a028ec9 cascade class); dictation close additionally accepts the raw segment ending with "Send."/"Sent." as its own punctuated sentence (≤12 words); send confirms with its own louder sound (`STT_WAKE_SEND_SOUND`, default Hero.aiff). Verified with a 28-case extraction harness against the real functions.
+**File**: `plugins/stt/wake-listener.sh`
+
+### BUG-028: Narrator read the user's own queued messages back to them
+**Date**: 2026-07-19
+**Symptom**: While a long agent turn ran, speak mode spoke the user's own dictated/queued messages (observed live: a queued "…Send. Send. Send. Send." tail was narrated).
+**Cause**: `❯`-prefixed rows are dropped per-line, but long user messages **wrap**, and the wrapped continuation rows carry no marker — a 2–3 space indent that per-line patterns can't distinguish from agent-prose wraps (which must be spoken). The input-box structural cut (BUG-020 era) doesn't cover the queued-messages region above it.
+**Fix**: Block-aware `filter_speakable()` in `stream-step.py`: a continuation line belongs to whatever opened its block — `❯`/`⎿` blocks suppress their continuations, `⏺` prose keeps its own; a blank line ends suppression (keeps plain-shell panes mostly narratable). Trade-off: in a bare shell pane, command output that immediately follows a `❯` prompt with no blank line is no longer spoken.
+**File**: `plugins/tts/stream-step.py`
+
 ---
 
 ## Known Bug-Prone Areas
+
+### Live narration starves during long tool-heavy agent turns
+During a long single turn with dense tool calls, the viewport is dominated by
+tool chrome and redraws; prose scrolls off before it can settle (2 identical
+polls) and the pause-batch quiet window rarely arrives. The filtered capture
+can flap between ~1 and ~15 lines, so nothing settles and the stream goes
+quiet for minutes even though the pipeline is healthy ("agent is slow or audio
+is broken" reports). Recap/digest ("repeat") still works — it reads the pane
+directly. A real fix likely needs a capture-stability heuristic or a
+scrollback-aware capture. The "diagnostic" voice command reports
+workers/queues/network to distinguish this from genuine breakage.
 
 ### Git Remote Detection
 The scripts assume all base repos have an `origin` remote configured. If a repo doesn't have a remote, the clone operation will fail.

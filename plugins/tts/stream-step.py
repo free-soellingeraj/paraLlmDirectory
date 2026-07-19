@@ -120,6 +120,36 @@ def speakable(line):
     return line.strip() and not any(p.search(line) for p in DROP_PATTERNS)
 
 
+# A wrapped continuation line carries no marker of its own — it belongs to
+# whatever opened its block. Queued/echoed user messages ("❯ long message…")
+# wrap at a 2-3 space indent that the per-line drops can't distinguish from
+# agent-prose wraps, and the narrator would read the user their own words
+# (observed live: a queued "…Send. Send." tail was spoken). Track the block
+# opener: user-message and tool-result blocks suppress their continuations,
+# agent ⏺ prose keeps its own. A blank line ends any suppressed block, which
+# keeps plain-shell panes mostly narratable.
+USER_MSG_RE = re.compile(r"^\s*[>❯›]")
+TOOL_RESULT_RE = re.compile(r"^\s*⎿")
+PROSE_RE = re.compile(r"^⏺")
+
+
+def filter_speakable(lines):
+    out = []
+    suppress = False
+    for l in lines:
+        if not l.strip():
+            suppress = False
+            continue
+        if USER_MSG_RE.match(l) or TOOL_RESULT_RE.match(l):
+            suppress = True
+            continue
+        if PROSE_RE.match(l):
+            suppress = False   # per-line drops still veto tool-call ⏺ lines
+        if speakable(l) and not suppress:
+            out.append(l)
+    return out
+
+
 def find_anchor_end(lines, anchor):
     """(index, block) just past the LAST occurrence of the anchor in lines.
 
@@ -153,7 +183,7 @@ sep_idx = [i for i, l in enumerate(cur) if SEP_RE.match(l)]
 if len(sep_idx) >= 2 and sep_idx[-2] >= len(cur) - 15:
     cur = cur[:sep_idx[-2]]
 
-spk_cur = [l for l in cur if speakable(l)]
+spk_cur = filter_speakable(cur)
 spk_prev = read_lines(prev_path)
 anchor = read_lines(anchor_path) or []
 

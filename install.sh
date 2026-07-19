@@ -218,9 +218,11 @@ STT_WAKE_FORWARD_WORD="forward"  # Skips ~15s ahead ("fast forward" works too)
 STT_WAKE_REWIND_WORD="rewind"    # Replays ~15s (last two spoken chunks)
 STT_WAKE_CLEAR_WORD="text box"   # Clears the dictated text from the input box (sends one Ctrl+C)
 STT_WAKE_DIGEST_WORD="digest"    # Speaks a full turn digest on demand ("you asked X; the agent did Y")
+STT_WAKE_DIAGNOSTIC_WORD="diagnostic"  # Speaks a pipeline health report (workers, queues, network) via local `say`
 STT_WAKE_MAX_DICTATION="120"     # Force-end dictation after this many seconds (0 = no cap)
 STT_WAKE_ACK_SOUND="/System/Library/Sounds/Pop.aiff"    # Played when a voice command is accepted (empty = off)
 STT_WAKE_FAIL_SOUND="/System/Library/Sounds/Basso.aiff" # Played when a voice command fails (empty = off)
+STT_WAKE_SEND_SOUND="/System/Library/Sounds/Hero.aiff"  # Distinct confirmation for "send" — must be audible over narration
 TTS_STREAM_MODE="stream"         # "stream": continuous live narration; "digest": only speak turn summaries automatically
 TTS_STREAM_DIGEST_CHARS="900"    # Max digest length (chars of speakable prose)
 # TTS_STREAM_MAX_LAG_SECS="30"   # Freshness cap; unset = mode-aware default (120 digest / 30 stream)
