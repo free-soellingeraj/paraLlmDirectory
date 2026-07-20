@@ -365,6 +365,21 @@ prose, skipping tool calls/results, spinners, echoed input, and other chrome.
 - **Never repeats**: a rolling 400-line spoken memory guarantees a line heard
   once is not spoken again (BUG-023); lifecycle + anchor diagnostics persist
   in `/tmp/para-llm-tts/stream.log`.
+- **Working heartbeat**: a soft cricket chirp loops while the bound pane's
+  Claude is actively working *and* the voice is silent — it fills the thinking
+  gap right after you send so, eyes-free, you know the prompt landed and
+  needn't repeat "send". It ducks out completely for narration, for dictation
+  (the mic is open — a chirp would leak into whisper), and while paused, and
+  stops the instant the pane goes ready/needs-action (the Ping/Funk chime
+  takes over). "Working" is read from the claude-state monitor, falling back
+  to the live spinner/"esc to interrupt" capture when the monitor isn't
+  running (never chirps on an unknown state). The sound is synthesized with
+  `sox` into `/tmp/para-llm-tts/working-cricket.wav` on first use (a
+  `working-sticks.wav` rubbing-scrape alternate is generated alongside).
+  Config: `TTS_STREAM_WORKING_ENABLED` (1), `TTS_STREAM_WORKING_SOUND` (own
+  file; empty = cricket), `TTS_STREAM_WORKING_VOLUME` (1),
+  `TTS_STREAM_WORKING_GAP` (1.1s between chirps). Owned by `stream-watcher.sh`
+  as a child loop, torn down with the mode.
 - **Hands-free voice commands** (`plugins/stt/wake-listener.sh`): while speak
   mode is on, `whisper-stream` (tiny.en, auto-downloaded) listens
   continuously for three single words (stem-matched on short utterances, so

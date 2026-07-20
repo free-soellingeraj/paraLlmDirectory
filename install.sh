@@ -223,6 +223,10 @@ STT_WAKE_MAX_DICTATION="120"     # Force-end dictation after this many seconds (
 STT_WAKE_ACK_SOUND="/System/Library/Sounds/Pop.aiff"    # Played when a voice command is accepted (empty = off)
 STT_WAKE_FAIL_SOUND="/System/Library/Sounds/Basso.aiff" # Played when a voice command fails (empty = off)
 STT_WAKE_SEND_SOUND="/System/Library/Sounds/Hero.aiff"  # Distinct confirmation for "send" — must be audible over narration
+TTS_STREAM_WORKING_ENABLED="1"   # Soft "heartbeat" sound while Claude is working AND the voice is silent (so you know your prompt landed); 0 = off
+# TTS_STREAM_WORKING_SOUND=""     # Path to your own working-sound file; empty = synthesized cricket ($TTS_DIR/working-cricket.wav; a working-sticks.wav alternate is generated too)
+TTS_STREAM_WORKING_VOLUME="1"    # afplay volume for the heartbeat (0.0-1.0+); the file itself is already soft
+TTS_STREAM_WORKING_GAP="1.1"     # Seconds of silence between chirps (cricket rhythm)
 TTS_STREAM_MODE="stream"         # "stream": continuous live narration; "digest": only speak turn summaries automatically
 TTS_STREAM_DIGEST_CHARS="900"    # Max digest length (chars of speakable prose)
 # TTS_STREAM_MAX_LAG_SECS="30"   # Freshness cap; unset = mode-aware default (120 digest / 30 stream)

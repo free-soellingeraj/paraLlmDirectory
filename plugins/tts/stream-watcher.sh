@@ -36,6 +36,18 @@ export TTS_STREAM_REWRITE="${TTS_STREAM_REWRITE:-1}"
 # monitor's per-pane display files. Empty sound path disables.
 TTS_STREAM_READY_SOUND="${TTS_STREAM_READY_SOUND-/System/Library/Sounds/Ping.aiff}"
 TTS_STREAM_ACTION_SOUND="${TTS_STREAM_ACTION_SOUND-/System/Library/Sounds/Funk.aiff}"
+
+# Working "heartbeat": a soft cricket loop while the bound pane's Claude is
+# actively working AND the voice is silent — it fills the thinking gap after
+# you send so you know the prompt landed and you needn't say "send" again. It
+# ducks out for narration and dictation (below). Empty sound path or
+# TTS_STREAM_WORKING_ENABLED=0 disables. Sound is synthesized with sox into
+# $TTS_DIR the first time; set TTS_STREAM_WORKING_SOUND to your own file to
+# override (a "sticks" alternate is generated alongside for easy swapping).
+TTS_STREAM_WORKING_ENABLED="${TTS_STREAM_WORKING_ENABLED:-1}"
+TTS_STREAM_WORKING_SOUND="${TTS_STREAM_WORKING_SOUND:-}"
+TTS_STREAM_WORKING_VOLUME="${TTS_STREAM_WORKING_VOLUME:-1}"
+TTS_STREAM_WORKING_GAP="${TTS_STREAM_WORKING_GAP:-1.1}"
 # 0.4s: a line must survive two consecutive polls to be spoken, and in small
 # command-center tiles (~15 rows on the alternate screen) prose can scroll out
 # of the viewport within a couple of seconds of a tool block rendering.
@@ -83,7 +95,7 @@ teardown_dead_pane() {
     tmux set-option -pt "$PANE_ID" -u @speak_on 2>/dev/null || true
     tmux set-option -pt "$PANE_ID" -u window-style 2>/dev/null || true
     local f pid
-    for f in "$SPOOL/synth.pid" "$SPOOL/player.pid" "$SPOOL/framing.pid" "$SPOOL/rewrite.pid" "$SPOOL/wake.pid" "$SPOOL/whisper-stream.pid" "$SPOOL/dictation-rec.pid"; do
+    for f in "$SPOOL/synth.pid" "$SPOOL/player.pid" "$SPOOL/framing.pid" "$SPOOL/rewrite.pid" "$SPOOL/wake.pid" "$SPOOL/whisper-stream.pid" "$SPOOL/dictation-rec.pid" "$SPOOL/working-sound.pid"; do
         pid="$(cat "$f" 2>/dev/null)"
         [[ -n "$pid" ]] && kill_tree "$pid"
         rm -f "$f"
@@ -107,8 +119,90 @@ pane_state() {
     case "$content" in
         *"Needs Action"*)       echo action ;;
         *"Waiting for Input"*)  echo ready ;;
+        *"Working"*)            echo working ;;
         *)                      echo other ;;
     esac
+}
+
+# True when the agent is actively working. Prefers the state monitor; when it
+# has no opinion (monitor not running for this pane), falls back to the live
+# capture — Claude Code shows a spinner and an "esc to interrupt" hint only
+# while a turn runs. Deliberately conservative: unknown state => not working,
+# so the heartbeat never chirps on an idle pane just because the monitor is off.
+is_working() {
+    case "$(pane_state)" in
+        working)      return 0 ;;
+        ready|action) return 1 ;;
+    esac
+    grep -qiE 'esc to interrupt|✻|✽|✶|✳|✢' "$SPOOL/cur.raw" 2>/dev/null
+}
+
+# Synthesize the heartbeat sounds into $TTS_DIR once (shared across panes /
+# boots). Sets WORKING_SOUND_FILE to the chosen file, or "" if unavailable.
+WORKING_SOUND_FILE=""
+ensure_working_sound() {
+    if [[ -n "$TTS_STREAM_WORKING_SOUND" ]]; then
+        WORKING_SOUND_FILE="$TTS_STREAM_WORKING_SOUND"
+        return 0
+    fi
+    command -v sox >/dev/null 2>&1 || { WORKING_SOUND_FILE=""; return 0; }
+    # -t wav forces the container: sox picks the encoder from the extension,
+    # and the atomic ".part" temp would otherwise read as an unknown type.
+    local cricket="$TTS_DIR/working-cricket.wav" sticks="$TTS_DIR/working-sticks.wav"
+    if [[ ! -s "$cricket" ]]; then
+        sox -n -r 44100 -c 1 -t wav "$cricket.part" \
+            synth 0.5 sine 4600 tremolo 55 90 fade t 0.02 0.5 0.12 gain -20 2>/dev/null \
+            && mv "$cricket.part" "$cricket" 2>/dev/null || rm -f "$cricket.part"
+    fi
+    if [[ ! -s "$sticks" ]]; then
+        sox -n -r 44100 -c 1 -t wav "$sticks.part" \
+            synth 0.28 brownnoise tremolo 28 100 bandpass 2600 1.5q fade t 0.02 0.28 0.1 gain -12 2>/dev/null \
+            && mv "$sticks.part" "$sticks" 2>/dev/null || rm -f "$sticks.part"
+    fi
+    [[ -s "$cricket" ]] && WORKING_SOUND_FILE="$cricket" || WORKING_SOUND_FILE=""
+}
+
+CHIRP_PID_FILE="$SPOOL/working-sound.pid"
+chirp_running() {
+    local pid; pid="$(cat "$CHIRP_PID_FILE" 2>/dev/null)"
+    [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null
+}
+chirp_start() {
+    chirp_running && return 0
+    [[ -n "$WORKING_SOUND_FILE" && -f "$WORKING_SOUND_FILE" ]] || return 0
+    command -v afplay >/dev/null 2>&1 || return 0
+    (
+        while :; do
+            afplay -v "$TTS_STREAM_WORKING_VOLUME" "$WORKING_SOUND_FILE" >/dev/null 2>&1 || sleep 1
+            sleep "$TTS_STREAM_WORKING_GAP"
+        done
+    ) &
+    echo "$!" > "$CHIRP_PID_FILE"
+}
+chirp_stop() {
+    local pid; pid="$(cat "$CHIRP_PID_FILE" 2>/dev/null)"
+    [[ -n "$pid" ]] && kill_tree "$pid"
+    rm -f "$CHIRP_PID_FILE"
+}
+
+# True while the player has an afplay in flight — the voice is speaking, so
+# the heartbeat ducks out (same test wake-listener uses for feedback).
+player_speaking_now() {
+    local pid; pid="$(cat "$SPOOL/player.pid" 2>/dev/null)"
+    [[ -n "$pid" ]] && pgrep -P "$pid" -x afplay >/dev/null 2>&1
+}
+
+# Start/stop the heartbeat each tick. Chirps only when working AND nothing
+# else should own the audio: not paused, not dictating (mic is open — the
+# chirp would leak into whisper), not while the voice is speaking.
+maybe_working_sound() {
+    [[ "$TTS_STREAM_WORKING_ENABLED" == "0" ]] && { chirp_stop; return 0; }
+    local want=1
+    is_working || want=0
+    [[ -f "$SPOOL/paused" ]] && want=0
+    [[ "$(cat "$SPOOL/wake.state" 2>/dev/null)" == "dictating" ]] && want=0
+    player_speaking_now && want=0
+    if [[ "$want" == 1 ]]; then chirp_start; else chirp_stop; fi
 }
 
 # Digest mode: when a turn completes (pane held a working state >=10s, then
@@ -158,6 +252,9 @@ maybe_chime_state() {
     fi
 }
 
+# The heartbeat loop is our child; never leave it chirping after we exit.
+trap 'chirp_stop 2>/dev/null' EXIT
+
 # The mode file is written shortly AFTER we are spawned (see toggle-stream.sh
 # start order) — wait briefly for it instead of exiting on a not-yet-on mode.
 tries=0
@@ -167,15 +264,21 @@ until mode_active; do
     sleep 0.1
 done
 
+ensure_working_sound
+
 while mode_active; do
     if ! pane_alive; then
         teardown_dead_pane
         exit 0
     fi
 
+    # Raw capture feeds both the filtered transcript AND is_working's spinner
+    # fallback, so we snapshot the pane once per tick.
+    tmux capture-pane -t "$PANE_ID" -p -S - 2>/dev/null > "$SPOOL/cur.raw.part" \
+        && mv "$SPOOL/cur.raw.part" "$SPOOL/cur.raw"
+
     if [[ "$TTS_STREAM_MODE" != "digest" ]]; then
-        tmux capture-pane -t "$PANE_ID" -p -S - 2>/dev/null \
-            | "$SCRIPT_DIR/filter-pane-text.sh" > "$SPOOL/cur.txt.part" \
+        "$SCRIPT_DIR/filter-pane-text.sh" < "$SPOOL/cur.raw" > "$SPOOL/cur.txt.part" \
             && mv "$SPOOL/cur.txt.part" "$SPOOL/cur.txt"
 
         if ! python3 "$SCRIPT_DIR/stream-step.py" "$SPOOL" 2>> "$SPOOL/error.log"; then
@@ -184,5 +287,6 @@ while mode_active; do
     fi
 
     maybe_chime_state
+    maybe_working_sound
     sleep "$POLL_INTERVAL"
 done
