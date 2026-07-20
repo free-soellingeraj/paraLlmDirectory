@@ -129,7 +129,21 @@ pane_state() {
 # capture — Claude Code shows a spinner and an "esc to interrupt" hint only
 # while a turn runs. Deliberately conservative: unknown state => not working,
 # so the heartbeat never chirps on an idle pane just because the monitor is off.
+# The agent is blocked on the USER's answer — a permission prompt, the trust
+# dialog, a plan/continue confirmation, a numbered choice menu. The turn is
+# often still technically "running" (the spinner/"esc to interrupt" can stay
+# up), but it is the user's turn to respond, so the heartbeat must be silent.
+# These dialogs always render at the bottom; scope there to avoid matching the
+# same words in agent prose higher up. Errs toward silence by design.
+awaiting_user() {
+    local tail
+    tail="$(grep -vE '^[[:space:]]*$' "$SPOOL/cur.raw" 2>/dev/null | tail -14)"
+    grep -qE 'Do you want to|Do you trust|Would you like to proceed|No, and tell Claude|don.t ask again|❯[[:space:]]+[0-9]+\.' <<< "$tail"
+}
+
 is_working() {
+    # A prompt waiting on the user beats everything else — silence.
+    awaiting_user && return 1
     case "$(pane_state)" in
         working)      return 0 ;;
         ready|action) return 1 ;;

@@ -377,6 +377,13 @@ prose, skipping tool calls/results, spinners, echoed input, and other chrome.
   - It ducks out for narration (the voice is playing — not silence), for
     dictation (the mic is open, a beat would leak into whisper), and while
     paused; it stops the instant the pane goes ready/needs-action.
+  - It is also silent while the agent is **blocked on your answer** — a
+    permission prompt, the trust dialog, a plan/continue confirmation, a
+    numbered choice menu (`awaiting_user`). These keep the turn technically
+    "running" (the spinner/"esc to interrupt" stays up) but it's your turn to
+    respond, so a tone would be wrong. Detected from the bottom of the pane
+    ("Do you want to…", "Do you trust…", "Would you like to proceed", the
+    Claude-specific option text, a `❯ 1.` selector); errs toward silence.
   - The ready/needs-action **transition chimes** (`TTS_STREAM_READY_SOUND` /
     `TTS_STREAM_ACTION_SOUND`) are therefore optional and disabled in this
     user's config — the heartbeat *stopping* is the "your turn" cue, keeping
