@@ -229,7 +229,7 @@ TTS_STREAM_WORKING_VOLUME="1"    # afplay volume for the heartbeat (0.0-1.0+); t
 TTS_STREAM_WORKING_GAP="1.1"     # Seconds of silence between beats
 TTS_STREAM_MODE="stream"         # "stream": continuous live narration; "digest": only speak turn summaries automatically
 TTS_STREAM_DIGEST_CHARS="900"    # Max digest length (chars of speakable prose)
-# TTS_STREAM_MAX_LAG_SECS="30"   # Freshness cap; unset = mode-aware default (120 digest / 30 stream)
+# TTS_STREAM_MAX_LAG_SECS="180"  # Skip audio older than this (0=never skip); default 180 fits a whole turn-batch so responses aren't truncated mid-sentence (BUG-029). Lower = fresher but choppier.
 TTS_STREAM_CATCHUP_RATE="+15%"   # Voice rate when 4+ chunks behind (speeds up instead of dropping)
 TTS_STREAM_SPRINT_RATE="+30%"    # Voice rate when 8+ chunks behind
 TTS_STREAM_RATE="+10%"           # Stream-mode speaking rate (reading speed is the throughput bottleneck)

@@ -21,15 +21,19 @@ if [[ -f "$BOOTSTRAP_FILE" ]]; then
     PARA_LLM_ROOT="$(cat "$BOOTSTRAP_FILE")"
     [[ -f "$PARA_LLM_ROOT/config" ]] && source "$PARA_LLM_ROOT/config"
 fi
-# Freshness beats completeness: audio synthesized longer ago than this is
-# stale commentary — skip it so speech stays near-live and pauses (during
-# which voice commands match leniently) actually occur. 0 disables.
+# Skip audio synthesized longer ago than this (stale commentary) so speech
+# stays near-live. 0 disables. The cap must fit a whole pause-BATCH: emission
+# hands the synth a coherent turn-block of up to TTS_STREAM_MAX_PENDING chars
+# (~8-10 chunks) at once, and the player plays them ~12-14s apart, so the
+# block's TAIL is legitimately 100s+ old by the time it is due. A small cap
+# (the old 30s) truncated every multi-chunk turn mid-sentence; size it to the
+# block instead. (BUG-029)
 TTS_STREAM_MODE="${TTS_STREAM_MODE:-stream}"
 if [[ "$TTS_STREAM_MODE" == "digest" ]]; then
     # Digests are enqueued as one batch and must play out in full.
-    TTS_STREAM_MAX_LAG_SECS="${TTS_STREAM_MAX_LAG_SECS:-120}"
+    TTS_STREAM_MAX_LAG_SECS="${TTS_STREAM_MAX_LAG_SECS:-180}"
 else
-    TTS_STREAM_MAX_LAG_SECS="${TTS_STREAM_MAX_LAG_SECS:-30}"
+    TTS_STREAM_MAX_LAG_SECS="${TTS_STREAM_MAX_LAG_SECS:-180}"
 fi
 
 file_age() {

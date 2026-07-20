@@ -223,6 +223,13 @@ Log of bugs encountered and fixed in the para-llm-directory project. Each entry 
 **Fix**: Block-aware `filter_speakable()` in `stream-step.py`: a continuation line belongs to whatever opened its block — `❯`/`⎿` blocks suppress their continuations, `⏺` prose keeps its own; a blank line ends suppression (keeps plain-shell panes mostly narratable). Trade-off: in a bare shell pane, command output that immediately follows a `❯` prompt with no blank line is no longer spoken.
 **File**: `plugins/tts/stream-step.py`
 
+### BUG-029: Speak mode truncated responses mid-sentence (freshness cap vs pause-batching)
+**Date**: 2026-07-20
+**Symptom**: Live narration "talks for a little while and then just stops" — spoken responses are shorter than the agent's actual output and cut off mid-sentence.
+**Cause**: The synth AND player both skip any chunk whose audio file is older than `TTS_STREAM_MAX_LAG_SECS` (was 30s in stream mode). The pause-batched emission (c05af95) hands the pipeline a whole turn as ONE block of ~8-10 chunks enqueued at the same instant; the player plays them strictly in order at ~12-14s of speech each, so the block's tail chunks are legitimately 40-120s old by the time they are due — well past a 30s cap — and get skipped. So every multi-chunk turn lost its tail. The 30s cap was tuned for the retired per-sentence trickle (chunks created ~as fast as played); it was never resized when batching concentrated output into blocks. NOT rewrite-shortening (verified: codex passes conversational text through at ~100%) and NOT a settling bug.
+**Fix**: Raised the stream-mode default cap to 180s (synth + player + install + live config), sized to fit a full `TTS_STREAM_MAX_PENDING` (1500-char) batch plus margin, so coherent turn-batches play to completion. Catch-up/sprint rates still bound the lag within a batch, and inter-turn quiet drains it. Trade-off: on a genuinely long turn, playback can now lag further behind the screen rather than dropping content — the opposite of the old "freshness beats completeness" default, matching the user's repeated preference for completeness. `0` disables skipping entirely; lower values trade completeness for freshness.
+**File**: `plugins/tts/stream-player.sh:24-33`, `plugins/tts/stream-synth.sh:34-39`
+
 ---
 
 ## Known Bug-Prone Areas

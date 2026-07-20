@@ -33,9 +33,11 @@ TTS_STREAM_ENGINE="${TTS_STREAM_ENGINE:-edge-tts}"
 TTS_STREAM_MODE="${TTS_STREAM_MODE:-stream}"
 if [[ "$TTS_STREAM_MODE" == "digest" ]]; then
     # Digests are enqueued as one batch and must play out in full.
-    TTS_STREAM_MAX_LAG_SECS="${TTS_STREAM_MAX_LAG_SECS:-120}"
+    TTS_STREAM_MAX_LAG_SECS="${TTS_STREAM_MAX_LAG_SECS:-180}"
 else
-    TTS_STREAM_MAX_LAG_SECS="${TTS_STREAM_MAX_LAG_SECS:-30}"
+    # Fit a whole pause-batch so a turn's tail chunks aren't skipped mid-
+    # sentence (BUG-029). See stream-player.sh for the full rationale.
+    TTS_STREAM_MAX_LAG_SECS="${TTS_STREAM_MAX_LAG_SECS:-180}"
 fi
 # Stream mode speaks slightly faster than one-shot playback: reading speed is
 # the pipeline's bottleneck. When the queue backs up, the voice speeds up
