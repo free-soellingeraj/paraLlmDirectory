@@ -308,3 +308,21 @@ $PARA_LLM_ROOT/remotes/
 **Gotcha worth keeping**: `tmux display-message -pt <dead-pane>` exits 0 (falls back to another target); pane liveness must be checked with `tmux list-panes -a` + exact match. The watcher does this and tears the whole mode down when the bound pane dies.
 
 **File**: `plugins/tts/toggle-stream.sh`, `plugins/tts/stream-step.py`, `plugins/tts/stream-watcher.sh`
+
+---
+
+## ADR-011: Working-Heartbeat State from Claude Code's Hook Stream, not Screen-Scraping
+
+**Decision**: The speak-mode "working heartbeat" (soft sticks loop while the agent is busy) decides working-vs-not primarily from **Claude Code's own hook-published state**, not by pattern-matching pane chrome. Claude Code's `PreToolUse`/`PostToolUse`/`Stop`/`Notification` hooks run `state-tracker.sh`, which writes `/tmp/claude-state/by-cwd/<cwd_safe>.json` with a `state` field (`working` | `ready` | `blocked` | `ended` | `starting`). `is_working` (in `stream-watcher.sh`) reads that file for the bound pane's cwd.
+
+**Context**: The first cut inferred "working" by grepping the pane capture for the spinner/"esc to interrupt" and inferred "blocked on the user" by matching permission/trust/plan dialog text ("Do you want to", "❯ 1.", …). This was fragile — it breaks whenever Claude Code reskins a prompt — and it grepped the whole `-S -` scrollback, so transcript text (this very project discusses the string "esc to interrupt") matched forever and the tone never stopped (the reported bug). The user pointed out Claude Code already publishes status; it does, via the hooks this repo installs.
+
+**Why hybrid, not hooks-only**: two hook gaps make a pure-hook reading wrong, both confirmed live:
+- The `Stop` hook is unreliable (ADR-007). A pane can sit at `state:working` long after the turn ended → a hooks-only heartbeat would loop forever. Observed live: a pane read `working` with an idle footer.
+- There is no `UserPromptSubmit` hook wired, so the initial thinking phase (before the first tool) still reads the previous `Stop`'s `ready`.
+
+So the rule is: `blocked`/`ended` from the hook → authoritative silence (this is what cleanly kills the tone on permission prompts — no chrome matching); otherwise "a turn is running" is taken from Claude Code's own `esc to interrupt` footer text (the single most stable status string, scoped to the last few non-blank lines so scrollback can't match). The footer corrects a stale `working` (Stop missed → footer already cleared) and a stale `ready` (initial thinking → footer already shows the turn). When no hook file exists (older session), it degrades to a footer + dialog-pattern heuristic.
+
+**Trade-off**: still reads one on-screen string (`esc to interrupt`) as the run indicator, because no reliable hook marks "a turn is actively running." That string is Claude Code's own documented status text and is what `state-tracker.sh` and `state-detector.sh` already key on, so it is the least-fragile screen signal available. Adding a `UserPromptSubmit`→working hook and a fix for `Stop` reliability would let this drop the footer entirely.
+
+**File**: `plugins/tts/stream-watcher.sh` (`hook_state`, `footer_running`, `awaiting_user`, `is_working`), `plugins/claude-state-monitor/hooks/state-tracker.sh`

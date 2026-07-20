@@ -129,12 +129,37 @@ pane_state() {
 # capture — Claude Code shows a spinner and an "esc to interrupt" hint only
 # while a turn runs. Deliberately conservative: unknown state => not working,
 # so the heartbeat never chirps on an idle pane just because the monitor is off.
-# The agent is blocked on the USER's answer — a permission prompt, the trust
-# dialog, a plan/continue confirmation, a numbered choice menu. The turn is
-# often still technically "running" (the spinner/"esc to interrupt" can stay
-# up), but it is the user's turn to respond, so the heartbeat must be silent.
-# These dialogs always render at the bottom; scope there to avoid matching the
-# same words in agent prose higher up. Errs toward silence by design.
+# Authoritative per-pane state PUBLISHED BY CLAUDE CODE ITSELF: its hooks
+# (PreToolUse/PostToolUse/Stop/Notification) run state-tracker.sh, which writes
+# a JSON state file keyed by the session cwd. `.state` is one of working /
+# ready / blocked (permission prompt) / ended / starting. This is event-driven
+# truth, not screen-scraping — in particular a permission prompt is `blocked`,
+# so we don't have to pattern-match dialog chrome to stay quiet for it.
+# Returns the state string, or "" when no hook file exists (hooks not
+# installed for this session — we degrade to the screen heuristic below).
+hook_state() {
+    local cwd safe f
+    cwd="$(tmux display-message -pt "$PANE_ID" '#{pane_current_path}' 2>/dev/null)"
+    [[ -n "$cwd" ]] || return 0
+    safe="$(printf '%s' "$cwd" | sed 's|/|_|g; s|^_||')"
+    f="/tmp/claude-state/by-cwd/$safe.json"
+    [[ -f "$f" ]] || return 0
+    grep -o '"state"[[:space:]]*:[[:space:]]*"[^"]*"' "$f" 2>/dev/null \
+        | head -1 | sed 's/.*"\([^"]*\)"[[:space:]]*$/\1/'
+}
+
+# "A turn is actively running right now" — Claude Code shows "esc to interrupt"
+# in its bottom status bar only while working; absent at an idle prompt. This
+# is the ONE piece of screen text we still read, and it's the same signal the
+# project's own state-detector and Claude's idle-notification hook key on.
+# Scope to the last non-blank lines so scrollback transcript (which quotes
+# "esc to interrupt" — like this very conversation) can never match.
+footer_running() {
+    grep -vE '^[[:space:]]*$' "$SPOOL/cur.raw" 2>/dev/null | tail -4 \
+        | grep -qF 'esc to interrupt'
+}
+
+# No-hooks fallback only: recognise a user-blocking dialog from its chrome.
 awaiting_user() {
     local tail
     tail="$(grep -vE '^[[:space:]]*$' "$SPOOL/cur.raw" 2>/dev/null | tail -14)"
@@ -142,20 +167,20 @@ awaiting_user() {
 }
 
 is_working() {
-    # A prompt waiting on the user beats everything else — silence.
-    awaiting_user && return 1
-    case "$(pane_state)" in
-        working)      return 0 ;;
-        ready|action) return 1 ;;
+    case "$(hook_state)" in
+        # Authoritative "it's the user's turn" / finished — always silent.
+        # `blocked` is the permission/trust/plan prompt; no chrome matching.
+        blocked|ended) return 1 ;;
+        # No hook state for this session: fall back to the screen heuristic
+        # (footer + the dialog patterns) for everything.
+        "") awaiting_user && return 1 ;;
     esac
-    # No state-monitor opinion (it only runs under Command Center): key on the
-    # live bottom status bar, exactly like the project's own state-detector.
-    # Claude Code shows "esc to interrupt" there ONLY while a turn runs; it is
-    # absent at an idle prompt. Scope to the LAST few non-blank lines — never
-    # the whole scrollback, which contains transcript text (this very
-    # conversation discusses "esc to interrupt") and would match forever.
-    grep -vE '^[[:space:]]*$' "$SPOOL/cur.raw" 2>/dev/null | tail -4 \
-        | grep -qF 'esc to interrupt'
+    # Otherwise a turn is running iff Claude's own status bar says so. Using
+    # the live footer here (not the hook's working/ready) makes us robust to
+    # BOTH the unreliable Stop hook (stale "working" — the footer will have
+    # cleared) and the missing UserPromptSubmit hook (initial thinking shows
+    # as stale "ready" — the footer already shows the turn running).
+    footer_running
 }
 
 # Synthesize the heartbeat sounds into $TTS_DIR once (shared across panes /

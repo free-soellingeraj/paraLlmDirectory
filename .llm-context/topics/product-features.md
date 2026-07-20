@@ -378,19 +378,23 @@ prose, skipping tool calls/results, spinners, echoed input, and other chrome.
     dictation (the mic is open, a beat would leak into whisper), and while
     paused; it stops the instant the pane goes ready/needs-action.
   - It is also silent while the agent is **blocked on your answer** — a
-    permission prompt, the trust dialog, a plan/continue confirmation, a
-    numbered choice menu (`awaiting_user`). These keep the turn technically
-    "running" (the spinner/"esc to interrupt" stays up) but it's your turn to
-    respond, so a tone would be wrong. Detected from the bottom of the pane
-    ("Do you want to…", "Do you trust…", "Would you like to proceed", the
-    Claude-specific option text, a `❯ 1.` selector); errs toward silence.
+    permission prompt, the trust dialog, a plan/continue confirmation. This is
+    read AUTHORITATIVELY from Claude Code's hook-published state (below), which
+    marks these `blocked`; no dialog-chrome matching in the normal path.
   - The ready/needs-action **transition chimes** (`TTS_STREAM_READY_SOUND` /
     `TTS_STREAM_ACTION_SOUND`) are therefore optional and disabled in this
     user's config — the heartbeat *stopping* is the "your turn" cue, keeping
     idle truly silent. Set them back to sound paths to re-enable.
-  - "Working" is read from the claude-state monitor, falling back to the live
-    spinner/"esc to interrupt" capture when the monitor isn't running (never
-    beats on an unknown/idle state).
+  - **State source (`is_working`)**: primary signal is Claude Code's own hooks
+    (`state-tracker.sh` writing `/tmp/claude-state/by-cwd/<cwd>.json`:
+    `working` / `ready` / `blocked` / `ended`). `blocked`/`ended` →
+    authoritative silence. For "a turn is running right now" it reads Claude's
+    `esc to interrupt` status text from the live footer — the one on-screen
+    string still used — which survives both the unreliable `Stop` hook (stale
+    `working` → footer already cleared → silence) and the absent
+    `UserPromptSubmit` hook (initial thinking = stale `ready` → footer already
+    shows the turn → plays). No hook file (older session) → degrades to a
+    footer + `awaiting_user` dialog-pattern heuristic. See ADR-011.
   - Sounds are synthesized with `sox` into `/tmp/para-llm-tts/` on first use:
     `working-sticks.wav` (default) and a tonal `working-cricket.wav` alternate
     (`-t wav` forces the container so the atomic `.part` temp encodes).
