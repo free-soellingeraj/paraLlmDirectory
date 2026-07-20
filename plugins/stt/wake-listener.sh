@@ -242,7 +242,10 @@ matches_send() {
     done
     (( found == 0 )) || return 1
     if player_speaking; then
-        [[ "$count" -eq 1 ]]
+        # A lone "send", OR a frustrated burst ("send send send") — the burst
+        # is unmistakably the user (narration never emits only send-words), so
+        # honor it even over live audio.
+        [[ "$count" -eq 1 ]] || all_words_send "$line"
     else
         [[ "$count" -le 2 ]] || all_words_send "$line"
     fi
@@ -681,6 +684,11 @@ exec 3< <(tail -n 0 -F "$WAKE_LOG" 2>/dev/null)
 while mode_active; do
     if read -t 1 -u 3 -r line; then
         norm_line="$(normalize "$line")"
+        # Voice-activity signal for the working heartbeat: any real word content
+        # (normalize strips whisper's noise annotations like "(crowd cheering)"
+        # to empty, so the sticks' own feedback does NOT count) means someone is
+        # talking — duck the tick so it stops masking the command in the mic.
+        [[ -n "$norm_line" ]] && touch "$SPOOL/voice.active" 2>/dev/null || true
         # The triggered word has left the window once a line arrives without it.
         if [[ -n "$echo_stem" ]] && ! line_has_stem "$norm_line" "$echo_stem"; then
             echo_stem=""
@@ -715,8 +723,12 @@ while mode_active; do
                 log_lifecycle "diagnostic trigger: '$line'"
                 do_diagnostic
                 echo_stem="$DIAGNOSTIC_STEM"
-            elif ! player_speaking && [[ "$echo_stem" != "$WINDOW_STEM" ]] \
+            elif [[ "$echo_stem" != "$WINDOW_STEM" ]] \
                 && matches_word "$norm_line" "$WINDOW_STEM"; then
+                # "window" works WHILE the agent is talking — it's an interrupt:
+                # moving the mode tears down this pane's playback and switches.
+                # (Still blocked during dictation: that's the else-branch below,
+                # where the mic is capturing the user's words, not commands.)
                 log_lifecycle "window trigger: '$line'"
                 do_window
                 echo_stem="$WINDOW_STEM"

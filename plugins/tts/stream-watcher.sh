@@ -254,6 +254,14 @@ maybe_working_sound() {
     # (stream-framing) — suppress here so the two never double up.
     [[ -f "$SPOOL/framing.lock" ]] && want=0
     player_speaking_now && want=0
+    # Duck while the wake-listener just heard a real word: the tick feeds back
+    # into the mic and masks voice commands ("send" heard as noise). The
+    # listener touches voice.active on any non-annotation whisper output.
+    if [[ -f "$SPOOL/voice.active" ]]; then
+        local va_age
+        va_age=$(( $(date +%s) - $(stat -f %m "$SPOOL/voice.active" 2>/dev/null || stat -c %Y "$SPOOL/voice.active" 2>/dev/null || echo 0) ))
+        (( va_age < 3 )) && want=0
+    fi
     if [[ "$want" == 1 ]]; then chirp_start; else chirp_stop; fi
 }
 
