@@ -117,7 +117,7 @@ while mode_active; do
     done
 
     if [[ -z "$file" ]]; then
-        sleep 0.2
+        sleep 0.05   # tight poll so the next chunk starts as soon as it lands
         continue
     fi
 
