@@ -432,6 +432,11 @@ PY
         return 0
     fi
 
+    # Collapse any stray newlines from the transcript to spaces before
+    # injecting — a literal newline sent via send-keys -l can fragment the
+    # message inside Claude Code's input box (BUG-030).
+    text="${text//$'\r'/ }"
+    text="${text//$'\n'/ }"
     tmux send-keys -t "$PANE_ID" -l "$text" 2>/dev/null && INJECTED=1
     if [[ "$INJECTED" == "1" ]]; then chime "$STT_WAKE_STOP_SOUND"; else buzz; fi
     local preview="$text"
@@ -482,6 +487,50 @@ do_send() {
         log_lifecycle "send FAILED: send-keys error"
         buzz
     fi
+}
+
+# Read the current contents of PANE_ID's Claude Code input box: the text
+# between the bottom-most pair of horizontal rules, with the "❯" prompt and its
+# non-breaking-space padding stripped. Returns an empty string when the box
+# holds only the bare prompt. Used to confirm an injected dictation has fully
+# landed before Enter is pressed.
+capture_input_region() {
+    tmux capture-pane -p -t "$PANE_ID" 2>/dev/null | awk '
+        index($0, "──────────") { rules[++n] = NR }
+        { line[NR] = $0 }
+        END {
+            if (n < 2) exit
+            for (i = rules[n-1] + 1; i < rules[n]; i++) print line[i]
+        }' \
+    | sed -e 's/^❯//' -e $'s/\xc2\xa0/ /g' \
+    | tr '\n' ' ' \
+    | sed -e 's/  */ /g' -e 's/^ *//' -e 's/ *$//'
+}
+
+# Block until the injected dictation is visible AND stable in the input box
+# (done streaming) before the caller presses Enter. A fixed sleep raced large
+# pastes: Claude Code ingests a big send-keys blob asynchronously, so the Enter
+# fired before the text landed and submitted nothing, stranding the message in
+# the box (BUG-030). Polls the input region and returns once it is non-empty
+# and unchanged across two reads; capped so a genuinely busy/streaming pane
+# still submits best-effort rather than hanging.
+wait_input_ready() {
+    local prev="" cur stable=0 waited=0 max=2500
+    while (( waited < max )); do
+        cur="$(capture_input_region)"
+        if [[ -n "$cur" ]]; then
+            if [[ "$cur" == "$prev" ]]; then
+                stable=$((stable + 1))
+                (( stable >= 2 )) && return 0
+            else
+                stable=0
+            fi
+        fi
+        prev="$cur"
+        sleep 0.1
+        waited=$((waited + 100))
+    done
+    return 1
 }
 
 # "diagnostic": speak a pipeline health report through a DIRECT local path
@@ -770,7 +819,11 @@ while mode_active; do
                 log_lifecycle "send-end trigger: '$line'"
                 end_dictation "$STT_WAKE_SEND_WORD"
                 if [[ "$INJECTED" == "1" ]]; then
-                    sleep 0.4   # let the injected text settle in the input box
+                    # Wait for the injected text to fully land in the input box
+                    # before submitting — a fixed sleep raced large pastes and
+                    # left the dictation stranded unsent (BUG-030).
+                    wait_input_ready \
+                        || log_lifecycle "send: input never settled; submitting best-effort"
                     do_send
                 fi
                 echo_stem="$SEND_STEM"
