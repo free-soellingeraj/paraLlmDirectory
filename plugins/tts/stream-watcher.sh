@@ -134,7 +134,14 @@ is_working() {
         working)      return 0 ;;
         ready|action) return 1 ;;
     esac
-    grep -qiE 'esc to interrupt|✻|✽|✶|✳|✢' "$SPOOL/cur.raw" 2>/dev/null
+    # No state-monitor opinion (it only runs under Command Center): key on the
+    # live bottom status bar, exactly like the project's own state-detector.
+    # Claude Code shows "esc to interrupt" there ONLY while a turn runs; it is
+    # absent at an idle prompt. Scope to the LAST few non-blank lines — never
+    # the whole scrollback, which contains transcript text (this very
+    # conversation discusses "esc to interrupt") and would match forever.
+    grep -vE '^[[:space:]]*$' "$SPOOL/cur.raw" 2>/dev/null | tail -4 \
+        | grep -qF 'esc to interrupt'
 }
 
 # Synthesize the heartbeat sounds into $TTS_DIR once (shared across panes /
