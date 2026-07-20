@@ -58,7 +58,10 @@ STT_WAKE_SEND_SOUND="${STT_WAKE_SEND_SOUND-/System/Library/Sounds/Hero.aiff}"
 STT_WAKE_START_SOUND="${STT_WAKE_START_SOUND:-/System/Library/Sounds/Glass.aiff}"
 STT_WAKE_STOP_SOUND="${STT_WAKE_STOP_SOUND:-/System/Library/Sounds/Bottle.aiff}"
 STT_WAKE_MODEL="${STT_WAKE_MODEL:-ggml-tiny.en.bin}"
-STT_WAKE_STEP_MS="${STT_WAKE_STEP_MS:-1500}"
+# Lower = whisper transcribes more often = less lag between the spoken word
+# and the tone, and short words ("send") are caught more reliably. 1500 was
+# sluggish; 700 roughly halves the detection latency.
+STT_WAKE_STEP_MS="${STT_WAKE_STEP_MS:-700}"
 STT_WAKE_MAX_DICTATION="${STT_WAKE_MAX_DICTATION:-120}"
 
 WAKE_LOG="$SPOOL/wake.log"
@@ -466,9 +469,11 @@ do_repeat() {
 # "send": press Enter in the bound pane — submits whatever the earlier
 # dictation left in the input box.
 do_send() {
+    # Fire the tone the instant "send" is recognized — don't gate the audible
+    # confirmation on the tmux round-trip (part of the perceived sluggishness).
+    chime "$STT_WAKE_SEND_SOUND"
     if tmux send-keys -t "$PANE_ID" Enter 2>/dev/null; then
         log_lifecycle "send: Enter sent"
-        chime "$STT_WAKE_SEND_SOUND"
         tmux display-message -t "$PANE_ID" "📨 Sent" 2>/dev/null || true
     else
         log_lifecycle "send FAILED: send-keys error"

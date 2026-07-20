@@ -107,6 +107,7 @@ DROP_PATTERNS = [
     re.compile(r"^⏺\s+\w[\w-]*\("),          # finalized tool line: "⏺ Bash(ls)"
     re.compile(r"…\s*(\(\d[^)]*\))?\s*$"),   # in-progress ellipsis, optional timer: "Running 1 shell command… (3s)"
     re.compile(r"^\s*Running \d+ shell command"),  # tool header renders with 2-space indent, no ⏺
+    re.compile(r"^\s*[⏺⎿·]?\s*Ran \d+\b.*\b(?:command|tool)s?\b", re.I),  # completed tool-group summary: "Ran 3 bash commands"
     re.compile(r"^\s*[─═━┄┈╌\-_=]{4,}\s*$"), # separators / rules
     re.compile(r"\?\s+for shortcuts"),
     re.compile(r"[Bb]ypassing [Pp]ermissions"),
@@ -279,15 +280,60 @@ if os.path.exists(framing_lock):
     log_event("broke stale framing.lock (%.0fs old)" % lock_age, persist=True)
 
 
+# Known code/text extensions — used so filename cleanup never fires on prose
+# abbreviations ("e.g.", "U.S.", "3.5"): only a real extension triggers it.
+_CODE_EXT = (
+    "py|sh|bash|zsh|js|ts|jsx|tsx|mjs|cjs|md|json|ya?ml|txt|go|rs|rb|php|"
+    "c|cc|cpp|h|hpp|java|kt|swift|html?|css|scss|sql|toml|cfg|ini|conf|"
+    "log|lock|xml|csv|tsv|env|bat|ps1|pl|lua|jl|aiff|mp3|wav"
+)
+
+
+def _spoken_name(stem):
+    # stream-watcher / codex_models_manager -> spoken words
+    return re.sub(r"[._\-]+", " ", stem).strip()
+
+
 def normalize(text):
-    """Local speechify pass — instant, unlike the opt-in codex rewrite."""
+    """Local speechify pass — instant, deterministic replacement for the codex
+    rewrite. Strips the things TTS reads badly (hashes, ids, paths, line
+    numbers, code identifiers, flags) WITHOUT touching meaningful prose or
+    ordinary numbers ("3 files", "20 seconds", "180")."""
     text = text.replace("⏺", " ").replace("●", " ")
     text = re.sub(r"https?://\S+", " link ", text)
-    text = re.sub(r"\b[0-9a-f]{7,40}\b", " ", text)        # commit hashes
-    text = re.sub(r"(?:[\w.-]+/)+([\w.-]+)", r"\1", text)  # paths -> basename
+
+    # Session ids / UUIDs -> drop entirely.
+    text = re.sub(
+        r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b",
+        " ", text)
+
+    # file[:line[:col]] with a REAL code extension -> spoken filename, line
+    # number dropped ("plugins/tts/stream-watcher.sh:146" -> "stream watcher").
+    text = re.sub(
+        r"\b(?:[\w.\-]+/)*([\w.\-]+?)\.(?:%s)(?::\d+(?::\d+)?)?\b" % _CODE_EXT,
+        lambda m: " " + _spoken_name(m.group(1)) + " ", text, flags=re.I)
+
+    # Remaining slash paths -> basename.
+    text = re.sub(r"(?:[\w.\-]+/)+([\w.\-]+)", r"\1", text)
+
+    # Commit hashes / long hex ids, and huge bare numbers (timestamps, pids) ->
+    # drop. Short numbers (<=5 digits) are kept — they usually carry meaning.
+    text = re.sub(r"\b[0-9a-f]{7,40}\b", " ", text)
+    text = re.sub(r"\b\d{6,}\b", " ", text)
+    # Token/size counters that leak past chrome filtering: "29.9k", "6.1k".
+    text = re.sub(r"\b\d+(?:\.\d+)?\s*[kKmMgG][bB]?\b", " ", text)
+
+    # Code identifiers -> words: foo() -> foo, snake_case -> "snake case".
+    text = re.sub(r"\b(\w+)\(\)", r"\1", text)
+    text = text.replace("_", " ")
+    # Long CLI flags: "--skip-git-repo-check" -> "skip git repo check". Guarded
+    # so it never fires on prose hyphens ("well-known") or negatives ("-5").
+    text = re.sub(r"(?<![\w-])--?([A-Za-z][\w-]*)",
+                  lambda m: " " + m.group(1).replace("-", " "), text)
+
     text = re.sub(r"->|=>|→", " to ", text)
     text = re.sub(r"&&", " and ", text)
-    text = re.sub(r"[*_`#|~]+", " ", text)
+    text = re.sub(r"[*_`#|~<>]+", " ", text)
     text = re.sub(r"\s+", " ", text)
     return text.strip()
 
