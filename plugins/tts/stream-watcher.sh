@@ -159,7 +159,10 @@ ensure_working_sound() {
             synth 0.28 brownnoise tremolo 28 100 bandpass 2600 1.5q fade t 0.02 0.28 0.1 gain -12 2>/dev/null \
             && mv "$sticks.part" "$sticks" 2>/dev/null || rm -f "$sticks.part"
     fi
-    [[ -s "$cricket" ]] && WORKING_SOUND_FILE="$cricket" || WORKING_SOUND_FILE=""
+    # Default is the drier "sticks rubbing" scrape (user preference): it reads
+    # as ambient texture, not an alarm. The tonal cricket is the alternate.
+    [[ -s "$sticks" ]] && WORKING_SOUND_FILE="$sticks" \
+        || { [[ -s "$cricket" ]] && WORKING_SOUND_FILE="$cricket" || WORKING_SOUND_FILE=""; }
 }
 
 CHIRP_PID_FILE="$SPOOL/working-sound.pid"
@@ -201,6 +204,9 @@ maybe_working_sound() {
     is_working || want=0
     [[ -f "$SPOOL/paused" ]] && want=0
     [[ "$(cat "$SPOOL/wake.state" 2>/dev/null)" == "dictating" ]] && want=0
+    # Recap/digest prep owns the audio and plays the SAME sound itself
+    # (stream-framing) — suppress here so the two never double up.
+    [[ -f "$SPOOL/framing.lock" ]] && want=0
     player_speaking_now && want=0
     if [[ "$want" == 1 ]]; then chirp_start; else chirp_stop; fi
 }

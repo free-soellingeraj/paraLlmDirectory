@@ -365,21 +365,32 @@ prose, skipping tool calls/results, spinners, echoed input, and other chrome.
 - **Never repeats**: a rolling 400-line spoken memory guarantees a line heard
   once is not spoken again (BUG-023); lifecycle + anchor diagnostics persist
   in `/tmp/para-llm-tts/stream.log`.
-- **Working heartbeat**: a soft cricket chirp loops while the bound pane's
-  Claude is actively working *and* the voice is silent — it fills the thinking
-  gap right after you send so, eyes-free, you know the prompt landed and
-  needn't repeat "send". It ducks out completely for narration, for dictation
-  (the mic is open — a chirp would leak into whisper), and while paused, and
-  stops the instant the pane goes ready/needs-action (the Ping/Funk chime
-  takes over). "Working" is read from the claude-state monitor, falling back
-  to the live spinner/"esc to interrupt" capture when the monitor isn't
-  running (never chirps on an unknown state). The sound is synthesized with
-  `sox` into `/tmp/para-llm-tts/working-cricket.wav` on first use (a
-  `working-sticks.wav` rubbing-scrape alternate is generated alongside).
-  Config: `TTS_STREAM_WORKING_ENABLED` (1), `TTS_STREAM_WORKING_SOUND` (own
-  file; empty = cricket), `TTS_STREAM_WORKING_VOLUME` (1),
-  `TTS_STREAM_WORKING_GAP` (1.1s between chirps). Owned by `stream-watcher.sh`
-  as a child loop, torn down with the mode.
+- **Working heartbeat (the single ambient tone)**: a soft "sticks rubbing"
+  scrape loops whenever the bound pane's Claude is working or thinking and the
+  voice is silent — it fills the gap right after you send so, eyes-free, you
+  know the prompt landed and needn't repeat "send". The design goal is one
+  tone and silence *only* when the agent is idle/waiting for you:
+  - It is the SAME sound during live work (`stream-watcher.sh` heartbeat) and
+    during recap/digest preparation (`stream-framing.sh` "preparing" cue,
+    which no longer uses the old Tink) — and the heartbeat suppresses itself
+    while `framing.lock` exists so the two never double up.
+  - It ducks out for narration (the voice is playing — not silence), for
+    dictation (the mic is open, a beat would leak into whisper), and while
+    paused; it stops the instant the pane goes ready/needs-action.
+  - The ready/needs-action **transition chimes** (`TTS_STREAM_READY_SOUND` /
+    `TTS_STREAM_ACTION_SOUND`) are therefore optional and disabled in this
+    user's config — the heartbeat *stopping* is the "your turn" cue, keeping
+    idle truly silent. Set them back to sound paths to re-enable.
+  - "Working" is read from the claude-state monitor, falling back to the live
+    spinner/"esc to interrupt" capture when the monitor isn't running (never
+    beats on an unknown/idle state).
+  - Sounds are synthesized with `sox` into `/tmp/para-llm-tts/` on first use:
+    `working-sticks.wav` (default) and a tonal `working-cricket.wav` alternate
+    (`-t wav` forces the container so the atomic `.part` temp encodes).
+  - Config: `TTS_STREAM_WORKING_ENABLED` (1), `TTS_STREAM_WORKING_SOUND` (own
+    file; empty = sticks), `TTS_STREAM_WORKING_VOLUME` (1),
+    `TTS_STREAM_WORKING_GAP` (1.1s). Owned by `stream-watcher.sh` as a child
+    loop, torn down with the mode.
 - **Hands-free voice commands** (`plugins/stt/wake-listener.sh`): while speak
   mode is on, `whisper-stream` (tiny.en, auto-downloaded) listens
   continuously for three single words (stem-matched on short utterances, so

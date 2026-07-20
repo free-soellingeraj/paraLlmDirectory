@@ -34,6 +34,19 @@ TTS_AMBIENT_SOUND_ENABLED="${TTS_AMBIENT_SOUND_ENABLED:-1}"
 TTS_AMBIENT_SOUND_INTERVAL="${TTS_AMBIENT_SOUND_INTERVAL:-1}"
 TTS_AMBIENT_SOUND="${TTS_AMBIENT_SOUND:-/System/Library/Sounds/Tink.aiff}"
 TTS_AMBIENT_MAX_SECONDS="${TTS_AMBIENT_MAX_SECONDS:-120}"
+TTS_STREAM_WORKING_SOUND="${TTS_STREAM_WORKING_SOUND:-}"
+TTS_STREAM_WORKING_VOLUME="${TTS_STREAM_WORKING_VOLUME:-1}"
+
+# One ambient texture across the whole "not idle" period: the recap/digest
+# "preparing" cue reuses the speak-mode working sound (sticks) instead of a
+# separate Tink, so working and recap-prep sound identical. Falls back to the
+# generic ambient sound only if the working file was never generated.
+PREP_SOUND="$TTS_AMBIENT_SOUND"
+if [[ -n "$TTS_STREAM_WORKING_SOUND" && -f "$TTS_STREAM_WORKING_SOUND" ]]; then
+    PREP_SOUND="$TTS_STREAM_WORKING_SOUND"
+elif [[ -f "$TTS_DIR/working-sticks.wav" ]]; then
+    PREP_SOUND="$TTS_DIR/working-sticks.wav"
+fi
 
 source "$SCRIPT_DIR/tts-lib.sh"
 
@@ -74,13 +87,13 @@ if [[ "$TTS_SUMMARIZE" == "0" ]]; then
     exit 0
 fi
 
-# "Preparing" cue while the summarizer runs, same as one-shot playback.
+# "Preparing" cue while the summarizer runs — the working sticks texture.
 if [[ "$TTS_AMBIENT_SOUND_ENABLED" != "0" ]] && command -v afplay >/dev/null 2>&1 \
-    && [[ -f "$TTS_AMBIENT_SOUND" ]]; then
+    && [[ -f "$PREP_SOUND" ]]; then
     (
         SECONDS=0
         while true; do
-            afplay "$TTS_AMBIENT_SOUND" >/dev/null 2>&1 || true
+            afplay -v "$TTS_STREAM_WORKING_VOLUME" "$PREP_SOUND" >/dev/null 2>&1 || true
             [[ "$TTS_AMBIENT_MAX_SECONDS" != "0" && "$SECONDS" -ge "$TTS_AMBIENT_MAX_SECONDS" ]] && break
             sleep "$TTS_AMBIENT_SOUND_INTERVAL"
         done
