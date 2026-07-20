@@ -169,6 +169,17 @@ start_stream() {
     stop_playback_for_pane "$SAFE_PANE_ID"
     echo "$SAFE_PANE_ID" > "$ACTIVE_FILE"
 
+    # Sweep orphaned spools from panes that no longer exist — a closed pane
+    # whose teardown never ran leaves its cues behind, and we don't want stale
+    # data accumulating (user request). The active pane is alive, so preserved.
+    local live_panes _d _p
+    live_panes="$(tmux list-panes -a -F '#{pane_id}' 2>/dev/null)"
+    for _d in "$TTS_DIR"/*.stream; do
+        [[ -d "$_d" ]] || continue
+        _p="%$(basename "$_d" .stream)"
+        grep -qxF "$_p" <<< "$live_panes" || rm -rf "$_d"
+    done
+
     local spool label
     spool="$(spool_for "$SAFE_PANE_ID")"
     rm -rf "$spool"
