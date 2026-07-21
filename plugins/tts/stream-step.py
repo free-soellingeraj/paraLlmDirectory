@@ -106,8 +106,16 @@ DROP_PATTERNS = [
     re.compile(r"^\s*…"),                    # collapsed-list chrome: "… +77 completed"
     re.compile(r"^⏺\s+\w[\w-]*\("),          # finalized tool line: "⏺ Bash(ls)"
     re.compile(r"…\s*(\(\d[^)]*\))?\s*$"),   # in-progress ellipsis, optional timer: "Running 1 shell command… (3s)"
-    re.compile(r"^\s*Running \d+ shell command"),  # tool header renders with 2-space indent, no ⏺
-    re.compile(r"^\s*[⏺⎿·]?\s*Ran \d+\b.*\b(?:command|tool)s?\b", re.I),  # completed tool-group summary: "Ran 3 bash commands"
+    # Tool-group activity summaries Claude Code renders when it batches calls:
+    # "Listing 4 directories", "Running 11 shell commands", "Searching for 4
+    # patterns", "Read 3 files". A tool verb at line start, then (optionally a
+    # connector word) a count, then a noun — chrome, not prose. Prose narration
+    # leads with a pronoun ("I ran 3 tests") so it is not matched.
+    re.compile(
+        r"^\s*[⏺⎿·•]?\s*(?:Ran|Running|Read|Reading|List(?:ed|ing)|"
+        r"Search(?:ed|ing)|Fetch(?:ed|ing)|Wrote|Writing|Updat(?:ed|ing)|"
+        r"Creat(?:ed|ing)|Delet(?:ed|ing)|Call(?:ed|ing)|Execut(?:ed|ing)|"
+        r"Add(?:ed|ing)|Remov(?:ed|ing))\b[a-z ]*?\d+\s+\w", re.I),
     re.compile(r"^\s*[─═━┄┈╌\-_=]{4,}\s*$"), # separators / rules
     re.compile(r"\?\s+for shortcuts"),
     re.compile(r"[Bb]ypassing [Pp]ermissions"),
