@@ -216,9 +216,10 @@ matches_transcribe() {
 }
 REPEAT_STEM="$(stem8 "$STT_WAKE_REPEAT_WORD")"
 SEND_STEM="$(stem8 "$STT_WAKE_SEND_WORD")"
-# Whisper often renders a clipped "send" as "sent" — accept it as an exact
-# word only (never as a prefix: "sentence" must not submit).
-word_is_send() { [[ "$1" == "$SEND_STEM"* || "$1" == "sent" ]]; }
+# Whole-word matches only: "send", its plural "sends", and the common whisper
+# mishearing "sent" (a clipped "send"). NEVER a prefix — "sending", "sender"
+# and "sentence" must not submit (a bare send* false-fired on "just sending").
+word_is_send() { [[ "$1" == "$SEND_STEM" || "$1" == "${SEND_STEM}s" || "$1" == "sent" ]]; }
 
 # "send send send" — the frustrated repeat — must always land (BUG-027).
 all_words_send() {
@@ -334,6 +335,36 @@ line_has_stem() {
     return 1
 }
 
+# Does the line contain any send-word (send/sends/sent)? Used by the
+# alias-aware echo guard so the send trigger's own echo — heard as "sent" —
+# keeps the guard armed instead of slipping past a bare "send" stem check.
+line_has_send() {
+    local line="$1" w
+    for w in $line; do
+        word_is_send "$w" && return 0
+    done
+    return 1
+}
+
+# Alias-aware echo test. transcribe and send are ALSO recognized via their
+# whisper-mishearing aliases ("subscribe", "sent"), so the guard must keep
+# suppressing until the line contains NEITHER the stem NOR any alias —
+# otherwise the trigger word's own echo, heard as the alias, clears the guard
+# and immediately re-fires the command (transcribe would end its own dictation;
+# send would press Enter a second time). Other commands have no alias and fall
+# through to the plain stem check.
+line_has_echo() {
+    local line="$1" stem="$2"
+    if [[ "$stem" == "$TRANSCRIBE_STEM" ]]; then
+        line_has_stem "$line" "$TRANSCRIBE_STEM" \
+            || line_has_stem "$line" "$TRANSCRIBE_ALT_STEM"
+    elif [[ "$stem" == "$SEND_STEM" ]]; then
+        line_has_send "$line"
+    else
+        line_has_stem "$line" "$stem"
+    fi
+}
+
 begin_dictation() {
     state="dictating"
     echo "dictating" > "$STATE_FILE"
@@ -437,6 +468,14 @@ PY
     # message inside Claude Code's input box (BUG-030).
     text="${text//$'\r'/ }"
     text="${text//$'\n'/ }"
+    # transcribe.sh runs synchronously and a long take (up to
+    # STT_WAKE_MAX_DICTATION s) can outlast the mode: if speak mode was toggled
+    # off (or moved to another pane) while it ran, don't inject stale dictation
+    # into a pane that is no longer bound.
+    if ! mode_active; then
+        log_lifecycle "dictation dropped: mode no longer active on this pane"
+        return 0
+    fi
     tmux send-keys -t "$PANE_ID" -l "$text" 2>/dev/null && INJECTED=1
     if [[ "$INJECTED" == "1" ]]; then chime "$STT_WAKE_STOP_SOUND"; else buzz; fi
     local preview="$text"
@@ -477,15 +516,32 @@ do_repeat() {
 # "send": press Enter in the bound pane — submits whatever the earlier
 # dictation left in the input box.
 do_send() {
-    # Fire the tone the instant "send" is recognized — don't gate the audible
-    # confirmation on the tmux round-trip (part of the perceived sluggishness).
-    chime "$STT_WAKE_SEND_SOUND"
-    if tmux send-keys -t "$PANE_ID" Enter 2>/dev/null; then
-        log_lifecycle "send: Enter sent"
-        tmux display-message -t "$PANE_ID" "📨 Sent" 2>/dev/null || true
-    else
+    # Wait for any injected dictation to fully land before submitting. Claude
+    # Code ingests a big send-keys paste asynchronously, so an early Enter
+    # fires before the text lands and submits nothing, stranding it in the box
+    # (BUG-030). This is the common "transcribe to inject, then say 'send'"
+    # flow — not just the combined send-end path — so the wait lives here.
+    wait_input_ready \
+        || log_lifecycle "send: input never settled; submitting best-effort"
+    if ! tmux send-keys -t "$PANE_ID" Enter 2>/dev/null; then
         log_lifecycle "send FAILED: send-keys error"
         buzz
+        return 0
+    fi
+    # capture_input_region reads the RENDERED screen, not Claude's committed
+    # input model, so it can't detect "phantom text" up front — the only honest
+    # "did it submit?" signal is whether the box CLEARED. A real submit empties
+    # it; chime the Hero success tone only then. If text remains (phantom
+    # paste / busy pane), buzz and log instead of a false "sent" (BUG-027).
+    sleep 0.3
+    if [[ -z "$(capture_input_region)" ]]; then
+        chime "$STT_WAKE_SEND_SOUND"
+        log_lifecycle "send: Enter sent, input cleared"
+        tmux display-message -t "$PANE_ID" "📨 Sent" 2>/dev/null || true
+    else
+        buzz
+        log_lifecycle "send: Enter pressed but input still non-empty — not submitted"
+        tmux display-message -t "$PANE_ID" "⚠️ Send did not submit" 2>/dev/null || true
     fi
 }
 
@@ -711,9 +767,16 @@ do_rewind() {
 }
 
 # "text box": clear the dictated blob from Claude Code's input. A single
-# Ctrl+C clears a non-empty input box (and merely warns on an empty one —
-# never sent twice, so it cannot exit the REPL).
+# Ctrl+C clears a non-empty input box, but a Ctrl+C on an ALREADY empty box is
+# the first strike of the two-Ctrl+C sequence that quits the Claude REPL — so
+# capture the input region first and only send C-c when there's text to clear.
 do_clear() {
+    if [[ -z "$(capture_input_region)" ]]; then
+        ack
+        log_lifecycle "clear: input already empty, no-op"
+        tmux display-message -t "$PANE_ID" "🗑 Input already empty" 2>/dev/null || true
+        return 0
+    fi
     if tmux send-keys -t "$PANE_ID" C-c 2>/dev/null; then
         ack
         log_lifecycle "clear: input box cleared"
@@ -738,8 +801,10 @@ while mode_active; do
         # to empty, so the sticks' own feedback does NOT count) means someone is
         # talking — duck the tick so it stops masking the command in the mic.
         [[ -n "$norm_line" ]] && touch "$SPOOL/voice.active" 2>/dev/null || true
-        # The triggered word has left the window once a line arrives without it.
-        if [[ -n "$echo_stem" ]] && ! line_has_stem "$norm_line" "$echo_stem"; then
+        # The triggered word has left the window once a line arrives without it
+        # (alias-aware: transcribe's "subscribe" echo and send's "sent" echo
+        # must also keep the guard armed, or the command re-fires on itself).
+        if [[ -n "$echo_stem" ]] && ! line_has_echo "$norm_line" "$echo_stem"; then
             echo_stem=""
         fi
         if [[ "$state" == "listening" ]]; then
@@ -818,12 +883,9 @@ while mode_active; do
                 # "send" closes the take AND submits — no second "transcribe".
                 log_lifecycle "send-end trigger: '$line'"
                 end_dictation "$STT_WAKE_SEND_WORD"
+                # do_send now waits for the injected text to settle (BUG-030)
+                # and verifies the box cleared, so no separate wait here.
                 if [[ "$INJECTED" == "1" ]]; then
-                    # Wait for the injected text to fully land in the input box
-                    # before submitting — a fixed sleep raced large pastes and
-                    # left the dictation stranded unsent (BUG-030).
-                    wait_input_ready \
-                        || log_lifecycle "send: input never settled; submitting best-effort"
                     do_send
                 fi
                 echo_stem="$SEND_STEM"

@@ -35,11 +35,19 @@ else
     exit 1
 fi
 
-# Model location
+# Model location. Compute MODEL_DIR lazily — only when STT_MODEL_PATH is unset
+# — so a caller that supplies STT_MODEL_PATH does not need ~/.para-llm-root:
+# the ${PARA_LLM_ROOT:?...} guard would otherwise abort under `set -u` even
+# though the override makes PARA_LLM_ROOT irrelevant.
 DEFAULT_MODEL="ggml-base.en.bin"
 MODEL_URL="https://huggingface.co/ggerganov/whisper.cpp/resolve/main/$DEFAULT_MODEL"
-MODEL_DIR="${PARA_LLM_ROOT:?PARA_LLM_ROOT not set}/plugins/stt/models"
-MODEL_PATH="${STT_MODEL_PATH:-$MODEL_DIR/$DEFAULT_MODEL}"
+if [[ -n "${STT_MODEL_PATH:-}" ]]; then
+    MODEL_PATH="$STT_MODEL_PATH"
+    MODEL_DIR="$(dirname "$MODEL_PATH")"
+else
+    MODEL_DIR="${PARA_LLM_ROOT:?PARA_LLM_ROOT not set}/plugins/stt/models"
+    MODEL_PATH="$MODEL_DIR/$DEFAULT_MODEL"
+fi
 
 # Download model if not present
 if [[ ! -f "$MODEL_PATH" ]]; then
