@@ -376,8 +376,12 @@ if [[ -f "$HOOKS_CONFIG" ]]; then
             # Merge hooks into existing settings, substituting PARA_LLM_ROOT path
             NEW_HOOKS=$(sed "s|__PARA_LLM_ROOT__|$PARA_LLM_ROOT|g" "$HOOKS_CONFIG" | jq '.hooks')
 
-            # Merge and write back
-            jq --argjson new "$NEW_HOOKS" '.hooks = (.hooks // {}) + $new' "$CLAUDE_SETTINGS" > "$CLAUDE_SETTINGS.tmp" && \
+            # Merge and write back. Concatenate per event so the user's existing
+            # hooks survive — a plain `.hooks = (.hooks // {}) + $new` replaced each
+            # event's array wholesale, silently dropping the user's own hooks.
+            jq --argjson new "$NEW_HOOKS" \
+                'reduce ($new | to_entries[]) as $e (.; .hooks[$e.key] = ((.hooks[$e.key] // []) + $e.value))' \
+                "$CLAUDE_SETTINGS" > "$CLAUDE_SETTINGS.tmp" && \
                 mv "$CLAUDE_SETTINGS.tmp" "$CLAUDE_SETTINGS"
             echo "  Merged hooks configuration into $CLAUDE_SETTINGS"
         else
@@ -402,11 +406,21 @@ fi
 # Remove existing para-llm-directory bindings if present
 if grep -q "para-llm-directory" ~/.tmux.conf 2>/dev/null; then
     echo "Removing existing para-llm-directory bindings..."
-    # Remove the block from "# para-llm-directory" to end of our managed section
-    sed -i.tmp '/# para-llm-directory bindings/,/# end para-llm-directory/d' ~/.tmux.conf
-    rm -f ~/.tmux.conf.tmp
-    # Also remove old-style block (before we added end marker)
-    if grep -q "para-llm-directory" ~/.tmux.conf 2>/dev/null; then
+    # Remove the block from "# para-llm-directory" to end of our managed section.
+    # Only run the range delete when BOTH markers are present — a range sed whose
+    # end address is missing deletes from the start marker all the way to EOF,
+    # wiping unrelated user config a prior truncated install may have left below.
+    if grep -q "# para-llm-directory bindings" ~/.tmux.conf 2>/dev/null && \
+       grep -q "# end para-llm-directory" ~/.tmux.conf 2>/dev/null; then
+        sed -i.tmp '/# para-llm-directory bindings/,/# end para-llm-directory/d' ~/.tmux.conf
+        rm -f ~/.tmux.conf.tmp
+    else
+        echo "  Warning: para-llm-directory markers incomplete (no end marker); skipping managed-block removal to avoid deleting unrelated config."
+    fi
+    # Also remove old-style block (before we added end marker). Same EOF hazard:
+    # only run when its end anchor (synchronize-panes) is actually present.
+    if grep -q "para-llm-directory" ~/.tmux.conf 2>/dev/null && \
+       grep -q "synchronize-panes" ~/.tmux.conf 2>/dev/null; then
         sed -i.tmp '/# para-llm-directory/,/synchronize-panes/d' ~/.tmux.conf
         rm -f ~/.tmux.conf.tmp
     fi

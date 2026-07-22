@@ -126,23 +126,53 @@ main() {
                 step=3
                 ;;
             3)
-                # Check for unpushed changes in ALL repos
+                # Check for unpushed / unverifiable / uncommitted work in ALL repos.
+                # Any of these means deleting the env would lose work, so all three
+                # gate the rm -rf via the extra force confirmation below.
                 local total_unpushed=0
                 local repos_with_unpushed=""
+                local repos_no_upstream=""
+                local repos_dirty=""
+                local needs_force=false
                 for clone_dir in "$ENV_DIR"/*/; do
                     if [[ -d "$clone_dir/.git" ]]; then
-                        local unpushed
-                        unpushed=$(git -C "$clone_dir" log --oneline @{u}.. 2>/dev/null | wc -l | tr -d ' ')
-                        if [[ "$unpushed" -gt 0 ]]; then
-                            total_unpushed=$((total_unpushed + unpushed))
-                            repos_with_unpushed+="  - $(basename "$clone_dir"): $unpushed commit(s)\n"
+                        # No upstream (e.g. a fresh branch never pushed): we CANNOT
+                        # verify pushed state. `git log @{u}..` errors here and was
+                        # silenced to 0 — do not treat that as "nothing to lose".
+                        if ! git -C "$clone_dir" rev-parse '@{u}' >/dev/null 2>&1; then
+                            repos_no_upstream+="  - $(basename "$clone_dir"): no upstream (cannot verify pushed state)\n"
+                            needs_force=true
+                        else
+                            local unpushed
+                            unpushed=$(git -C "$clone_dir" log --oneline @{u}.. 2>/dev/null | wc -l | tr -d ' ')
+                            if [[ "$unpushed" -gt 0 ]]; then
+                                total_unpushed=$((total_unpushed + unpushed))
+                                repos_with_unpushed+="  - $(basename "$clone_dir"): $unpushed commit(s)\n"
+                                needs_force=true
+                            fi
+                        fi
+                        # Uncommitted / untracked changes are also unrecoverable once deleted.
+                        if [[ -n "$(git -C "$clone_dir" status --porcelain 2>/dev/null)" ]]; then
+                            repos_dirty+="  - $(basename "$clone_dir"): uncommitted/untracked changes\n"
+                            needs_force=true
                         fi
                     fi
                 done
 
-                if [[ "$total_unpushed" -gt 0 ]]; then
-                    echo "WARNING: Unpushed commits detected!"
-                    echo -e "$repos_with_unpushed"
+                if [[ "$needs_force" == true ]]; then
+                    echo "WARNING: this environment may contain work that would be lost!"
+                    if [[ -n "$repos_with_unpushed" ]]; then
+                        echo "Unpushed commits:"
+                        echo -e "$repos_with_unpushed"
+                    fi
+                    if [[ -n "$repos_no_upstream" ]]; then
+                        echo "Branch has no upstream; cannot verify pushed state:"
+                        echo -e "$repos_no_upstream"
+                    fi
+                    if [[ -n "$repos_dirty" ]]; then
+                        echo "Uncommitted or untracked changes:"
+                        echo -e "$repos_dirty"
+                    fi
                     FORCE=$(select_force_confirm)
                     if [[ -z "$FORCE" ]]; then
                         exit 0
@@ -174,7 +204,16 @@ main() {
 
                     # Method 1: Look up pane by checking the state file
                     SESSION_NAME=$(tmux display-message -p '#{session_name}')
-                    STATE_FILE="/tmp/tmux-command-center-state-${SESSION_NAME}"
+                    # Resolve the state file via the SAME logic the writer uses
+                    # (tmux-command-center.sh / tmux-new-branch.sh): the persistent
+                    # recovery dir when installed, /tmp only as the uninstalled
+                    # fallback. Reading /tmp unconditionally made Method 1 always
+                    # no-op and forced the buggy path-prefix match to run.
+                    if [[ -f "$HOME/.para-llm-root" ]]; then
+                        STATE_FILE="$PARA_LLM_ROOT/recovery/command-center-state-${SESSION_NAME}"
+                    else
+                        STATE_FILE="/tmp/tmux-command-center-state-${SESSION_NAME}"
+                    fi
                     if [[ -f "$STATE_FILE" ]]; then
                         local pane_to_kill
                         pane_to_kill=$(grep "|${BRANCH_NAME}|" "$STATE_FILE" 2>/dev/null | cut -d'|' -f1 | head -1)
@@ -190,8 +229,10 @@ main() {
                             pane_id=$(echo "$line" | cut -d: -f1)
                             local pane_path
                             pane_path=$(echo "$line" | cut -d: -f2-)
-                            # Check if pane's working dir is inside our env dir
-                            if [[ "$pane_path" == "$ENV_DIR"* ]]; then
+                            # Check if pane's working dir is inside our env dir.
+                            # Require a real path boundary so ".../proj-a" does not
+                            # match ".../proj-a-b/..." (a different env's pane).
+                            if [[ "$pane_path" == "$ENV_DIR" || "$pane_path" == "$ENV_DIR"/* ]]; then
                                 tmux kill-pane -t "$pane_id" 2>/dev/null && pane_killed=true
                             fi
                         done < <(tmux list-panes -t "$COMMAND_CENTER" -F '#{pane_id}:#{pane_current_path}' 2>/dev/null)
@@ -205,12 +246,14 @@ main() {
                     # Normal mode: kill windows by name (current session only)
                     local current_window_name
                     current_window_name=$(tmux display-message -p '#{window_name}' 2>/dev/null)
-                    tmux list-windows -F '#{window_index} #{window_name}' 2>/dev/null | \
-                        grep " ${BRANCH_NAME}$" | \
-                        cut -d' ' -f1 | \
-                        while read -r win_idx; do
+                    # Exact-match window names (no regex/suffix grep, which could
+                    # kill unrelated windows or break on metachars in the name).
+                    local win_idx win_name
+                    while IFS='|' read -r win_idx win_name; do
+                        if [[ "$win_name" == "$BRANCH_NAME" ]]; then
                             tmux kill-window -t ":${win_idx}" 2>/dev/null
-                        done
+                        fi
+                    done < <(tmux list-windows -F '#{window_index}|#{window_name}' 2>/dev/null)
                     # Only kill current window if it was the feature window
                     if [[ "$current_window_name" == "$BRANCH_NAME" ]]; then
                         safe_kill_window

@@ -412,7 +412,21 @@ main() {
                     ENV_DIR="${ENVS_DIR}/${REPO_NAME}-${BRANCH_NAME}"
                 fi
 
-                # Create env directory
+                # Refuse to reuse a non-empty pre-existing env dir: the failed-clone
+                # cleanup below does rm -rf "$ENV_DIR", which would destroy unrelated
+                # work. (The new-branch path guards this; the attach path did not.)
+                if [[ -d "$ENV_DIR" && -n "$(ls -A "$ENV_DIR" 2>/dev/null)" ]]; then
+                    echo "Directory already exists and is not empty: $ENV_DIR"
+                    echo "Refusing to overwrite it. Use 'Resume' to open it, or remove it first."
+                    echo "Press enter to close."
+                    read -r
+                    exit 1
+                fi
+
+                # Create env directory. Track whether it pre-existed so a failed
+                # clone only removes a dir THIS run created (never a pre-existing one).
+                local env_preexisted=false
+                [[ -d "$ENV_DIR" ]] && env_preexisted=true
                 mkdir -p "$ENV_DIR"
 
                 # Clone all selected repos
@@ -429,7 +443,7 @@ main() {
                         echo "No remote 'origin' found in $repo_root"
                         echo "Press enter to close."
                         read -r
-                        rm -rf "$ENV_DIR"
+                        [[ "$env_preexisted" == false ]] && rm -rf "$ENV_DIR"
                         exit 1
                     fi
 
@@ -437,7 +451,7 @@ main() {
                     if ! git clone "$remote_url" "$clone_dir" 2>&1; then
                         echo "Failed to clone $repo. Press enter to close."
                         read -r
-                        rm -rf "$ENV_DIR"
+                        [[ "$env_preexisted" == false ]] && rm -rf "$ENV_DIR"
                         exit 1
                     fi
 

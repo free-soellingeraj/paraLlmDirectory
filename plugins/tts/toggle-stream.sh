@@ -174,11 +174,15 @@ start_stream() {
     # data accumulating (user request). The active pane is alive, so preserved.
     local live_panes _d _p
     live_panes="$(tmux list-panes -a -F '#{pane_id}' 2>/dev/null)"
-    for _d in "$TTS_DIR"/*.stream; do
-        [[ -d "$_d" ]] || continue
-        _p="%$(basename "$_d" .stream)"
-        grep -qxF "$_p" <<< "$live_panes" || rm -rf "$_d"
-    done
+    # Skip the sweep entirely if tmux transiently returned no panes — an empty
+    # list matches nothing and would delete EVERY spool, including live ones.
+    if [[ -n "$live_panes" ]]; then
+        for _d in "$TTS_DIR"/*.stream; do
+            [[ -d "$_d" ]] || continue
+            _p="%$(basename "$_d" .stream)"
+            grep -qxF "$_p" <<< "$live_panes" || rm -rf "$_d"
+        done
+    fi
 
     local spool label
     spool="$(spool_for "$SAFE_PANE_ID")"
