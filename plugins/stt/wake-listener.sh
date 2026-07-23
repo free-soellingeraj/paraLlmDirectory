@@ -684,36 +684,28 @@ do_diagnostic() {
 # (command-center layout). Re-binding goes through toggle-stream's move path,
 # which also replaces this listener; the recap frames the new pane.
 do_window() {
-    # New tail->rewrite->speak loop: move narration to the next agent WITHOUT
-    # changing the user's view. toggle-speak enforces a single owner, so
-    # launching it on the target evicts our stack and starts there; its
-    # recap-on-start frames the new pane. No select-window, no old toggle-stream.
+    # New tail->rewrite->speak loop: cycle narration through the panes of the
+    # bound pane's OWN window (the command-center grid) — NEVER leaving the
+    # window, so the command view survives. Each agent is a pane; select-pane
+    # focuses the target so its purple shows in the grid. Single-owner handoff.
     if [[ -n "${SPEAKLOOP_PAUSE_FILE:-}" ]]; then
-        local nsess ncur target=""
-        nsess="$(tmux display-message -pt "$PANE_ID" '#{session_name}' 2>/dev/null)"
+        local ncur target=""
         ncur="$(tmux display-message -pt "$PANE_ID" '#{window_id}' 2>/dev/null)"
-        local wins=() w wi=0 widx=-1
-        while IFS= read -r w; do
-            wins+=("$w"); [[ "$w" == "$ncur" ]] && widx=$wi; wi=$((wi + 1))
-        done < <(tmux list-windows -t "$nsess" -F '#{window_id}' 2>/dev/null)
-        if (( ${#wins[@]} > 1 && widx >= 0 )); then
-            local nxt="${wins[$(( (widx + 1) % ${#wins[@]} ))]}"
-            target="$(tmux display-message -pt "$nxt" '#{pane_id}' 2>/dev/null)"
-        else
-            local panes=() pp pj=0 pidx=-1
-            while IFS= read -r pp; do
-                panes+=("$pp"); [[ "$pp" == "$PANE_ID" ]] && pidx=$pj; pj=$((pj + 1))
-            done < <(tmux list-panes -t "$nsess:" -F '#{pane_id}' 2>/dev/null)
-            (( ${#panes[@]} > 1 && pidx >= 0 )) && target="${panes[$(( (pidx + 1) % ${#panes[@]} ))]}"
+        local panes=() pp pj=0 pidx=-1
+        while IFS= read -r pp; do
+            panes+=("$pp"); [[ "$pp" == "$PANE_ID" ]] && pidx=$pj; pj=$((pj + 1))
+        done < <(tmux list-panes -t "$ncur" -F '#{pane_id}' 2>/dev/null)
+        if (( ${#panes[@]} > 1 && pidx >= 0 )); then
+            target="${panes[$(( (pidx + 1) % ${#panes[@]} ))]}"
         fi
         if [[ -z "$target" || "$target" == "$PANE_ID" ]]; then
-            log_lifecycle "window: no other pane/window to move to"
+            log_lifecycle "window: only one pane in this window, nothing to cycle"
             buzz
             return 0
         fi
-        log_lifecycle "window (new loop): move narration $PANE_ID -> $target"
+        log_lifecycle "window (new loop): move narration $PANE_ID -> $target (same window)"
         ack
-        # Instant spoken cue of where we're going (env name, else window name);
+        # Instant spoken cue of the target agent (env name, else window name);
         # the recap-on-start follows with the fuller framing.
         local tpath tlabel=""
         tpath="$(tmux display-message -pt "$target" '#{pane_current_path}' 2>/dev/null)"
@@ -722,9 +714,8 @@ do_window() {
             *)        tlabel="$(tmux display-message -pt "$target" '#{window_name}' 2>/dev/null)" ;;
         esac
         [[ -n "$tlabel" ]] && command -v say >/dev/null 2>&1 && ( say "$tlabel" >/dev/null 2>&1 & )
-        # Follow the narration: bring the view to the next window/pane so the
-        # purple is where the user is looking.
-        tmux select-window -t "$target" 2>/dev/null || true
+        # Focus the target pane but STAY in this window (no select-window — that
+        # would leave the command grid).
         tmux select-pane -t "$target" 2>/dev/null || true
         # Launch the target stack fully detached (subshell backgrounds it, then
         # exits, reparenting it to init) so the single-owner teardown of OUR
