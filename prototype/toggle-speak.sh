@@ -29,7 +29,12 @@ stop() {
     fi
     rm -f "$PIDF"
     tmux set-option -pt "$PANE_ID" -u @speakloop 2>/dev/null || true
+    tmux set-option -pt "$PANE_ID" -u window-style 2>/dev/null || true
 }
+
+# Focus-independent purple tint on the bound pane's content (window-style is
+# genuinely pane-scoped, unlike pane-border-style — see BUG-021/BUG-024).
+SPEAK_TINT="${SPEAKLOOP_TINT-#3a2044}"
 
 if is_running; then
     stop
@@ -49,4 +54,5 @@ TTS_STREAM_REWRITE_MODEL="$MODEL" \
         --backlog 0 --model "$MODEL" --engine "$ENGINE" > "$LOG" 2>&1 &
 echo $! > "$PIDF"
 tmux set-option -pt "$PANE_ID" @speakloop 1 2>/dev/null || true
+[[ -n "$SPEAK_TINT" ]] && tmux set-option -pt "$PANE_ID" window-style "bg=$SPEAK_TINT" 2>/dev/null || true
 tmux display-message "🔊 speak-loop ON ($PANE_ID · $MODEL) — narrates from now"
