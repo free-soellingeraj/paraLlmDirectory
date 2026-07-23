@@ -101,6 +101,10 @@ def synth(text: str, engine: str) -> str | None:
 
 
 def run(args) -> None:
+    try:
+        os.setsid()      # own process group, so a toggle can group-kill the tree
+    except OSError:
+        pass
     src = for_pane(args.target)
     loc = src.locate()
     print(f"[source: {src.name}]  {loc}", file=sys.stderr)
