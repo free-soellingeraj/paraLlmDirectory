@@ -615,6 +615,33 @@ wait_input_ready() {
 # workers, queue depths, pause/suspend state, and edge-tts reachability (the
 # usual no-network casualty).
 do_diagnostic() {
+    # New tail->rewrite->speak loop: the old worker/queue model doesn't apply
+    # (it would report "all dead"). Report the honest new-loop state instead.
+    if [[ -n "${SPEAKLOOP_PAUSE_FILE:-}" ]]; then
+        ack
+        local report="" sp
+        sp="$(cat "${SPEAKLOOP_PAUSE_FILE%.pause}.pid" 2>/dev/null)"
+        if [[ -n "$sp" ]] && kill -0 "$sp" 2>/dev/null; then
+            report="Narration loop alive."
+        else
+            report="Narration loop is down."
+        fi
+        if pgrep -f "whisper-stream .*${PANE_ID#%}\.stream" >/dev/null 2>&1; then
+            report="$report Voice listener alive."
+        else
+            report="$report Voice listener is down."
+        fi
+        [[ "$PAUSED" == "1" ]] && report="$report Playback paused, say ${STT_WAKE_PLAY_WORD} to resume."
+        if curl -s -m 3 -o /dev/null "https://speech.platform.bing.com" 2>/dev/null; then
+            report="$report Speech service reachable."
+        else
+            report="$report Speech service unreachable, check network."
+        fi
+        log_lifecycle "diagnostic (new loop): $report"
+        command -v say >/dev/null 2>&1 && ( say "Diagnostic. $report" >/dev/null 2>&1 & )
+        tmux display-message -t "$PANE_ID" "🩺 $report" 2>/dev/null || true
+        return 0
+    fi
     ack
     local report="" dead="" f pid
     for f in watcher synth player rewrite wake; do
@@ -657,6 +684,15 @@ do_diagnostic() {
 # (command-center layout). Re-binding goes through toggle-stream's move path,
 # which also replaces this listener; the recap frames the new pane.
 do_window() {
+    # New tail->rewrite->speak loop: the old path below calls select-window +
+    # the old toggle-stream, which yanks the view out of the command center and
+    # doesn't move the new loop. Disabled here until reimplemented as a
+    # no-view-change move of the new loop to the next agent (BUG-033).
+    if [[ -n "${SPEAKLOOP_PAUSE_FILE:-}" ]]; then
+        log_lifecycle "window: ignored (not wired for the new loop yet)"
+        buzz
+        return 0
+    fi
     local sess wins target=""
     sess="$(tmux display-message -pt "$PANE_ID" '#{session_name}' 2>/dev/null)"
     if [[ -z "$sess" ]]; then
@@ -773,6 +809,13 @@ do_play() {
 # Seeks are chunk-based (~1 chunk ≈ 10-15s of speech): the listener writes a
 # command for the player loop and kills the in-flight afplay so it reacts now.
 do_forward() {
+    # Old player.cmd seeking doesn't exist in the new loop; disabled until
+    # reimplemented as a new-loop skip (BUG-033).
+    if [[ -n "${SPEAKLOOP_PAUSE_FILE:-}" ]]; then
+        log_lifecycle "forward: not available in the new loop"
+        buzz
+        return 0
+    fi
     echo "skip 1" > "$SPOOL/player.cmd"
     kill_inflight_afplay
     ack
@@ -780,6 +823,11 @@ do_forward() {
 }
 
 do_rewind() {
+    if [[ -n "${SPEAKLOOP_PAUSE_FILE:-}" ]]; then
+        log_lifecycle "rewind: not available in the new loop"
+        buzz
+        return 0
+    fi
     echo "back 2" > "$SPOOL/player.cmd"
     kill_inflight_afplay
     ack
