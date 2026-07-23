@@ -713,8 +713,24 @@ do_window() {
         fi
         log_lifecycle "window (new loop): move narration $PANE_ID -> $target"
         ack
-        SPEAKLOOP_RECAP_ON_START=1 \
-            nohup bash "$SCRIPT_DIR/../../prototype/toggle-speak.sh" "$target" >/dev/null 2>&1 &
+        # Instant spoken cue of where we're going (env name, else window name);
+        # the recap-on-start follows with the fuller framing.
+        local tpath tlabel=""
+        tpath="$(tmux display-message -pt "$target" '#{pane_current_path}' 2>/dev/null)"
+        case "$tpath" in
+            */envs/*) tlabel="${tpath#*/envs/}"; tlabel="${tlabel%%/*}" ;;
+            *)        tlabel="$(tmux display-message -pt "$target" '#{window_name}' 2>/dev/null)" ;;
+        esac
+        [[ -n "$tlabel" ]] && command -v say >/dev/null 2>&1 && ( say "$tlabel" >/dev/null 2>&1 & )
+        # Follow the narration: bring the view to the next window/pane so the
+        # purple is where the user is looking.
+        tmux select-window -t "$target" 2>/dev/null || true
+        tmux select-pane -t "$target" 2>/dev/null || true
+        # Launch the target stack fully detached (subshell backgrounds it, then
+        # exits, reparenting it to init) so the single-owner teardown of OUR
+        # stack can't kill the launcher mid-handoff.
+        ( SPEAKLOOP_RECAP_ON_START=1 \
+            nohup bash "$SCRIPT_DIR/../../prototype/toggle-speak.sh" "$target" >/dev/null 2>&1 & )
         return 0
     fi
     local sess wins target=""

@@ -64,11 +64,11 @@ stop_pane() {
         kill -KILL "-$p" 2>/dev/null || true
     fi
     [[ "$(cat "$STREAM_PANE" 2>/dev/null)" == "$safe" ]] && rm -f "$STREAM_PANE" 2>/dev/null || true
+    # TERM the wake-listener; its own trap reaps whisper/rec. Deliberately NOT
+    # `pkill -P "$w"` — when this runs from a toggle launched by "window", that
+    # toggle can be a child of the wake-listener and would kill itself.
     local w; w="$(cat "$RUN/$safe.wake.pid" 2>/dev/null)"
-    if [[ -n "$w" ]]; then
-        pkill -P "$w" 2>/dev/null || true
-        kill -TERM "$w" 2>/dev/null || true
-    fi
+    [[ -n "$w" ]] && kill -TERM "$w" 2>/dev/null || true
     pkill -f "whisper-stream .*${safe}\.stream" 2>/dev/null || true
     rm -f "$RUN/$safe.pid" "$RUN/$safe.wake.pid" "$RUN/$safe.pause" \
           "$RUN/$safe.repeat" "$RUN/$safe.skip" "$RUN/$safe.replay"
