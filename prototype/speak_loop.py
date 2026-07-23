@@ -34,6 +34,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -51,23 +52,86 @@ REWRITE_PROMPT = (
     "- Output ONLY the narration. No preamble, no 'Here is', no closing remark.\n\n"
     "Captured output:\n"
 )
+RECAP_PROMPT = (
+    "Someone stepped away from watching this coding session and just asked "
+    "'where do things stand?'. From the recent agent transcript below, give "
+    "them a short spoken update.\n"
+    "Say, in 2 to 4 sentences of natural spoken English:\n"
+    "- what the agent is working on right now,\n"
+    "- what it just finished or concluded,\n"
+    "- and what's next or what it's waiting on.\n"
+    "Speakable prose only: no markdown, no lists, no file paths or code unless "
+    "essential. Present tense, oriented to 'here's where we are'. "
+    "Output ONLY the update.\n\n"
+    "Recent transcript:\n"
+)
 _PREAMBLE = re.compile(
     r"\A\s*(?:sure[,!.]?\s*)?(?:here(?:'s| is)?\b[^\n:]{0,40}:|narration:)\s*", re.I)
 _SENT = re.compile(r"(.+?[.!?])(?:\s+|\Z)", re.S)
+_MD = re.compile(r"[`*#|>~]+")
 
 
-def rewrite(text: str, model: str, timeout: int = 30) -> str:
-    """Technical agent text -> comprehensible speech via `claude -p`. Empty on
-    failure so the caller can fall back to the raw text."""
+def despeak(text: str) -> str:
+    """Safety net: strip markdown artifacts a rewrite might have left behind so
+    TTS never reads 'asterisk asterisk' or a backtick aloud."""
+    text = re.sub(r"^\s*(?:[-*+]|\d+\.)\s+", "", text, flags=re.M)  # list markers
+    return _MD.sub("", text)
+
+
+def split_block(text: str, target: int = 700):
+    """Break a large agent block into speakable sub-blocks on paragraph (then
+    sentence) boundaries. `claude -p` runs ~20s on a 2.5k block but ~10s on a
+    700-char one, so smaller pieces time out far less and pipeline better —
+    piece 2 rewrites while piece 1 is already playing."""
+    text = text.strip()
+    if len(text) <= target:
+        return [text] if text else []
+    out, buf = [], ""
+    for p in re.split(r"\n\s*\n", text):
+        p = p.strip()
+        if not p:
+            continue
+        if len(p) > target * 1.6:                 # giant paragraph -> by sentence
+            if buf:
+                out.append(buf); buf = ""
+            sbuf = ""
+            for s in re.split(r"(?<=[.!?])\s+", p):
+                if sbuf and len(sbuf) + len(s) > target:
+                    out.append(sbuf); sbuf = s
+                else:
+                    sbuf = (sbuf + " " + s).strip()
+            if sbuf:
+                out.append(sbuf)
+        elif buf and len(buf) + len(p) > target:
+            out.append(buf); buf = p
+        else:
+            buf = (buf + "\n\n" + p).strip()
+    if buf:
+        out.append(buf)
+    return out
+
+
+def _claude(prompt: str, model: str, timeout: int) -> str:
+    """One `claude -p` call. Empty string on any failure/timeout."""
     try:
         out = subprocess.run(
             ["claude", "-p", "--model", model],
-            input=REWRITE_PROMPT + text,
-            capture_output=True, text=True, timeout=timeout,
+            input=prompt, capture_output=True, text=True, timeout=timeout,
         ).stdout.strip()
     except Exception:
         return ""
     return _PREAMBLE.sub("", out).strip()
+
+
+def rewrite(text: str, model: str, timeout: int = 30) -> str:
+    """Technical agent text -> comprehensible speech via `claude -p`. Empty on
+    failure so the caller can skip rather than speak raw markdown."""
+    return _claude(REWRITE_PROMPT + text, model, timeout)
+
+
+def recap(text: str, model: str, timeout: int = 45) -> str:
+    """Recent transcript -> a short spoken 'where things stand' update."""
+    return _claude(RECAP_PROMPT + text, model, timeout)
 
 
 def sentences(text: str):
@@ -108,12 +172,28 @@ def run(args) -> None:
     src = for_pane(args.target)
     loc = src.locate()
     print(f"[source: {src.name}]  {loc}", file=sys.stderr)
+
+    # Pause channel: while this file exists, hold playback and interrupt the
+    # in-flight chunk (the wake-listener touches it for "pause" / dictation so
+    # the mic stays clean). Path shared with the toggle via env.
+    safe = args.target.lstrip("%")
+    pause_file = Path(os.environ.get(
+        "SPEAKLOOP_PAUSE_FILE", f"/tmp/para-speakloop/{safe}.pause"))
+    # Recap channel: the wake-listener touches this on "repeat"; the recapper
+    # thread turns the recent transcript into a spoken "where things stand"
+    # update and jumps it to the front of playback.
+    _rp = str(pause_file)
+    repeat_file = Path(os.environ.get(
+        "SPEAKLOOP_REPEAT_FILE",
+        _rp[:-6] + ".repeat" if _rp.endswith(".pause")
+        else f"/tmp/para-speakloop/{safe}.repeat"))
     if loc is None:
         print("[no transcript for this target — nothing to tail]", file=sys.stderr)
         return
 
     chunk_q: "queue.Queue" = queue.Queue()
     audio_q: "queue.Queue" = queue.Queue()
+    prio_q: "queue.Queue" = queue.Queue()   # recap audio, played before narration
     stop = threading.Event()
 
     def feeder():
@@ -138,24 +218,91 @@ def run(args) -> None:
             if ch is None:
                 audio_q.put(None)
                 return
-            narr = rewrite(ch.text, args.model) or ch.text
-            for s in sentences(narr):
+            for sub in split_block(ch.text):
                 if stop.is_set():
                     break
-                print(f"  ▶ {s}", file=sys.stderr)
+                narr = rewrite(sub, args.model, timeout=45)
+                if not narr:
+                    narr = rewrite(sub, args.model, timeout=75)  # retry, more time
+                if not narr:
+                    # Never speak raw agent text — it's markdown + jargon, not
+                    # speech. Silence beats gibberish; the block is still on
+                    # screen to read.
+                    print(f"  ✗ rewrite failed, skipped ({len(sub)} chars)",
+                          file=sys.stderr)
+                    continue
+                narr = despeak(narr)
+                for s in sentences(narr):
+                    if stop.is_set():
+                        break
+                    print(f"  ▶ {s}", file=sys.stderr)
+                    if args.dry:
+                        continue
+                    p = synth(s, args.engine)
+                    if p:
+                        audio_q.put(p)
+
+    def recent_transcript(limit_chars: int = 3500, blocks: int = 6) -> str:
+        try:
+            recent = src.backlog(80)[-blocks:]
+        except Exception:
+            recent = []
+        return "\n\n".join(c.text for c in recent).strip()[-limit_chars:]
+
+    def recapper():
+        # "repeat" -> spoken "where things stand" from the recent transcript.
+        while not stop.is_set():
+            if not repeat_file.exists():
+                time.sleep(0.3)
+                continue
+            try:
+                repeat_file.unlink()
+            except OSError:
+                pass
+            ctx = recent_transcript()
+            if not ctx:
+                continue
+            print("  ⟳ recap requested", file=sys.stderr)
+            narr = recap(ctx, args.model) or recap(ctx, args.model, timeout=75)
+            if not narr:
+                print("  ✗ recap failed", file=sys.stderr)
+                continue
+            for s in sentences(despeak(narr)):
+                if stop.is_set():
+                    break
+                print(f"  ⟳ {s}", file=sys.stderr)
                 if args.dry:
                     continue
-                p = synth(s, args.engine)
-                if p:
-                    audio_q.put(p)
+                a = synth(s, args.engine)
+                if a:
+                    prio_q.put(a)
 
     def player():
-        while True:
-            p = audio_q.get()
-            if p is None:
-                return
+        while not stop.is_set():
+            while pause_file.exists() and not stop.is_set():
+                time.sleep(0.12)
+            # A recap (prio_q) preempts pending narration; we check it before
+            # each sentence, so "repeat" is heard within one sentence.
+            try:
+                p = prio_q.get_nowait()
+            except queue.Empty:
+                try:
+                    p = audio_q.get(timeout=0.3)
+                except queue.Empty:
+                    continue
+            if p is None:               # worker done
+                if args.no_follow:
+                    return
+                continue
             if not stop.is_set():
-                subprocess.run(["afplay", p], capture_output=True)
+                proc = subprocess.Popen(["afplay", p],
+                                        stdout=subprocess.DEVNULL,
+                                        stderr=subprocess.DEVNULL)
+                while proc.poll() is None:
+                    if stop.is_set() or pause_file.exists():
+                        proc.terminate()   # interrupt current chunk on pause
+                        break
+                    time.sleep(0.08)
             try:
                 os.unlink(p)
             except OSError:
@@ -164,7 +311,8 @@ def run(args) -> None:
     tf = threading.Thread(target=feeder, daemon=True)
     tw = threading.Thread(target=worker, daemon=True)
     tp = threading.Thread(target=player, daemon=True)
-    for t in (tf, tw, tp):
+    tr = threading.Thread(target=recapper, daemon=True)
+    for t in (tf, tw, tp, tr):
         t.start()
     try:
         tw.join()          # ends on the None sentinel

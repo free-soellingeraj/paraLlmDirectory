@@ -69,18 +69,24 @@ run_codex() {
     (cd "$CWD" && run_capped codex exec --skip-git-repo-check --sandbox read-only --output-last-message "$OUTPUT_FILE" - < "$PROMPT_FILE") >/dev/null
 }
 
-# `claude -p` (Claude Code's headless/print mode) was retired as a summarizer
-# backend. As of the June 2026 change it meters against a separate paid Agent
-# SDK credit pool rather than the interactive Claude subscription (see
-# ADR-009), so firing it on every Ctrl+b p is a billable call. codex is now the
-# only LLM summarizer; any backend value maps to it. If codex is unavailable
-# this exits non-zero and the caller falls back to the raw pane text.
+run_claude() {
+    command -v claude >/dev/null 2>&1 || return 1
+    (cd "$CWD" && run_capped claude -p --model "${TTS_SUMMARIZER_MODEL:-sonnet}" < "$PROMPT_FILE" > "$OUTPUT_FILE")
+}
+
+# Backend: claude by default. The OpenAI codex sub was cancelled 2026-07, so
+# ADR-009's "codex only, claude -p retired for metered billing" is superseded —
+# claude is the path now; codex is kept as a fallback/option. `claude -p` can
+# preface its output, so strip a leading preamble after a successful run.
 case "$BACKEND" in
-    codex|auto|*)
-        run_codex
-        ;;
+    claude) run_claude ;;
+    codex)  run_codex ;;
+    auto|*) run_claude || run_codex ;;
 esac
 status=$?
+if [[ "$status" -eq 0 && -s "$OUTPUT_FILE" ]]; then
+    perl -0pi -e 's/\A\s*(?:sure[,!.]?\s*)?(?:here(?:\x27s| is)?\b[^\n:]{0,40}:|summary:|narration:)\s*\n+//i; s/\A\s+//' "$OUTPUT_FILE" 2>/dev/null || true
+fi
 
 # A timeout or backend error may leave a truncated/partial summary behind;
 # discard it so the caller falls back to the raw pane text instead of speaking

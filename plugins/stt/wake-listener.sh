@@ -122,6 +122,9 @@ framing_pid() { cat "$SPOOL/framing.pid" 2>/dev/null; }
 # resume. The framing worker is paused too so its "preparing" beeper stops.
 pause_playback() {
     local pid child
+    # Bridge to the new tail->rewrite->speak loop (prototype): while this file
+    # exists its player holds and interrupts the in-flight chunk.
+    [[ -n "${SPEAKLOOP_PAUSE_FILE:-}" ]] && touch "$SPEAKLOOP_PAUSE_FILE" 2>/dev/null || true
     pid="$(player_pid)"
     if [[ -n "$pid" ]]; then
         signal_tree STOP "$pid"
@@ -137,6 +140,7 @@ pause_playback() {
 
 resume_playback() {
     local pid
+    [[ -n "${SPEAKLOOP_PAUSE_FILE:-}" ]] && rm -f "$SPEAKLOOP_PAUSE_FILE" 2>/dev/null || true
     pid="$(framing_pid)"
     [[ -n "$pid" ]] && signal_tree CONT "$pid"
     pid="$(player_pid)"
@@ -488,6 +492,22 @@ PY
 # Ctrl+b p) — scan back, summarize, speak, then resume streaming. Plays
 # through the mode's own audio queue, so no playback-slot conflict.
 do_repeat() {
+    # New tail->rewrite->speak loop: recap is handled by speak_loop.py's own
+    # recapper (touch its repeat file), NOT the old stream-framing worker —
+    # whose "preparing" beeper is the sticks sound and whose audio never reaches
+    # the new loop's player (BUG-032).
+    if [[ -n "${SPEAKLOOP_PAUSE_FILE:-}" ]]; then
+        local rf="${SPEAKLOOP_REPEAT_FILE:-${SPEAKLOOP_PAUSE_FILE%.pause}.repeat}"
+        if [[ "$PAUSED" == "1" ]]; then          # recap overrides a standing pause
+            PAUSED=0; rm -f "$SPOOL/paused"; resume_playback
+            log_lifecycle "repeat: implicit play (was paused)"
+        fi
+        : > "$rf"
+        ack
+        log_lifecycle "repeat: recap requested (new loop) -> $rf"
+        tmux display-message -t "$PANE_ID" "🔁 Recapping…" 2>/dev/null || true
+        return 0
+    fi
     local fpid
     fpid="$(framing_pid)"
     if [[ -n "$fpid" ]] && kill -0 "$fpid" 2>/dev/null; then
