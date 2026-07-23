@@ -684,13 +684,37 @@ do_diagnostic() {
 # (command-center layout). Re-binding goes through toggle-stream's move path,
 # which also replaces this listener; the recap frames the new pane.
 do_window() {
-    # New tail->rewrite->speak loop: the old path below calls select-window +
-    # the old toggle-stream, which yanks the view out of the command center and
-    # doesn't move the new loop. Disabled here until reimplemented as a
-    # no-view-change move of the new loop to the next agent (BUG-033).
+    # New tail->rewrite->speak loop: move narration to the next agent WITHOUT
+    # changing the user's view. toggle-speak enforces a single owner, so
+    # launching it on the target evicts our stack and starts there; its
+    # recap-on-start frames the new pane. No select-window, no old toggle-stream.
     if [[ -n "${SPEAKLOOP_PAUSE_FILE:-}" ]]; then
-        log_lifecycle "window: ignored (not wired for the new loop yet)"
-        buzz
+        local nsess ncur target=""
+        nsess="$(tmux display-message -pt "$PANE_ID" '#{session_name}' 2>/dev/null)"
+        ncur="$(tmux display-message -pt "$PANE_ID" '#{window_id}' 2>/dev/null)"
+        local wins=() w wi=0 widx=-1
+        while IFS= read -r w; do
+            wins+=("$w"); [[ "$w" == "$ncur" ]] && widx=$wi; wi=$((wi + 1))
+        done < <(tmux list-windows -t "$nsess" -F '#{window_id}' 2>/dev/null)
+        if (( ${#wins[@]} > 1 && widx >= 0 )); then
+            local nxt="${wins[$(( (widx + 1) % ${#wins[@]} ))]}"
+            target="$(tmux display-message -pt "$nxt" '#{pane_id}' 2>/dev/null)"
+        else
+            local panes=() pp pj=0 pidx=-1
+            while IFS= read -r pp; do
+                panes+=("$pp"); [[ "$pp" == "$PANE_ID" ]] && pidx=$pj; pj=$((pj + 1))
+            done < <(tmux list-panes -t "$nsess:" -F '#{pane_id}' 2>/dev/null)
+            (( ${#panes[@]} > 1 && pidx >= 0 )) && target="${panes[$(( (pidx + 1) % ${#panes[@]} ))]}"
+        fi
+        if [[ -z "$target" || "$target" == "$PANE_ID" ]]; then
+            log_lifecycle "window: no other pane/window to move to"
+            buzz
+            return 0
+        fi
+        log_lifecycle "window (new loop): move narration $PANE_ID -> $target"
+        ack
+        SPEAKLOOP_RECAP_ON_START=1 \
+            nohup bash "$SCRIPT_DIR/../../prototype/toggle-speak.sh" "$target" >/dev/null 2>&1 &
         return 0
     fi
     local sess wins target=""
@@ -809,11 +833,11 @@ do_play() {
 # Seeks are chunk-based (~1 chunk ≈ 10-15s of speech): the listener writes a
 # command for the player loop and kills the in-flight afplay so it reacts now.
 do_forward() {
-    # Old player.cmd seeking doesn't exist in the new loop; disabled until
-    # reimplemented as a new-loop skip (BUG-033).
+    # New loop: flush pending narration to catch up to the latest.
     if [[ -n "${SPEAKLOOP_PAUSE_FILE:-}" ]]; then
-        log_lifecycle "forward: not available in the new loop"
-        buzz
+        : > "${SPEAKLOOP_SKIP_FILE:-${SPEAKLOOP_PAUSE_FILE%.pause}.skip}"
+        ack
+        log_lifecycle "forward: skip to latest (new loop)"
         return 0
     fi
     echo "skip 1" > "$SPOOL/player.cmd"
@@ -823,9 +847,14 @@ do_forward() {
 }
 
 do_rewind() {
+    # New loop: replay the last block's narration verbatim.
     if [[ -n "${SPEAKLOOP_PAUSE_FILE:-}" ]]; then
-        log_lifecycle "rewind: not available in the new loop"
-        buzz
+        if [[ "$PAUSED" == "1" ]]; then     # replay is an explicit audio request
+            PAUSED=0; rm -f "$SPOOL/paused"; resume_playback
+        fi
+        : > "${SPEAKLOOP_REPLAY_FILE:-${SPEAKLOOP_PAUSE_FILE%.pause}.replay}"
+        ack
+        log_lifecycle "rewind: replay last block (new loop)"
         return 0
     fi
     echo "back 2" > "$SPOOL/player.cmd"

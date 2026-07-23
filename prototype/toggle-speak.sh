@@ -2,10 +2,13 @@
 # toggle-speak.sh — Ctrl+b o: toggle the tail->rewrite->speak loop for a pane,
 # WITH voice commands and the familiar on-screen indicators.
 #   1. speak_loop.py    — tails the pane's agent transcript, rewrites each
-#                         complete-idea block into speech, plays it. Also owns
-#                         "repeat" (spoken recap) via SPEAKLOOP_REPEAT_FILE.
+#                         complete-idea block into speech, plays it. Owns the
+#                         repeat/rewind/forward channels too (shared files).
 #   2. wake-listener.sh — whisper voice commands: transcribe / send / pause /
-#                         play / repeat. Shares the pause + repeat files.
+#                         play / repeat / rewind / forward / window.
+# Speak mode is a SINGLE global owner: starting on any pane stops whatever pane
+# owned it before (so only one pane is ever purple). "window" moves the owner
+# to the next agent by launching this toggle on that pane.
 # Indicators reuse the existing machinery: @speak_on drives the magenta pane
 # border + "SPEAKING" chip; stream.pane + <spool>/watcher.pid drive the
 # bottom-right status chip (stream-status.sh), which also shows PAUSED/DICTATE.
@@ -26,6 +29,8 @@ PIDF="$RUN/$SAFE.pid"
 WAKE_PIDF="$RUN/$SAFE.wake.pid"
 PAUSE_FILE="$RUN/$SAFE.pause"
 REPEAT_FILE="$RUN/$SAFE.repeat"
+SKIP_FILE="$RUN/$SAFE.skip"
+REPLAY_FILE="$RUN/$SAFE.replay"
 LOG="$RUN/$SAFE.log"
 
 MODEL="${TTS_STREAM_REWRITE_MODEL:-haiku}"
@@ -47,44 +52,50 @@ resolve_label() {
 
 is_running() { local p; p="$(cat "$PIDF" 2>/dev/null)"; [[ -n "$p" ]] && kill -0 "$p" 2>/dev/null; }
 
-stop() {
-    # 1. narration loop — its own process group (setsid), kill the whole tree.
-    local p; p="$(cat "$PIDF" 2>/dev/null)"
+# Fully tear down the speak-mode stack for ANY pane (loop + wake-listener +
+# whisper + indicators + spool). Used both for the toggle-off path and to
+# evict the previous owner when speak mode moves.
+stop_pane() {
+    local pane="$1" safe="${1#%}"
+    local p; p="$(cat "$RUN/$safe.pid" 2>/dev/null)"
     if [[ -n "$p" ]]; then
         kill -TERM "-$p" 2>/dev/null || kill -TERM "$p" 2>/dev/null || true
         sleep 0.3
         kill -KILL "-$p" 2>/dev/null || true
     fi
-    # 2. wake listener — clearing stream.pane ends its mode_active() loop (its
-    #    trap reaps whisper/rec); also kill it + children directly.
-    [[ "$(cat "$STREAM_PANE" 2>/dev/null)" == "$SAFE" ]] && rm -f "$STREAM_PANE" 2>/dev/null || true
-    local w; w="$(cat "$WAKE_PIDF" 2>/dev/null)"
+    [[ "$(cat "$STREAM_PANE" 2>/dev/null)" == "$safe" ]] && rm -f "$STREAM_PANE" 2>/dev/null || true
+    local w; w="$(cat "$RUN/$safe.wake.pid" 2>/dev/null)"
     if [[ -n "$w" ]]; then
         pkill -P "$w" 2>/dev/null || true
         kill -TERM "$w" 2>/dev/null || true
     fi
-    pkill -f "whisper-stream .*${SAFE}\.stream" 2>/dev/null || true
-    rm -f "$PIDF" "$WAKE_PIDF" "$PAUSE_FILE" "$REPEAT_FILE"
-    rm -rf "$SPOOL" 2>/dev/null || true
-    # 3. indicators off
-    tmux set-option -pt "$PANE_ID" -u @speakloop 2>/dev/null || true
-    tmux set-option -pt "$PANE_ID" -u @speak_on 2>/dev/null || true
-    tmux set-option -pt "$PANE_ID" -u window-style 2>/dev/null || true
+    pkill -f "whisper-stream .*${safe}\.stream" 2>/dev/null || true
+    rm -f "$RUN/$safe.pid" "$RUN/$safe.wake.pid" "$RUN/$safe.pause" \
+          "$RUN/$safe.repeat" "$RUN/$safe.skip" "$RUN/$safe.replay"
+    rm -rf "$TTS_DIR/$safe.stream" 2>/dev/null || true
+    tmux set-option -pt "$pane" -u @speakloop 2>/dev/null || true
+    tmux set-option -pt "$pane" -u @speak_on 2>/dev/null || true
+    tmux set-option -pt "$pane" -u window-style 2>/dev/null || true
 }
 
 if is_running; then
-    stop
+    stop_pane "$PANE_ID"
     tmux display-message "🔇 speak-loop OFF"
     exit 0
 fi
 
 command -v python3 >/dev/null 2>&1 || { tmux display-message "speak-loop: python3 not found"; exit 1; }
 
-mkdir -p "$SPOOL"
-rm -f "$PAUSE_FILE" "$REPEAT_FILE"
+# Single owner: evict whatever pane currently owns speak mode before we claim it.
+PREV="$(cat "$STREAM_PANE" 2>/dev/null)"
+[[ -n "$PREV" && "$PREV" != "$SAFE" ]] && stop_pane "%$PREV"
 
-# --- narration loop (also owns spoken "repeat" recap) ---
+mkdir -p "$SPOOL"
+rm -f "$PAUSE_FILE" "$REPEAT_FILE" "$SKIP_FILE" "$REPLAY_FILE"
+
+# --- narration loop (owns repeat/rewind/forward channels) ---
 SPEAKLOOP_PAUSE_FILE="$PAUSE_FILE" SPEAKLOOP_REPEAT_FILE="$REPEAT_FILE" \
+SPEAKLOOP_SKIP_FILE="$SKIP_FILE" SPEAKLOOP_REPLAY_FILE="$REPLAY_FILE" \
 TTS_STREAM_REWRITE_MODEL="$MODEL" \
     nohup python3 "$DIR/speak_loop.py" "$PANE_ID" \
         --backlog 0 --model "$MODEL" --engine "$ENGINE" > "$LOG" 2>&1 &
@@ -102,10 +113,11 @@ if command -v whisper-stream >/dev/null 2>&1 && command -v rec >/dev/null 2>&1; 
     rm -f "$TTS_DIR/keepalive" 2>/dev/null || true   # stop old keeper reviving old workers
     echo "$SAFE" > "$STREAM_PANE"
     SPEAKLOOP_PAUSE_FILE="$PAUSE_FILE" SPEAKLOOP_REPEAT_FILE="$REPEAT_FILE" \
+    SPEAKLOOP_SKIP_FILE="$SKIP_FILE" SPEAKLOOP_REPLAY_FILE="$REPLAY_FILE" \
         nohup bash "$ROOT/plugins/stt/wake-listener.sh" "$PANE_ID" "$SPOOL" \
             > "$RUN/$SAFE.wake.log" 2>&1 &
     echo $! > "$WAKE_PIDF"
-    HINT="say transcribe / send / pause / repeat"
+    HINT="transcribe / send / pause / play / repeat / rewind / forward / window"
 else
     HINT="narration only (whisper/sox missing)"
 fi
@@ -115,4 +127,8 @@ fi
 tmux set-option -pt "$PANE_ID" @speakloop 1 2>/dev/null || true
 tmux set-option -pt "$PANE_ID" @speak_on 1 2>/dev/null || true
 [[ -n "$SPEAK_TINT" ]] && tmux set-option -pt "$PANE_ID" window-style "bg=$SPEAK_TINT" 2>/dev/null || true
+
+# "window" hands off with recap-on-arrival so the user hears where they landed.
+[[ "${SPEAKLOOP_RECAP_ON_START:-0}" == "1" ]] && : > "$REPEAT_FILE"
+
 tmux display-message "🔊 speak-loop ON ($PANE_ID · $MODEL) — $HINT"
