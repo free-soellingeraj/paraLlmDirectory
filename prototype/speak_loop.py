@@ -146,6 +146,18 @@ def sentences(text: str):
         yield tail
 
 
+# Speaking rate. edge-tts wants a percentage like "+25%" (faster) / "-10%"
+# (slower); SPEAKLOOP_RATE overrides. Default +25% per the user's preference.
+SPEAK_RATE = os.environ.get("SPEAKLOOP_RATE", "+25%")
+
+
+def _say_wpm(rate: str) -> str | None:
+    """Convert an edge-style '+25%' rate to a `say` words-per-minute value
+    (base ~175 wpm), for the fallback engine."""
+    m = re.fullmatch(r"\s*([+-]?\d+)%\s*", rate or "")
+    return str(int(round(175 * (1 + int(m.group(1)) / 100)))) if m else None
+
+
 def synth(text: str, engine: str) -> str | None:
     """Speak `text` into an audio file; return the path."""
     suffix = ".mp3" if engine == "edge" else ".aiff"
@@ -153,13 +165,19 @@ def synth(text: str, engine: str) -> str | None:
     os.close(fd)
     try:
         if engine == "edge":
-            r = subprocess.run(
-                ["edge-tts", "--voice", "en-US-AndrewNeural",
-                 "--text", text, "--write-media", path],
-                capture_output=True, timeout=40)
+            cmd = ["edge-tts", "--voice", "en-US-AndrewNeural",
+                   "--text", text, "--write-media", path]
+            if SPEAK_RATE:
+                cmd.append(f"--rate={SPEAK_RATE}")   # =form: safe for -NN% too
+            r = subprocess.run(cmd, capture_output=True, timeout=40)
             if r.returncode == 0 and os.path.getsize(path) > 0:
                 return path
-        subprocess.run(["say", "-o", path, text], capture_output=True, timeout=40)
+        say_cmd = ["say", "-o", path]
+        wpm = _say_wpm(SPEAK_RATE)
+        if wpm:
+            say_cmd += ["-r", wpm]
+        say_cmd.append(text)
+        subprocess.run(say_cmd, capture_output=True, timeout=40)
         return path if os.path.getsize(path) > 0 else None
     except Exception:
         return None
