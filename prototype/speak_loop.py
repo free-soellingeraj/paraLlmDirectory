@@ -6,13 +6,20 @@ Pipeline, all stages concurrent with queues between them:
 
     AgentSource.follow()          # tail the transcript (no screen polling)
         -> chunk_q                # one complete-idea text block per item
-        -> rewrite + synth worker # LLM makes it speakable, split to sentences,
-                                  #   synthesize each
+        -> rewrite pool (ordered) # K parallel `claude -p` rewrites, results
+                                  #   consumed strictly in submission order
+        -> synth_q                # narration split into ~1KB speakable chunks
+        -> synth worker           # ONE edge-tts call per chunk (not per sentence)
         -> audio_q                # audio files, in order
         -> play worker            # afplay, strictly sequenced
 
-Rewriting chunk N overlaps playing chunk N-1, so the LLM latency hides behind
-playback. Each chunk is already a complete idea (a prose block the agent wrote
+`claude -p` costs ~20s/call and edge-tts ~5s of fixed overhead/call, so the two
+rules that keep playback smooth are: (1) rewrite each block ONCE, not once per
+sub-piece, and skip the LLM entirely for short clean prose; (2) synthesize whole
+~1KB chunks, not per sentence, so the 5s overhead amortizes over ~20s of audio
+instead of stuttering after every sentence. The parallel rewrite pool lets the
+~20s latency hide behind playback and a buffer build during the agent's tool
+pauses. Each chunk is already a complete idea (a prose block the agent wrote
 before its next tool call), so there is no heuristic boundary detection.
 
 Usage:
@@ -36,6 +43,8 @@ import sys
 import tempfile
 import threading
 import time
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -144,6 +153,35 @@ def sentences(text: str):
     tail = text[pos:].strip()
     if tail:
         yield tail
+
+
+# Group whole sentences into ~SYNTH_CHARS-sized chunks. edge-tts has ~5s of
+# fixed per-call overhead, so one call per ~1KB (≈20s of audio) amortizes it;
+# per-sentence synth pays that 5s on every 2-4s sentence and stutters.
+SYNTH_CHARS = int(os.environ.get("SPEAKLOOP_SYNTH_CHARS", "1100"))
+# How many blocks to rewrite in parallel. A single `claude -p` is ~20s; 2 in
+# flight halves effective latency so short blocks don't drain the buffer.
+REWRITE_WORKERS = max(1, int(os.environ.get("SPEAKLOOP_REWRITE_WORKERS", "2")))
+# Short, clean prose is already speakable — skip the ~20s LLM for it. Anything
+# with code/markdown residue or at/above this length still gets rewritten.
+REWRITE_MIN_CHARS = int(os.environ.get("TTS_STREAM_REWRITE_MIN_CHARS", "160"))
+_CODEY = re.compile(
+    r"[`|<>{}]|https?://|/\w+/|\w+\.(?:py|js|ts|sh|md|json|txt|go|rs|c|h|yml|yaml)\b"
+    r"|=>|::|\$\(|\bdef\b|\bclass\b|\bnpm\b|\bgit\b|\bsudo\b", re.I)
+
+
+def synth_chunks(narr: str, target: int = SYNTH_CHARS):
+    """Pack whole sentences into ~target-char chunks for one synth call each."""
+    out, buf = [], ""
+    for s in sentences(narr):
+        if buf and len(buf) + len(s) + 1 > target:
+            out.append(buf)
+            buf = s
+        else:
+            buf = (buf + " " + s).strip()
+    if buf:
+        out.append(buf)
+    return out
 
 
 # Speaking rate. edge-tts wants a percentage like "+25%" (faster) / "-10%"
@@ -292,6 +330,7 @@ def run(args) -> None:
         return
 
     chunk_q: "queue.Queue" = queue.Queue()
+    synth_q: "queue.Queue" = queue.Queue()  # narration chunks awaiting synthesis
     audio_q: "queue.Queue" = queue.Queue()
     prio_q: "queue.Queue" = queue.Queue()   # recap audio, played before narration
     stop = threading.Event()
@@ -313,39 +352,91 @@ def run(args) -> None:
                 print(f"[follow ended: {e}]", file=sys.stderr)
         chunk_q.put(None)
 
-    def worker():
+    def block_narration(text: str) -> str:
+        """One agent block -> speakable narration. Short clean prose skips the
+        ~20s LLM; longer/technical text is rewritten (huge blocks split first so
+        no single `claude -p` prompt is enormous). Empty string on failure so the
+        caller skips it — raw markdown + jargon is never spoken."""
+        parts = []
+        for pc in split_block(text, target=2500):
+            if stop.is_set():
+                break
+            pt = pc.strip()
+            if not pt:
+                continue
+            if len(pt) < REWRITE_MIN_CHARS and not _CODEY.search(pt):
+                parts.append(despeak(pt))       # already speakable — no LLM
+                continue
+            narr = rewrite(pt, args.model, timeout=45) or rewrite(pt, args.model, timeout=75)
+            if narr:
+                parts.append(despeak(narr))
+            else:
+                print(f"  ✗ rewrite failed, skipped ({len(pt)} chars)",
+                      file=sys.stderr)
+        return " ".join(p for p in parts if p).strip()
+
+    executor = ThreadPoolExecutor(max_workers=REWRITE_WORKERS)
+    pending: "deque" = deque()          # futures, consumed in submission order
+    pcv = threading.Condition()         # guards `pending`
+    CAP = REWRITE_WORKERS + 3           # how many blocks to rewrite ahead
+
+    def submitter():
+        # Submit each block for rewrite immediately (parallel), but cap how far
+        # ahead so a burst doesn't spawn unbounded `claude` processes.
         while not stop.is_set():
             ch = chunk_q.get()
             if ch is None:
-                audio_q.put(None)
+                with pcv:
+                    pending.append(None)        # sentinel -> collector
+                    pcv.notify_all()
                 return
-            block = []
-            for sub in split_block(ch.text):
+            fut = executor.submit(block_narration, ch.text)
+            with pcv:
+                while len(pending) >= CAP and not stop.is_set():
+                    pcv.wait(0.2)
+                pending.append(fut)
+                pcv.notify_all()
+
+    def collector():
+        # Consume rewrites strictly in order (even though they finish in
+        # parallel) and hand ~1KB chunks to the synth stage.
+        while not stop.is_set():
+            with pcv:
+                while not pending and not stop.is_set():
+                    pcv.wait(0.2)
+                if not pending:
+                    continue
+                fut = pending.popleft()
+                pcv.notify_all()
+            if fut is None:
+                synth_q.put(None)
+                return
+            try:
+                narr = fut.result()
+            except Exception:
+                narr = ""
+            if not narr:
+                continue
+            last_narr[0] = narr                 # remember for "rewind"
+            for c in synth_chunks(narr):
                 if stop.is_set():
                     break
-                narr = rewrite(sub, args.model, timeout=45)
-                if not narr:
-                    narr = rewrite(sub, args.model, timeout=75)  # retry, more time
-                if not narr:
-                    # Never speak raw agent text — it's markdown + jargon, not
-                    # speech. Silence beats gibberish; the block is still on
-                    # screen to read.
-                    print(f"  ✗ rewrite failed, skipped ({len(sub)} chars)",
-                          file=sys.stderr)
-                    continue
-                narr = despeak(narr)
-                block.append(narr)
-                for s in sentences(narr):
-                    if stop.is_set():
-                        break
-                    print(f"  ▶ {s}", file=sys.stderr)
-                    if args.dry:
-                        continue
-                    p = synth(s, args.engine)
-                    if p:
-                        audio_q.put(p)
-            if block:
-                last_narr[0] = " ".join(block)   # remember for "rewind"
+                print(f"  ▶ {c[:90]}", file=sys.stderr)
+                synth_q.put(c)
+
+    def synthesizer():
+        # One edge-tts call per ~1KB chunk (not per sentence). Order preserved:
+        # single thread, FIFO in, FIFO out.
+        while not stop.is_set():
+            c = synth_q.get()
+            if c is None:
+                audio_q.put(None)
+                return
+            if args.dry:
+                continue
+            p = synth(c, args.engine)
+            if p:
+                audio_q.put(p)
 
     def recent_transcript(limit_chars: int = 3500, blocks: int = 6) -> str:
         try:
@@ -355,13 +446,13 @@ def run(args) -> None:
         return "\n\n".join(c.text for c in recent).strip()[-limit_chars:]
 
     def enqueue_prio(text: str, marker: str):
-        for s in sentences(despeak(text)):
+        for c in synth_chunks(despeak(text)):
             if stop.is_set():
                 break
-            print(f"  {marker} {s}", file=sys.stderr)
+            print(f"  {marker} {c[:90]}", file=sys.stderr)
             if args.dry:
                 continue
-            a = synth(s, args.engine)
+            a = synth(c, args.engine)
             if a:
                 prio_q.put(a)
 
@@ -497,18 +588,27 @@ def run(args) -> None:
                 time.sleep(0.25)
 
     tf = threading.Thread(target=feeder, daemon=True)
-    tw = threading.Thread(target=worker, daemon=True)
+    tsub = threading.Thread(target=submitter, daemon=True)
+    tcol = threading.Thread(target=collector, daemon=True)
+    tsyn = threading.Thread(target=synthesizer, daemon=True)
     tp = threading.Thread(target=player, daemon=True)
     tr = threading.Thread(target=controller, daemon=True)
     th = threading.Thread(target=heartbeat, daemon=True)
-    for t in (tf, tw, tp, tr, th):
+    for t in (tf, tsub, tcol, tsyn, tp, tr, th):
         t.start()
     try:
-        tw.join()          # ends on the None sentinel
-        tp.join(timeout=60)
+        if args.no_follow:
+            tsyn.join()        # ends after the None sentinel propagates through
+            tp.join(timeout=120)
+        else:
+            tp.join()          # follow mode runs until Ctrl+C
     except KeyboardInterrupt:
-        stop.set()
         print("\n[stopped]", file=sys.stderr)
+    finally:
+        stop.set()
+        with pcv:              # wake submitter/collector out of their waits
+            pcv.notify_all()
+        executor.shutdown(wait=False)
 
 
 def main():

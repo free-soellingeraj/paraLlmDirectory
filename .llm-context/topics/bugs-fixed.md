@@ -267,6 +267,15 @@ Log of bugs encountered and fixed in the para-llm-directory project. Each entry 
 
 ---
 
+### BUG-035: New loop — playback "very spotty… talk then pause… not reliable"
+**Date**: 2026-07-29
+**Symptom**: Narration kept stalling — a few seconds of speech, then a gap, then more speech. Choppy and unreliable throughout, not just occasionally.
+**Cause**: Measured the two critical-path costs on this machine: `claude -p --model haiku` ≈ **20s per call** (it boots a full agent per invocation; `claude --version` is 0.06s, so it's the agent loop, not the binary) and `edge-tts` ≈ **5s of fixed overhead per call**. The worker fought both: (1) `split_block` chopped each agent block into ~700-char pieces and ran a **separate 20s rewrite for each, serially** — a 2.1KB block = 3×20s = 60s of rewriting before its audio; (2) it synthesized **per sentence**, so every 2-4s sentence paid ~5s of synth (5s synth for ~2s of audio → guaranteed stutter after every sentence). Single-threaded, the buffer drained on every short block and every sentence boundary.
+**Fix**: Three decoupled stages with the costs amortized. (1) **One rewrite per block** — `block_narration` rewrites the whole block in a single `claude -p` call (only genuinely huge blocks pre-split at 2500 chars), and a **fast path** speaks short (<`REWRITE_MIN_CHARS`=160) clean prose directly with no LLM (regex `_CODEY` forces a rewrite on any code/path/markdown residue — correctness-first). (2) **Batch synth** — narration is packed into ~1100-char chunks (`synth_chunks`) and each is **one** edge-tts call, so the 5s overhead amortizes over ~20s of audio (measured 7.5s synth for 7.2s of a 4-sentence block, vs 5s for a single ~2s sentence). Recaps/rewinds (`enqueue_prio`) batch the same way. (3) **Ordered parallel rewrite pool** — a `ThreadPoolExecutor(max_workers=2)`; a submitter feeds blocks (capped `REWRITE_WORKERS+3` ahead) and a collector consumes futures **strictly in submission order**, so the ~20s latency hides behind playback and a buffer builds during the agent's tool pauses without ever reordering narration. Stages: rewrite pool → `synth_q` → single synth thread → `audio_q` → player. Tunables: `SPEAKLOOP_SYNTH_CHARS`, `SPEAKLOOP_REWRITE_WORKERS`, `TTS_STREAM_REWRITE_MIN_CHARS`.
+**File**: `prototype/speak_loop.py` (`block_narration`, `synth_chunks`, `_CODEY`, `submitter`/`collector`/`synthesizer` threads replacing the old `worker`, `enqueue_prio` batch synth)
+
+---
+
 ## Known Bug-Prone Areas
 
 ### Live narration starves during long tool-heavy agent turns
