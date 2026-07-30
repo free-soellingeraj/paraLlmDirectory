@@ -444,7 +444,8 @@ def run(args) -> None:
                 continue
             p = synth(c, args.engine)
             if p:
-                audio_q.put(p)
+                audio_q.put((p, c))   # carry the text so the player can publish
+                                      # it for the mic self-echo guard
 
     def turn_context(max_turns: int = 2, budget: int = 6000) -> str:
         """The last `max_turns` request/response turns, formatted 'You:'/'Agent:'
@@ -471,7 +472,7 @@ def run(args) -> None:
                 continue
             a = synth(c, args.engine)
             if a:
-                prio_q.put(a)
+                prio_q.put((a, c))
 
     def controller():
         # Voice-command channels that produce priority (jump-the-queue) audio:
@@ -520,12 +521,29 @@ def run(args) -> None:
             except queue.Empty:
                 break
             if item:
+                path = item[0] if isinstance(item, tuple) else item
                 try:
-                    os.unlink(item)
+                    os.unlink(path)
                 except OSError:
                     pass
             n += 1
         return n
+
+    # Mic self-echo guard: the TTS plays through the speakers, the mic hears it,
+    # and a magic word in the narration ("window", "send") would actuate. We
+    # publish what we're saying RIGHT NOW to a file the wake-listener reads; it
+    # drops any command word we're currently speaking. Keeping the last couple
+    # chunks covers whisper's detection lag spilling into the next chunk.
+    tts_speaking_file = spool_dir / "tts.speaking"
+    recent_spoken: "deque" = deque(maxlen=2)
+
+    def publish_speaking(text: str):
+        recent_spoken.append(" ".join(text.split()).lower())
+        try:
+            spool_dir.mkdir(parents=True, exist_ok=True)
+            tts_speaking_file.write_text(" ".join(recent_spoken))
+        except OSError:
+            pass
 
     def player():
         while not stop.is_set():
@@ -542,25 +560,35 @@ def run(args) -> None:
             # A recap/replay (prio_q) preempts pending narration; we check it
             # before each sentence, so "repeat"/"rewind" is heard right away.
             try:
-                p = prio_q.get_nowait()
+                item = prio_q.get_nowait()
             except queue.Empty:
                 try:
-                    p = audio_q.get(timeout=0.3)
+                    item = audio_q.get(timeout=0.3)
                 except queue.Empty:
                     continue
-            if p is None:               # worker done
+            if item is None:            # worker done
                 if args.no_follow:
                     return
                 continue
+            p, text = item
             if not stop.is_set():
                 speaking.set()             # mute the heartbeat while we talk
+                publish_speaking(text)     # ...and tell the mic listener what we say
                 proc = subprocess.Popen(["afplay", p],
                                         stdout=subprocess.DEVNULL,
                                         stderr=subprocess.DEVNULL)
+                last_touch = 0.0
                 while proc.poll() is None:
                     if stop.is_set() or pause_file.exists() or skip_file.exists():
                         proc.terminate()   # interrupt current chunk on pause/skip
                         break
+                    now = time.time()
+                    if now - last_touch > 0.4:
+                        try:
+                            os.utime(tts_speaking_file, None)  # keep "speaking" fresh
+                        except OSError:
+                            pass
+                        last_touch = now
                     time.sleep(0.08)
                 speaking.clear()
             try:

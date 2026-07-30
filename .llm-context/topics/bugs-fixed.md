@@ -285,6 +285,15 @@ Log of bugs encountered and fixed in the para-llm-directory project. Each entry 
 
 ---
 
+### BUG-037: Agent's own narration actuated voice commands (mic self-trigger)
+**Date**: 2026-07-30
+**Symptom**: While the agent was speaking, the narration said "window" and it changed the window — the TTS coming out of the speakers was heard by the mic and fired a voice command. "We never want the agent speech to actuate the workspace."
+**Cause**: The wake-listener HAD a self-echo guard — `matches_word`/`matches_send` fall back to a stricter "lone word only" rule while `player_speaking()` is true. But `player_speaking()` only knew the OLD stream mode: it checks `$SPOOL/player.pid` for an afplay child. The NEW loop (`speak_loop.py`) is a single Python process that spawns afplay from a thread and never writes `player.pid`, so `player_speaking()` was **always false** under the new loop, the strict branch never engaged, and a lone narrated "window"/"send" fired.
+**Fix**: Content-aware self-echo suppression, because we KNOW the narration text. (1) **Publish what's being said** — `speak_loop.py`'s player writes the current text (last 2 chunks) to `$SPOOL/tts.speaking` and refreshes its mtime every 0.4s while afplay runs (audio queue items became `(path, text)` tuples so the player has the text). (2) **Consume it** — `player_speaking()` now also returns true when `tts.speaking` is fresh (≤1s); new `tts_recently_said(stem)` returns true if that file is fresh within `STT_WAKE_ECHO_COOLDOWN` (4s, absorbs whisper's detection lag) and contains a word starting with the stem. `matches_word`/`matches_send` drop a match when `tts_recently_said` — i.e., the agent is narrating that word. (3) **Repeat-to-force override** — `is_burst` (a clean burst of the same word, e.g. "window window", "send send send") always fires, bypassing the echo guard, since narration never repeats a lone command word. This kills self-triggers of words the agent is speaking while preserving barge-in for any OTHER word, and gives a reliable manual override (say it twice). Verified with a matcher harness: narrated "window" → lone "window" dropped, "window window" fires, lone "window" fires when narration isn't saying it or once the file goes stale.
+**File**: `prototype/speak_loop.py` (`publish_speaking`, `tts.speaking`, `(path,text)` audio items), `plugins/stt/wake-listener.sh` (`player_speaking`, `tts_recently_said`, `is_burst`, `matches_word`, `matches_send`)
+
+---
+
 ## Known Bug-Prone Areas
 
 ### Live narration starves during long tool-heavy agent turns
