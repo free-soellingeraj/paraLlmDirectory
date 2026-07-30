@@ -128,7 +128,11 @@ tmux set-option -pt "$PANE_ID" @speakloop 1 2>/dev/null || true
 tmux set-option -pt "$PANE_ID" @speak_on 1 2>/dev/null || true
 [[ -n "$SPEAK_TINT" ]] && tmux set-option -pt "$PANE_ID" window-style "bg=$SPEAK_TINT" 2>/dev/null || true
 
-# "window" hands off with recap-on-arrival so the user hears where they landed.
-[[ "${SPEAKLOOP_RECAP_ON_START:-0}" == "1" ]] && : > "$REPEAT_FILE"
+# Catch-up on start: on enable, speak a briefing of the previous turn(s) so the
+# user is oriented before live narration begins ("get me up to speed"). Default
+# ON — the whole point of pressing Ctrl+b o after stepping away. "window" also
+# sets this so a hand-off recaps where you landed. Set SPEAKLOOP_RECAP_ON_START=0
+# to start silent.
+[[ "${SPEAKLOOP_RECAP_ON_START:-1}" == "1" ]] && : > "$REPEAT_FILE"
 
 tmux display-message "🔊 speak-loop ON ($PANE_ID · $MODEL) — $HINT"

@@ -469,10 +469,9 @@ bind-key a run-shell -b "$SCRIPT_DIR/plugins/stt/toggle-stt.sh"
 bind-key p run-shell -b "$SCRIPT_DIR/plugins/tts/toggle-tts.sh"
 
 # Ctrl+b o: Toggle speak mode — the tail->rewrite->speak loop (reads the
-# agent's transcript instead of polling the screen). NOTE: overrides tmux's
-# default "o" (cycle pane). Ctrl+b O keeps the old poll-based mode as a fallback.
+# agent's transcript instead of polling the screen; catch-up recap on start).
+# NOTE: overrides tmux's default "o" (cycle pane).
 bind-key o run-shell -b "bash $SCRIPT_DIR/prototype/toggle-speak.sh '#{pane_id}'"
-bind-key O run-shell -b "bash $SCRIPT_DIR/plugins/tts/toggle-stream.sh '#{pane_id}'"
 EOF
 
 cat >> ~/.tmux.conf << EOF

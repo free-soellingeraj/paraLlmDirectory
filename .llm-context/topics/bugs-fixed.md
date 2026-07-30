@@ -276,6 +276,15 @@ Log of bugs encountered and fixed in the para-llm-directory project. Each entry 
 
 ---
 
+### BUG-036: Ctrl+b o still ran the OLD stream mode; its start recap "just sucked"
+**Date**: 2026-07-30
+**Symptom**: The catch-up spoken on `Ctrl+b o` ("get me up to speed on the previous turn(s)") truncated and was low quality — "it gave a full analysis but it just was not good". None of the new-loop fixes (BUG-031..035) seemed to take effect.
+**Cause**: Two things. (1) **The binding was stale.** `install.sh` source binds `o → prototype/toggle-speak.sh` (new loop), but the user's `~/.tmux.conf` (written by an older install) and therefore the running tmux server still had `o → plugins/tts/toggle-stream.sh` — the OLD poll-based mode. Every recent fix landed in a code path no key launched; the user was on the old system the whole time (voice at old `TTS_STREAM_RATE=+10%`, recap from old `stream-framing.sh`). The old framing recap is a **summary hard-capped at `TTS_STREAM_RECAP_CHARS=400`** (~3 sentences) — the truncation. (2) **Even the new loop's recap was weak**: it fed only the last few *assistant text blocks*, tail-truncated to 3500 chars (no user prompt, no turn boundary), and summarized on haiku with a "2-4 sentences" prompt — so it captured only the end of a long turn with no anchor to what was asked.
+**Fix**: (1) **Rebind** — updated `~/.tmux.conf` and the live server so `o → toggle-speak.sh` (new loop). Per the user, the old mode is **not** kept as a fallback: removed the `O` binding (live `unbind-key O` + `~/.tmux.conf` + `install.sh`) and killed the lingering old workers/keeper. (2) **Turn-aware catch-up** — `agent_source.recent_events()` now interleaves real user prompts with agent text (skipping tool-results and `<task-notification>`/system-injected user records via `_SYS_USER`); `turn_context()` formats the last 2 turns as `You:` / `Agent:` (≤6000 chars) so the recap anchors on what was actually asked. (3) **Better briefing** — rewrote `RECAP_PROMPT` (concrete "what you asked / what it did / status / what's next", 4-8 sentences, no char cap) and run it on **sonnet** (`SPEAKLOOP_RECAP_MODEL`, ~9s — same latency as haiku, markedly better). (4) **Recap on start default ON** — `toggle-speak.sh` defaults `SPEAKLOOP_RECAP_ON_START=1`, so every `Ctrl+b o` opens with the catch-up. Verified end-to-end on a 20k-record transcript: the briefing correctly says what was asked, what shipped, that it's done, and the one open item it's waiting on.
+**File**: `~/.tmux.conf` + `install.sh` (binding: `o`→new, `O` removed), `prototype/agent_source.py` (`recent_events`, `_SYS_USER`), `prototype/speak_loop.py` (`RECAP_PROMPT`, `RECAP_MODEL`, `turn_context`), `prototype/toggle-speak.sh` (recap-on-start default)
+
+---
+
 ## Known Bug-Prone Areas
 
 ### Live narration starves during long tool-heavy agent turns

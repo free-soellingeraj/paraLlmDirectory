@@ -63,18 +63,23 @@ REWRITE_PROMPT = (
     "Captured output:\n"
 )
 RECAP_PROMPT = (
-    "Someone stepped away from watching this coding session and just asked "
-    "'where do things stand?'. From the recent agent transcript below, give "
-    "them a short spoken update.\n"
-    "Say, in 2 to 4 sentences of natural spoken English:\n"
-    "- what the agent is working on right now,\n"
-    "- what it just finished or concluded,\n"
+    "You are catching up someone who stepped away from watching this coding "
+    "session. Below is the recent conversation: their requests marked 'You:' "
+    "and the coding agent's replies marked 'Agent:'. Give them a spoken briefing "
+    "in natural spoken English that genuinely orients them:\n"
+    "- what they asked for,\n"
+    "- what the agent actually did and found (be concrete and specific),\n"
+    "- the current status: done, in progress, or blocked,\n"
     "- and what's next or what it's waiting on.\n"
-    "Speakable prose only: no markdown, no lists, no file paths or code unless "
-    "essential. Present tense, oriented to 'here's where we are'. "
-    "Output ONLY the update.\n\n"
-    "Recent transcript:\n"
+    "Speakable prose only: no markdown, no lists, no file paths or code. "
+    "Aim for 4 to 8 sentences — enough to genuinely catch them up, not a "
+    "transcript. Output ONLY the briefing.\n\n"
+    "Conversation:\n"
 )
+# The recap runs once per Ctrl+b o / "repeat", so it can afford a stronger model
+# than the per-chunk stream rewrite (haiku). Sonnet gives a markedly better
+# briefing at the same ~9s latency.
+RECAP_MODEL = os.environ.get("SPEAKLOOP_RECAP_MODEL", "sonnet")
 _PREAMBLE = re.compile(
     r"\A\s*(?:sure[,!.]?\s*)?(?:here(?:'s| is)?\b[^\n:]{0,40}:|narration:)\s*", re.I)
 _SENT = re.compile(r"(.+?[.!?])(?:\s+|\Z)", re.S)
@@ -438,12 +443,21 @@ def run(args) -> None:
             if p:
                 audio_q.put(p)
 
-    def recent_transcript(limit_chars: int = 3500, blocks: int = 6) -> str:
+    def turn_context(max_turns: int = 2, budget: int = 6000) -> str:
+        """The last `max_turns` request/response turns, formatted 'You:'/'Agent:'
+        so the recap can anchor on what was actually asked — not just a tail of
+        the agent's last few blocks (which is how the recap 'just sucked')."""
         try:
-            recent = src.backlog(80)[-blocks:]
+            events = src.recent_events(800)
         except Exception:
-            recent = []
-        return "\n\n".join(c.text for c in recent).strip()[-limit_chars:]
+            events = []
+        if not events:
+            return ""
+        ui = [i for i, (r, _) in enumerate(events) if r == "user"]
+        start = ui[-max_turns] if len(ui) >= max_turns else (ui[0] if ui else 0)
+        sel = events[start:]
+        s = "\n\n".join(("You: " if r == "user" else "Agent: ") + t for r, t in sel)
+        return s[-budget:] if len(s) > budget else s
 
     def enqueue_prio(text: str, marker: str):
         for c in synth_chunks(despeak(text)):
@@ -466,10 +480,10 @@ def run(args) -> None:
                     repeat_file.unlink()
                 except OSError:
                     pass
-                ctx = recent_transcript()
+                ctx = turn_context()
                 if ctx:
                     print("  ⟳ recap requested", file=sys.stderr)
-                    narr = recap(ctx, args.model) or recap(ctx, args.model, timeout=75)
+                    narr = recap(ctx, RECAP_MODEL, timeout=60) or recap(ctx, RECAP_MODEL, timeout=90)
                     if narr:
                         enqueue_prio(narr, "⟳")
                     else:
