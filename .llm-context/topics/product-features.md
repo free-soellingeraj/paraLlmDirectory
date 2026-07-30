@@ -100,17 +100,30 @@ All selection screens support:
 Tiled view showing all active feature windows for at-a-glance monitoring.
 
 **Features**:
-- Joins all session windows into a single tiled layout
+- Joins all session windows into a single **main-vertical** layout: the
+  **focused agent gets a large main pane** (left), the rest are compact strips
+  (right) you can still glance at
+- **Active pane follows focus** — moving into any agent promotes it into the big
+  main slot (`swap-pane -d` + re-layout), so the Claude Code input box in the
+  pane you're typing in is always full height and never clipped. (Was a flat
+  `tiled` grid, where short panes clipped the input — you'd lose sight of your
+  typing.)
 - Each tile shows the pane from one feature branch
 - Pane borders display: `pane_index: project | branch`
 - Direct interaction with any pane (keyboard input forwarded)
 
 **Navigation**:
-- Arrow keys to move between panes
-- `Ctrl+b z` to zoom/unzoom a pane
+- Arrow keys / click to move between panes — the one you land on becomes the
+  big pane automatically
+- `Ctrl+b z` to zoom/unzoom a pane (manual full zoom; the auto-promote respects
+  it and won't fight it)
 - `Ctrl+b b` to toggle broadcast mode (type in all panes)
 
-**File**: `tmux-command-center.sh`
+**Tuning**: `PARA_CC_MAIN_WIDTH` (default `60%`) sets the main pane's width.
+
+**File**: `tmux-command-center.sh` (layout + hook install/teardown),
+`tmux-cc-focus.sh` (`pane-focus-in` hook that promotes the focused pane to main;
+self-guards to the command-center window, re-entrancy guard `@cc_promoting`)
 
 ---
 
@@ -441,7 +454,7 @@ prose, skipping tool calls/results, spinners, echoed input, and other chrome.
 |---------|--------|
 | `Ctrl+b c` | Create/resume feature environment |
 | `Ctrl+b k` | Cleanup feature environment |
-| `Ctrl+b v` | Command Center (tiled view) |
+| `Ctrl+b v` | Command Center (focused agent = big main pane) |
 | `Ctrl+b t` | Remote management menu |
 | `Ctrl+b r` | Manual restore Claude sessions |
 | `Ctrl+b a` | Voice input: record, then transcribe into pane |

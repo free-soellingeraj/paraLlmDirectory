@@ -61,6 +61,8 @@ cleanup_hooks() {
     tmux set-hook -gu after-new-window
     tmux set-hook -gu pane-exited
     tmux set-hook -gu window-unlinked
+    # Remove the focus-promotes-to-main hook so it doesn't fire in normal windows.
+    bash "$SCRIPT_DIR/tmux-cc-focus.sh" disable 2>/dev/null || true
 }
 
 # Stop the state monitor plugin
@@ -218,8 +220,12 @@ create_command_center() {
     # Kill the empty shell pane that was auto-created with the window
     tmux kill-pane -t "$empty_pane" 2>/dev/null
 
-    # Apply tiled layout
-    tmux select-layout -t "$COMMAND_CENTER" tiled
+    # Layout: the FOCUSED agent gets a large "main" pane (so its Claude Code
+    # input box is never clipped), the rest are compact strips you can still
+    # glance at. tmux-cc-focus.sh installs a focus hook that promotes whichever
+    # pane you move into. (Was a flat `tiled` grid — short panes clipped input.)
+    tmux set-window-option -t "$COMMAND_CENTER" main-pane-width "${PARA_CC_MAIN_WIDTH:-60%}"
+    tmux select-layout -t "$COMMAND_CENTER" main-vertical
 
     # Enable pane border status to show window names at top of each tile
     tmux set-window-option -t "$COMMAND_CENTER" pane-border-status top
@@ -235,6 +241,9 @@ create_command_center() {
 
     # Select first pane
     tmux select-pane -t "$COMMAND_CENTER.0"
+
+    # Install the focus hook: moving into an agent promotes it to the main pane.
+    bash "$SCRIPT_DIR/tmux-cc-focus.sh" enable 2>/dev/null || true
 
     # Hooks disabled for stability - can be re-enabled later
     # setup_hooks
