@@ -340,6 +340,9 @@ def run(args) -> None:
     prio_q: "queue.Queue" = queue.Queue()   # recap audio, played before narration
     stop = threading.Event()
     speaking = threading.Event()   # true while the narration player has afplay live
+    preparing = threading.Event()  # true while the loop is generating/synthesizing
+                                   # a recap or replay — the agent may be idle, but
+                                   # WE are working, so the heartbeat should tick
 
     def feeder():
         if args.backlog > 0:
@@ -480,24 +483,32 @@ def run(args) -> None:
                     repeat_file.unlink()
                 except OSError:
                     pass
-                ctx = turn_context()
-                if ctx:
-                    print("  ⟳ recap requested", file=sys.stderr)
-                    narr = recap(ctx, RECAP_MODEL, timeout=60) or recap(ctx, RECAP_MODEL, timeout=90)
-                    if narr:
-                        enqueue_prio(narr, "⟳")
-                    else:
-                        print("  ✗ recap failed", file=sys.stderr)
+                preparing.set()   # keep the heartbeat ticking through the ~9s
+                try:              # LLM + first synth so start isn't dead silence
+                    ctx = turn_context()
+                    if ctx:
+                        print("  ⟳ recap requested", file=sys.stderr)
+                        narr = recap(ctx, RECAP_MODEL, timeout=60) or recap(ctx, RECAP_MODEL, timeout=90)
+                        if narr:
+                            enqueue_prio(narr, "⟳")
+                        else:
+                            print("  ✗ recap failed", file=sys.stderr)
+                finally:
+                    preparing.clear()
             elif replay_file.exists():
                 try:
                     replay_file.unlink()
                 except OSError:
                     pass
-                if last_narr[0]:
-                    print("  ↺ replay last block", file=sys.stderr)
-                    enqueue_prio(last_narr[0], "↺")
-                else:
-                    print("  ↺ replay: nothing spoken yet", file=sys.stderr)
+                preparing.set()
+                try:
+                    if last_narr[0]:
+                        print("  ↺ replay last block", file=sys.stderr)
+                        enqueue_prio(last_narr[0], "↺")
+                    else:
+                        print("  ↺ replay: nothing spoken yet", file=sys.stderr)
+                finally:
+                    preparing.clear()
             else:
                 time.sleep(0.3)
 
@@ -584,8 +595,12 @@ def run(args) -> None:
             return
 
         def wanted() -> bool:
+            # Tick while the agent is working OR we're preparing a recap/replay
+            # (agent may be idle then, but the user should hear we're on it),
+            # unless we're already speaking / paused / the mic is live.
             return (not pause_file.exists() and not speaking.is_set()
-                    and not voice_active() and is_working())
+                    and not voice_active()
+                    and (is_working() or preparing.is_set()))
 
         while not stop.is_set():
             if wanted():
