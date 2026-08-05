@@ -294,6 +294,15 @@ Log of bugs encountered and fixed in the para-llm-directory project. Each entry 
 
 ---
 
+### BUG-038: Command-center big pane didn't follow the selected pane
+**Date**: 2026-08-05
+**Symptom**: The "focused agent becomes the big main pane" feature (BUG added in product-features) didn't rotate — selecting a different agent left the big pane where it was.
+**Cause**: Two independent problems. (1) **`focus-events off`** — the whole feature hangs off a `pane-focus-in` hook, and tmux never fires that hook unless `focus-events` is on. The user's config had it off, so the hook was installed but never ran. (2) **swap-pane oscillation** — even with the hook firing, `promote()` does `swap-pane` to move the focused pane into the main slot, and tmux emits a `pane-focus-in` for the *displaced* (old main) pane. That echo re-fired `promote` and swapped the old main straight back. The re-entrancy guard (`@cc_promoting`) was cleared synchronously on return — far too early, since the echo is async and arrives after `promote` exits. Confirmed with a logging wrapper: promote X → echo focus-in for old-main → promote old-main → settles on the original pane.
+**Fix**: (1) `tmux-cc-focus.sh enable` now `set -g focus-events on` (also persisted in `~/.tmux.conf` + `install.sh`). (2) The guard is held by a **background timer** (`( sleep $PARA_CC_COOLDOWN(0.4s); set @cc_promoting 0; promote )&`) instead of cleared on return, so it outlives the swap's echo focus-ins. After the swap, `select-pane -t <intended>` re-asserts the focused pane as active (swap can drift focus). The timer also **re-checks on release**: if focus moved to another pane during the cooldown (fast arrowing, whose focus-in was absorbed), it promotes whatever is active now — converging once active == main. Verified: spaced selections each promote correctly; rapid `%15→%11→%17` settles on `%17`.
+**File**: `tmux-cc-focus.sh` (`promote` cooldown+settle, `enable` focus-events), `~/.tmux.conf` + `install.sh` (`set -g focus-events on`)
+
+---
+
 ## Known Bug-Prone Areas
 
 ### Live narration starves during long tool-heavy agent turns

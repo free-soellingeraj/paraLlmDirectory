@@ -472,6 +472,10 @@ bind-key p run-shell -b "$SCRIPT_DIR/plugins/tts/toggle-tts.sh"
 # agent's transcript instead of polling the screen; catch-up recap on start).
 # NOTE: overrides tmux's default "o" (cycle pane).
 bind-key o run-shell -b "bash $SCRIPT_DIR/prototype/toggle-speak.sh '#{pane_id}'"
+
+# Command Center: the focused agent auto-grows into the big "main" pane, driven
+# by a pane-focus-in hook — which only fires when focus-events is on.
+set -g focus-events on
 EOF
 
 cat >> ~/.tmux.conf << EOF
