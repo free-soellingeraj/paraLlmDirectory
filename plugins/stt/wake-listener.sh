@@ -122,6 +122,9 @@ framing_pid() { cat "$SPOOL/framing.pid" 2>/dev/null; }
 # resume. The framing worker is paused too so its "preparing" beeper stops.
 pause_playback() {
     local pid child
+    # Bridge to the new tail->rewrite->speak loop (prototype): while this file
+    # exists its player holds and interrupts the in-flight chunk.
+    [[ -n "${SPEAKLOOP_PAUSE_FILE:-}" ]] && touch "$SPEAKLOOP_PAUSE_FILE" 2>/dev/null || true
     pid="$(player_pid)"
     if [[ -n "$pid" ]]; then
         signal_tree STOP "$pid"
@@ -137,6 +140,7 @@ pause_playback() {
 
 resume_playback() {
     local pid
+    [[ -n "${SPEAKLOOP_PAUSE_FILE:-}" ]] && rm -f "$SPEAKLOOP_PAUSE_FILE" 2>/dev/null || true
     pid="$(framing_pid)"
     [[ -n "$pid" ]] && signal_tree CONT "$pid"
     pid="$(player_pid)"
@@ -242,14 +246,21 @@ matches_send() {
         word_is_send "$w" && found=0
     done
     (( found == 0 )) || return 1
-    if player_speaking; then
-        # A lone "send", OR a frustrated burst ("send send send") — the burst
-        # is unmistakably the user (narration never emits only send-words), so
-        # honor it even over live audio.
-        [[ "$count" -eq 1 ]] || all_words_send "$line"
-    else
-        [[ "$count" -le 2 ]] || all_words_send "$line"
+    # Repeat-to-force: "send send [send]" is unmistakably the user (narration
+    # never emits only send-words) — honor it over live audio and the echo guard.
+    if all_words_send "$line" && [[ "$count" -ge 2 ]]; then
+        return 0
     fi
+    local ok=1
+    if player_speaking; then
+        [[ "$count" -eq 1 ]] && ok=0
+    else
+        [[ "$count" -le 2 ]] && ok=0
+    fi
+    [[ "$ok" -eq 0 ]] || return 1
+    # A lone/near-lone "send" the agent is currently narrating is mic echo.
+    tts_recently_said "$SEND_STEM" && return 1
+    return 0
 }
 WINDOW_STEM="$(stem8 "$STT_WAKE_WINDOW_WORD")"
 PAUSE_STEM="$(stem8 "$STT_WAKE_PAUSE_WORD")"
@@ -272,12 +283,58 @@ matches_clear() {
 ack() { chime "$STT_WAKE_ACK_SOUND"; }
 buzz() { chime "$STT_WAKE_FAIL_SOUND"; }
 
-# True while the player has an afplay in flight — i.e., TTS audio is coming
-# out of the speakers, which the mic may hear (feedback).
+# --- Mic self-echo guard -----------------------------------------------------
+# The TTS plays through the speakers, the mic hears it, and a magic word IN THE
+# NARRATION ("window", "send") would actuate the workspace. The new speak loop
+# publishes what it's saying right now to $SPOOL/tts.speaking (content = the last
+# couple chunks, refreshed while afplay runs). We use it two ways: to know TTS is
+# live at all, and to drop a matched command word the narration is speaking.
+TTS_SPEAKING_FILE="$SPOOL/tts.speaking"
+TTS_ECHO_COOLDOWN="${STT_WAKE_ECHO_COOLDOWN:-4}"   # secs a spoken word stays "in the air"
+
+# Seconds since the speaking file was last refreshed (huge if it doesn't exist).
+tts_speaking_age() {
+    local m now
+    m="$(stat -f %m "$TTS_SPEAKING_FILE" 2>/dev/null)" || { echo 99999; return; }
+    now="$(date +%s)"
+    echo $(( now - m ))
+}
+
+# True while TTS audio is coming out of the speakers (mic-feedback risk): the OLD
+# player has an afplay child, OR the NEW loop's speaking file is fresh.
 player_speaking() {
     local pid
     pid="$(player_pid)"
-    [[ -n "$pid" ]] && pgrep -P "$pid" -x afplay >/dev/null 2>&1
+    [[ -n "$pid" ]] && pgrep -P "$pid" -x afplay >/dev/null 2>&1 && return 0
+    [[ "$(tts_speaking_age)" -le 1 ]]
+}
+
+# True if the narration is CURRENTLY (or just) speaking a word starting with the
+# stem — i.e., a "match" is really the agent's own voice heard via the mic. The
+# repeat-to-force burst (is_burst) deliberately bypasses this.
+tts_recently_said() {
+    local stem="$1" w
+    [[ -n "$stem" && ${#stem} -ge 3 ]] || return 1
+    [[ -f "$TTS_SPEAKING_FILE" ]] || return 1
+    [[ "$(tts_speaking_age)" -le "$TTS_ECHO_COOLDOWN" ]] || return 1
+    for w in $(cat "$TTS_SPEAKING_FILE" 2>/dev/null); do
+        [[ "$w" == "$stem"* ]] && return 0
+    done
+    return 1
+}
+
+# A clean burst of the SAME command word ("window window", "send send send") is
+# unmistakably the user — narration never repeats a lone command word — so it
+# always fires, even over live TTS and past the echo guard. This is the reliable
+# way to force a command while the agent is talking.
+is_burst() {
+    local line="$1" stem="$2" count=0 w
+    [[ -n "$stem" ]] || return 1
+    for w in $line; do
+        count=$((count + 1))
+        [[ "$w" == "$stem"* ]] || return 1   # any non-stem word => not a clean burst
+    done
+    [[ "$count" -ge 2 ]]
 }
 
 # A command fires when a SHORT utterance contains a word starting with the
@@ -293,21 +350,28 @@ player_speaking() {
 matches_word() {
     local line="$1" stem="$2" mode="${3:-normal}"
     [[ -n "$stem" && ${#stem} -ge 3 ]] || return 1
+    # Repeat-to-force: a clean burst of the command word is always the user.
+    is_burst "$line" "$stem" && return 0
     local count=0 found=1 w last=""
     for w in $line; do
         count=$((count + 1))
         last="$w"
         [[ "$w" == "$stem"* ]] && found=0
     done
+    local ok=1
     if [[ "$mode" == "end" ]]; then
-        [[ "$last" == "$stem"* && "$count" -le 6 ]]
+        [[ "$last" == "$stem"* && "$count" -le 6 ]] && ok=0
     elif player_speaking; then
-        [[ "$found" -eq 0 && "$count" -eq 1 ]]
+        [[ "$found" -eq 0 && "$count" -eq 1 ]] && ok=0
     else
         # Commands are spoken as lone words; <=2 tolerates a filler ("uh
         # send") but keeps fragments of continuous speech from triggering.
-        [[ "$found" -eq 0 && "$count" -le 2 ]]
+        [[ "$found" -eq 0 && "$count" -le 2 ]] && ok=0
     fi
+    [[ "$ok" -eq 0 ]] || return 1
+    # Would match — but drop it if it's the agent's own narration via the mic.
+    tts_recently_said "$stem" && return 1
+    return 0
 }
 
 : > "$WAKE_LOG"
@@ -488,6 +552,22 @@ PY
 # Ctrl+b p) — scan back, summarize, speak, then resume streaming. Plays
 # through the mode's own audio queue, so no playback-slot conflict.
 do_repeat() {
+    # New tail->rewrite->speak loop: recap is handled by speak_loop.py's own
+    # recapper (touch its repeat file), NOT the old stream-framing worker —
+    # whose "preparing" beeper is the sticks sound and whose audio never reaches
+    # the new loop's player (BUG-032).
+    if [[ -n "${SPEAKLOOP_PAUSE_FILE:-}" ]]; then
+        local rf="${SPEAKLOOP_REPEAT_FILE:-${SPEAKLOOP_PAUSE_FILE%.pause}.repeat}"
+        if [[ "$PAUSED" == "1" ]]; then          # recap overrides a standing pause
+            PAUSED=0; rm -f "$SPOOL/paused"; resume_playback
+            log_lifecycle "repeat: implicit play (was paused)"
+        fi
+        : > "$rf"
+        ack
+        log_lifecycle "repeat: recap requested (new loop) -> $rf"
+        tmux display-message -t "$PANE_ID" "🔁 Recapping…" 2>/dev/null || true
+        return 0
+    fi
     local fpid
     fpid="$(framing_pid)"
     if [[ -n "$fpid" ]] && kill -0 "$fpid" 2>/dev/null; then
@@ -595,6 +675,33 @@ wait_input_ready() {
 # workers, queue depths, pause/suspend state, and edge-tts reachability (the
 # usual no-network casualty).
 do_diagnostic() {
+    # New tail->rewrite->speak loop: the old worker/queue model doesn't apply
+    # (it would report "all dead"). Report the honest new-loop state instead.
+    if [[ -n "${SPEAKLOOP_PAUSE_FILE:-}" ]]; then
+        ack
+        local report="" sp
+        sp="$(cat "${SPEAKLOOP_PAUSE_FILE%.pause}.pid" 2>/dev/null)"
+        if [[ -n "$sp" ]] && kill -0 "$sp" 2>/dev/null; then
+            report="Narration loop alive."
+        else
+            report="Narration loop is down."
+        fi
+        if pgrep -f "whisper-stream .*${PANE_ID#%}\.stream" >/dev/null 2>&1; then
+            report="$report Voice listener alive."
+        else
+            report="$report Voice listener is down."
+        fi
+        [[ "$PAUSED" == "1" ]] && report="$report Playback paused, say ${STT_WAKE_PLAY_WORD} to resume."
+        if curl -s -m 3 -o /dev/null "https://speech.platform.bing.com" 2>/dev/null; then
+            report="$report Speech service reachable."
+        else
+            report="$report Speech service unreachable, check network."
+        fi
+        log_lifecycle "diagnostic (new loop): $report"
+        command -v say >/dev/null 2>&1 && ( say "Diagnostic. $report" >/dev/null 2>&1 & )
+        tmux display-message -t "$PANE_ID" "🩺 $report" 2>/dev/null || true
+        return 0
+    fi
     ack
     local report="" dead="" f pid
     for f in watcher synth player rewrite wake; do
@@ -637,6 +744,46 @@ do_diagnostic() {
 # (command-center layout). Re-binding goes through toggle-stream's move path,
 # which also replaces this listener; the recap frames the new pane.
 do_window() {
+    # New tail->rewrite->speak loop: cycle narration through the panes of the
+    # bound pane's OWN window (the command-center grid) — NEVER leaving the
+    # window, so the command view survives. Each agent is a pane; select-pane
+    # focuses the target so its purple shows in the grid. Single-owner handoff.
+    if [[ -n "${SPEAKLOOP_PAUSE_FILE:-}" ]]; then
+        local ncur target=""
+        ncur="$(tmux display-message -pt "$PANE_ID" '#{window_id}' 2>/dev/null)"
+        local panes=() pp pj=0 pidx=-1
+        while IFS= read -r pp; do
+            panes+=("$pp"); [[ "$pp" == "$PANE_ID" ]] && pidx=$pj; pj=$((pj + 1))
+        done < <(tmux list-panes -t "$ncur" -F '#{pane_id}' 2>/dev/null)
+        if (( ${#panes[@]} > 1 && pidx >= 0 )); then
+            target="${panes[$(( (pidx + 1) % ${#panes[@]} ))]}"
+        fi
+        if [[ -z "$target" || "$target" == "$PANE_ID" ]]; then
+            log_lifecycle "window: only one pane in this window, nothing to cycle"
+            buzz
+            return 0
+        fi
+        log_lifecycle "window (new loop): move narration $PANE_ID -> $target (same window)"
+        ack
+        # Instant spoken cue of the target agent (env name, else window name);
+        # the recap-on-start follows with the fuller framing.
+        local tpath tlabel=""
+        tpath="$(tmux display-message -pt "$target" '#{pane_current_path}' 2>/dev/null)"
+        case "$tpath" in
+            */envs/*) tlabel="${tpath#*/envs/}"; tlabel="${tlabel%%/*}" ;;
+            *)        tlabel="$(tmux display-message -pt "$target" '#{window_name}' 2>/dev/null)" ;;
+        esac
+        [[ -n "$tlabel" ]] && command -v say >/dev/null 2>&1 && ( say "$tlabel" >/dev/null 2>&1 & )
+        # Focus the target pane but STAY in this window (no select-window — that
+        # would leave the command grid).
+        tmux select-pane -t "$target" 2>/dev/null || true
+        # Launch the target stack fully detached (subshell backgrounds it, then
+        # exits, reparenting it to init) so the single-owner teardown of OUR
+        # stack can't kill the launcher mid-handoff.
+        ( SPEAKLOOP_RECAP_ON_START=1 \
+            nohup bash "$SCRIPT_DIR/../../prototype/toggle-speak.sh" "$target" >/dev/null 2>&1 & )
+        return 0
+    fi
     local sess wins target=""
     sess="$(tmux display-message -pt "$PANE_ID" '#{session_name}' 2>/dev/null)"
     if [[ -z "$sess" ]]; then
@@ -753,6 +900,13 @@ do_play() {
 # Seeks are chunk-based (~1 chunk ≈ 10-15s of speech): the listener writes a
 # command for the player loop and kills the in-flight afplay so it reacts now.
 do_forward() {
+    # New loop: flush pending narration to catch up to the latest.
+    if [[ -n "${SPEAKLOOP_PAUSE_FILE:-}" ]]; then
+        : > "${SPEAKLOOP_SKIP_FILE:-${SPEAKLOOP_PAUSE_FILE%.pause}.skip}"
+        ack
+        log_lifecycle "forward: skip to latest (new loop)"
+        return 0
+    fi
     echo "skip 1" > "$SPOOL/player.cmd"
     kill_inflight_afplay
     ack
@@ -760,6 +914,16 @@ do_forward() {
 }
 
 do_rewind() {
+    # New loop: replay the last block's narration verbatim.
+    if [[ -n "${SPEAKLOOP_PAUSE_FILE:-}" ]]; then
+        if [[ "$PAUSED" == "1" ]]; then     # replay is an explicit audio request
+            PAUSED=0; rm -f "$SPOOL/paused"; resume_playback
+        fi
+        : > "${SPEAKLOOP_REPLAY_FILE:-${SPEAKLOOP_PAUSE_FILE%.pause}.replay}"
+        ack
+        log_lifecycle "rewind: replay last block (new loop)"
+        return 0
+    fi
     echo "back 2" > "$SPOOL/player.cmd"
     kill_inflight_afplay
     ack

@@ -64,6 +64,20 @@ class AgentSource(ABC):
         return [c for line in raw.splitlines() if line.strip()
                 for c in self._parse(line)]
 
+    # System-injected "user" records — task-completion notifications, slash
+    # command echoes, hook output — are not things the person typed. A recap
+    # must anchor on REAL requests, so these are skipped when building turns.
+    _SYS_USER = re.compile(
+        r"^\s*<(?:task-notification|command-name|command-message|command-args|"
+        r"local-command|system-reminder|user-prompt-submit-hook)", re.I)
+
+    def recent_events(self, n: int = 800) -> "list[tuple[str, str]]":
+        """Recent (role, text) events in order — for a turn-aware catch-up recap
+        that can say 'you asked X; the agent did Y'. Base implementation has only
+        agent text (from backlog); sources with reachable user prompts override
+        to interleave 'user' events for anchoring."""
+        return [("agent", ch.text) for ch in self.backlog(n)]
+
     def follow(self) -> Iterator[TextChunk]:
         """Yield text blocks as they are appended — the OS does the follow."""
         p = self.locate()
@@ -112,6 +126,43 @@ class ClaudeCodeSource(AgentSource):
         for c in ((o.get("message") or {}).get("content") or []):
             if isinstance(c, dict) and c.get("type") == "text" and (c.get("text") or "").strip():
                 yield TextChunk(c["text"].strip(), o.get("timestamp", ""), self.name)
+
+    def recent_events(self, n: int = 800) -> "list[tuple[str, str]]":
+        p = self.locate()
+        if not p:
+            return []
+        try:
+            raw = subprocess.run(["tail", "-n", str(n), str(p)],
+                                 capture_output=True, text=True, errors="replace").stdout
+        except Exception:
+            return []
+        ev: "list[tuple[str, str]]" = []
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                o = json.loads(line)
+            except Exception:
+                continue
+            t = o.get("type")
+            if t == "assistant":
+                for c in ((o.get("message") or {}).get("content") or []):
+                    if isinstance(c, dict) and c.get("type") == "text" and (c.get("text") or "").strip():
+                        ev.append(("agent", " ".join(c["text"].split())))
+            elif t == "user":
+                c = (o.get("message") or {}).get("content")
+                if isinstance(c, str):
+                    txt = c
+                elif isinstance(c, list):
+                    txt = " ".join(i.get("text", "") for i in c
+                                   if isinstance(i, dict) and i.get("type") == "text")
+                else:
+                    txt = ""
+                txt = " ".join(txt.split())
+                if txt and not self._SYS_USER.match(txt):   # skip tool_results + system injections
+                    ev.append(("user", txt))
+        return ev
 
 
 class CodexSource(AgentSource):

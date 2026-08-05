@@ -62,11 +62,22 @@ run_capped() {
     fi
 }
 
+# Strip a leading LLM preamble ("Here's the narration:", "Sure! …") and any
+# leading blank lines — claude -p sometimes prefaces, and that must never be
+# spoken.
+strip_preamble() {
+    perl -0pi -e 's/\A\s*(?:sure[,!.]?\s*)?(?:here(?:\x27s| is)?\b[^\n:]{0,40}:|narration:)\s*\n+//i; s/\A\s+//' "$1" 2>/dev/null || true
+}
+
 # Rewrite $1 (raw text file) into $2 (speakable narration). Non-zero on any
 # failure; caller falls back to pass-through.
+# Backend: claude by default (Sonnet). The OpenAI codex sub was cancelled
+# 2026-07; codex is retained as an option — TTS_STREAM_REWRITE_BACKEND=codex,
+# TTS_STREAM_REWRITE_MODEL=haiku|sonnet.
 rewrite_batch() {
     local in="$1" out="$2"
-    command -v codex >/dev/null 2>&1 || return 1
+    local backend="${TTS_STREAM_REWRITE_BACKEND:-claude}"
+    local model="${TTS_STREAM_REWRITE_MODEL:-sonnet}"
     local prompt="$SPOOL/rewrite.prompt"
     cat > "$prompt" <<'PROMPT_EOF'
 Rewrite the captured coding-agent output below as natural spoken narration for text-to-speech.
@@ -78,16 +89,30 @@ Rules:
 - For code fragments, diffs, or commands, say what they do in one short phrase instead of reading them.
 - Numbers and error messages that matter should be spoken plainly.
 - If the text is already conversational, pass it through nearly unchanged.
-- Output only the narration, nothing else.
+- Output ONLY the narration. No preamble, no "Here is", no closing remark — just the spoken text.
 
 Captured output:
 PROMPT_EOF
     cat "$in" >> "$prompt"
-    run_capped codex exec --skip-git-repo-check --sandbox read-only \
-        --output-last-message "$out" - < "$prompt" >/dev/null 2>>"$ERROR_LOG"
-    local status=$?
+    local status
+    case "$backend" in
+        claude)
+            command -v claude >/dev/null 2>&1 || { rm -f "$prompt"; return 1; }
+            run_capped claude -p --model "$model" < "$prompt" > "$out" 2>>"$ERROR_LOG"
+            status=$?
+            ;;
+        codex)
+            command -v codex >/dev/null 2>&1 || { rm -f "$prompt"; return 1; }
+            run_capped codex exec --skip-git-repo-check --sandbox read-only \
+                --output-last-message "$out" - < "$prompt" >/dev/null 2>>"$ERROR_LOG"
+            status=$?
+            ;;
+        *) rm -f "$prompt"; return 1 ;;
+    esac
     rm -f "$prompt"
-    [[ "$status" -eq 0 && -s "$out" ]]
+    [[ "$status" -eq 0 && -s "$out" ]] || return 1
+    strip_preamble "$out"
+    [[ -s "$out" ]]
 }
 
 # True when the batch is worth a codex pass: big enough, or carrying
