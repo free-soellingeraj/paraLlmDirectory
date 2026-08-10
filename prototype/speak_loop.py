@@ -450,7 +450,12 @@ def run(args) -> None:
     def turn_context(max_turns: int = 2, budget: int = 6000) -> str:
         """The last `max_turns` request/response turns, formatted 'You:'/'Agent:'
         so the recap can anchor on what was actually asked — not just a tail of
-        the agent's last few blocks (which is how the recap 'just sucked')."""
+        the agent's last few blocks (which is how the recap 'just sucked').
+
+        Agent turns can be enormous (Codex especially), so a naive tail-truncation
+        drops the leading 'You:' and loses the anchor. Instead, keep every user
+        prompt in full and cap each agent block, so the recap always sees what was
+        asked plus a representative slice of what the agent did."""
         try:
             events = src.recent_events(800)
         except Exception:
@@ -460,8 +465,16 @@ def run(args) -> None:
         ui = [i for i, (r, _) in enumerate(events) if r == "user"]
         start = ui[-max_turns] if len(ui) >= max_turns else (ui[0] if ui else 0)
         sel = events[start:]
-        s = "\n\n".join(("You: " if r == "user" else "Agent: ") + t for r, t in sel)
-        return s[-budget:] if len(s) > budget else s
+        per_agent = 1400          # cap each agent block; user prompts kept in full
+        parts = []
+        for r, t in sel:
+            if r == "user":
+                parts.append("You: " + t)
+            else:
+                parts.append("Agent: " + (t if len(t) <= per_agent else t[:per_agent] + " …"))
+        s = "\n\n".join(parts)
+        # Final safety cap, but keep the HEAD (the anchoring 'You:'), not the tail.
+        return s if len(s) <= budget else s[:budget] + " …"
 
     def enqueue_prio(text: str, marker: str):
         for c in synth_chunks(despeak(text)):
@@ -607,7 +620,12 @@ def run(args) -> None:
     def is_working() -> bool:
         now = time.time()
         if now - _wk["t"] > 0.7:          # throttle the capture-pane check
-            st = hook_state(cwd) if cwd else None
+            # hook_state reads Claude Code's per-cwd state file. Only trust it for
+            # a Claude pane: a Codex pane in a worktree that once ran Claude finds
+            # a STALE file (e.g. state "ended"), which would wrongly force the
+            # heartbeat off. For Codex, the footer ("esc to interrupt") is the
+            # signal. (BUG: Codex heartbeat silent.)
+            st = hook_state(cwd) if (cwd and src.name == "claude") else None
             _wk["v"] = False if st in ("blocked", "ended") else footer_running(args.target)
             _wk["t"] = now
         return _wk["v"]
