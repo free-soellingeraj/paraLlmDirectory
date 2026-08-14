@@ -312,6 +312,15 @@ Log of bugs encountered and fixed in the para-llm-directory project. Each entry 
 
 ---
 
+### BUG-040: "send" voice command "really not working"
+**Date**: 2026-08-14
+**Symptom**: Saying "send" did nothing — even repeated many times. Whisper transcribed the "Send." lines fine (confirmed in the wake log), but `do_send` never fired.
+**Cause**: The mic self-echo guard (BUG-037) over-blocked. `speak_loop` published the **last 2 narration chunks** (~40s of text) to `tts.speaking`, and `matches_send` dropped any "send" while that text contained a send-word within a 4s cooldown. The user was watching an agent **build a messaging feature**, so the narration said "send"/"sent" constantly (72× in the session) — meaning "send" was "recently said" almost continuously and the real command was suppressed nearly all the time. Repeats didn't help: the only burst override (`all_words_send && count>=2`) needs multiple send-words in **one** whisper line, but a frustrated "Send. Send. Send." arrives as **separate** one-word lines, each blocked individually.
+**Fix**: (1) **Narrow the guard to what's audible now** — `speak_loop` publishes only the **current** chunk (dropped the 2-deep deque), so a command word blocks only while the chunk actually containing it is playing, not for ~40s of history; echo cooldown cut 4s→2s. (2) **Lone-"send"-twice force** — a real "send" lingers in whisper's window so it lands on ≥2 consecutive reads, while a narration echo is embedded in a sentence (`count>1`) and never counts as *lone*; so two consecutive lone-"send" reads (`SEND_FORCE`, ~0.7–1.4s) fire the command even past the echo guard, without re-enabling sentence-embedded echoes. Verified in simulation: lone "send" fires when the current chunk isn't about sending; when it is, the 2nd consecutive read forces it; a "send" embedded in a narrated sentence never fires. Manual escape hatch unchanged: "pause" → "send" → "play".
+**File**: `prototype/speak_loop.py` (`publish_speaking` current-chunk only), `plugins/stt/wake-listener.sh` (`is_lone_send`, `SEND_FORCE`, `TTS_ECHO_COOLDOWN` 4→2)
+
+---
+
 ## Known Bug-Prone Areas
 
 ### Live narration starves during long tool-heavy agent turns

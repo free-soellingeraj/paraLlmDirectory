@@ -290,7 +290,10 @@ buzz() { chime "$STT_WAKE_FAIL_SOUND"; }
 # couple chunks, refreshed while afplay runs). We use it two ways: to know TTS is
 # live at all, and to drop a matched command word the narration is speaking.
 TTS_SPEAKING_FILE="$SPOOL/tts.speaking"
-TTS_ECHO_COOLDOWN="${STT_WAKE_ECHO_COOLDOWN:-4}"   # secs a spoken word stays "in the air"
+TTS_ECHO_COOLDOWN="${STT_WAKE_ECHO_COOLDOWN:-2}"   # secs a spoken word stays "in the air"
+                                                   # (short: the guard now reads only the
+                                                   # CURRENT chunk, so it need only cover
+                                                   # whisper's lag, not narration history)
 
 # Seconds since the speaking file was last refreshed (huge if it doesn't exist).
 tts_speaking_age() {
@@ -389,6 +392,20 @@ dict_ended=0
 # the same command must not fire again — otherwise saying "transcribe" starts
 # dictation and its own echo immediately ends it.
 echo_stem=""
+# Was the PREVIOUS line a lone "send"? A real "send" lingers in whisper's window
+# so it lands on >=2 consecutive reads; an echo of narrated "send" is embedded in
+# a sentence (count>1) and never counts as lone. So "lone send twice in a row"
+# forces the command through even when the echo guard would block it (the agent
+# narrating a messaging feature says "send" constantly, false-blocking the real
+# command). See SEND_FORCE below.
+send_lone_prev=0
+
+# True when the line is exactly one word and that word is a send-word.
+is_lone_send() {
+    local c=0 w
+    for w in $1; do c=$((c + 1)); done
+    [[ "$c" -eq 1 ]] && word_is_send "$1"
+}
 
 line_has_stem() {
     local line="$1" stem="$2" w
@@ -965,6 +982,17 @@ while mode_active; do
         # to empty, so the sticks' own feedback does NOT count) means someone is
         # talking — duck the tick so it stops masking the command in the mic.
         [[ -n "$norm_line" ]] && touch "$SPOOL/voice.active" 2>/dev/null || true
+        # Force "send" when a LONE "send" persists across two consecutive reads —
+        # the reliable path past the echo guard when the narration keeps saying
+        # "send" (see send_lone_prev). Only in the listening state; dictation's
+        # own send-end path handles submit there.
+        SEND_FORCE=0
+        if is_lone_send "$norm_line"; then
+            [[ "$send_lone_prev" -eq 1 ]] && SEND_FORCE=1
+            send_lone_prev=1
+        else
+            send_lone_prev=0
+        fi
         # The triggered word has left the window once a line arrives without it
         # (alias-aware: transcribe's "subscribe" echo and send's "sent" echo
         # must also keep the guard armed, or the command re-fires on itself).
@@ -992,8 +1020,9 @@ while mode_active; do
                 do_repeat
                 echo_stem="$DIGEST_STEM"
             elif [[ "$echo_stem" != "$SEND_STEM" ]] \
-                && matches_send "$norm_line"; then
-                log_lifecycle "send trigger: '$line'"
+                && { matches_send "$norm_line" || [[ "$SEND_FORCE" == "1" ]]; }; then
+                [[ "$SEND_FORCE" == "1" ]] && _how=" (forced: lone send x2)" || _how=""
+                log_lifecycle "send trigger: '$line'$_how"
                 do_send
                 echo_stem="$SEND_STEM"
             elif [[ "$echo_stem" != "$DIAGNOSTIC_STEM" ]] \

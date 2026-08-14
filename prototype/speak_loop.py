@@ -570,17 +570,17 @@ def run(args) -> None:
 
     # Mic self-echo guard: the TTS plays through the speakers, the mic hears it,
     # and a magic word in the narration ("window", "send") would actuate. We
-    # publish what we're saying RIGHT NOW to a file the wake-listener reads; it
-    # drops any command word we're currently speaking. Keeping the last couple
-    # chunks covers whisper's detection lag spilling into the next chunk.
+    # publish the text we're saying RIGHT NOW to a file the wake-listener reads;
+    # it drops a command word only while that word is actually audible. Publish
+    # just the CURRENT chunk — keeping older chunks made the guard suppress a
+    # command for ~40s of narration history, which false-blocked common words
+    # like "send" when the agent was building a messaging feature.
     tts_speaking_file = spool_dir / "tts.speaking"
-    recent_spoken: "deque" = deque(maxlen=2)
 
     def publish_speaking(text: str):
-        recent_spoken.append(" ".join(text.split()).lower())
         try:
             spool_dir.mkdir(parents=True, exist_ok=True)
-            tts_speaking_file.write_text(" ".join(recent_spoken))
+            tts_speaking_file.write_text(" ".join(text.split()).lower())
         except OSError:
             pass
 
