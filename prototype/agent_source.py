@@ -137,8 +137,15 @@ class ClaudeCodeSource(AgentSource):
         self.cwd = cwd
 
     def _project_dir(self) -> Path:
-        # Claude Code encodes the cwd into the project dir: '/' and '.' -> '-'.
-        enc = re.sub(r"[/.]", "-", self.cwd)
+        # Claude Code encodes the cwd into the project dir name. The rule is
+        # broader than the '/' and '.' this used to replace: ANY character
+        # outside [A-Za-z0-9-] becomes '-'. A git worktree branch with a '+' in
+        # it — ".../worktrees/fix+transient-retry-excludes-deliberate-cancels" —
+        # kept its '+' here and missed a directory that was sitting right there
+        # with a '-'. The miss was silent and expensive: locate() returned None,
+        # for_pane() fell through to CodexSource, and the pane narrated a
+        # different project's stale rollout instead (see CodexSource.locate).
+        enc = re.sub(r"[^A-Za-z0-9-]", "-", self.cwd)
         return Path.home() / ".claude" / "projects" / enc
 
     def locate(self) -> Optional[Path]:
@@ -207,8 +214,17 @@ class CodexSource(AgentSource):
                        key=lambda f: f.stat().st_mtime, reverse=True)
         if not files:
             return None
-        # Codex paths are date-keyed, not cwd-keyed; prefer a rollout whose
-        # session_meta names our cwd, else the newest.
+        # Codex paths are date-keyed, not cwd-keyed, so a rollout is claimed by
+        # matching our cwd in its session_meta.
+        #
+        # WHEN THE CWD IS KNOWN AND NOTHING MATCHES, RETURN NONE. This used to
+        # fall back to `files[0]` — the newest rollout ANYWHERE on the machine —
+        # which is how a Claude Code pane ended up narrating a five-day-old Codex
+        # session from an unrelated project: the transcript never grows, `tail
+        # -F` yields nothing, and speak mode looks like it has simply stopped
+        # streaming. A wrong transcript is worse than no transcript, because no
+        # transcript says so (`run()` prints "no transcript for this target")
+        # while a wrong one is indistinguishable from a broken pipeline.
         if self.cwd:
             for f in files:
                 try:
@@ -216,7 +232,8 @@ class CodexSource(AgentSource):
                         return f
                 except Exception:
                     pass
-        return files[0]
+            return None
+        return files[0]      # only the cwd-less demo path (`--codex`)
 
     def extract(self, o: dict) -> Iterator[TextChunk]:
         if o.get("type") != "response_item":

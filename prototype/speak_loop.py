@@ -385,6 +385,20 @@ def run(args) -> None:
     src = for_pane(args.target)
     loc = src.locate()
     print(f"[source: {src.name}]  {loc}", file=sys.stderr)
+    # A transcript nobody is writing to produces exactly the symptom "it stopped
+    # streaming chunks", and looks identical to a broken pipeline. Say so at
+    # startup: if the file we are about to `tail -F` is already cold, the pane
+    # almost certainly resolved to the wrong session.
+    if loc is not None:
+        try:
+            age = time.time() - loc.stat().st_mtime
+            if age > 600:
+                print(f"[warning: that transcript was last written "
+                      f"{int(age // 60)} min ago — if this pane is active, it "
+                      f"resolved to the WRONG session and nothing will stream]",
+                      file=sys.stderr)
+        except OSError:
+            pass
     # Enable moment. Live-follow only speaks blocks written AFTER this, so
     # pressing Ctrl+b o "just starts listening and plays future messages" — the
     # block the agent was already finishing as you enabled (whose write can flush
