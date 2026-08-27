@@ -303,6 +303,15 @@ Log of bugs encountered and fixed in the para-llm-directory project. Each entry 
 
 ---
 
+### BUG-039: Ctrl+b o "doesn't work well" on Codex panes
+**Date**: 2026-08-10
+**Symptom**: Speak mode on a Codex pane misbehaved — little/no live narration, a recap about the wrong session, no working heartbeat.
+**Cause**: Three Codex-specific gaps in the new speak loop. (1) **Source mis-routing (the big one)** — `for_pane()` chose the adapter by which transcript FOLDER exists: `if ClaudeCodeSource.locate(): return it`. A worktree that ever ran Claude keeps its `~/.claude/projects/<enc-cwd>` dir forever, so a Codex pane there routed to the STALE, ended Claude transcript (last touched days earlier) instead of the live Codex rollout — it tailed a file that never grows (no narration) and recapped the wrong session. (2) **Heartbeat forced off** — `is_working()` reads `hook_state(cwd)` from Claude Code's per-cwd state file; for a Codex pane that file is stale (`"state":"ended"` from the prior Claude session), and `st in ("blocked","ended")` hard-forced the heartbeat off even while Codex was actively working. (3) **Recap degraded** — `recent_events()` was only overridden in `ClaudeCodeSource`, so Codex fell back to the agent-text-only base impl and the turn-aware catch-up couldn't say "you asked X".
+**Fix**: (1) **Route by the running REPL, not folder existence** — new `_repl_in_pane()` walks the pane's process tree (`pane_pid` → descendants) and matches `codex` vs `claude` in the command line (verified signal: `node …/codex` vs `claude …`); `for_pane()` picks the source matching the live REPL even when the other framework left a stale transcript, falling back to folder-existence only when the REPL is indeterminate (raw cwd). (2) **Gate hook_state on source** — `is_working()` only consults `hook_state` when `src.name == "claude"`; Codex relies on the footer, whose "esc to interrupt" text it shares (verified). (3) **`CodexSource.recent_events()`** — interleaves real user `input_text` prompts (skipping `<environment_context>`/`<turn_aborted>` system injections) with agent text. Codex rollouts interleave ~16 noise records per message, so the last two prompts sit ~900 lines deep; the tail floor is raised to 8000 lines so the recap reaches them. Also hardened `turn_context()` (speak_loop): keep every user prompt in full and cap each agent block (1400 chars), truncating from the HEAD-preserving side so a huge Codex turn can't bury the anchoring "You:". Verified end-to-end on a live Codex pane: routes to the rollout, narration extracts, footer→heartbeat tracks real state, and the sonnet recap anchors on the real question with concrete status.
+**File**: `prototype/agent_source.py` (`_repl_in_pane`, `for_pane`, `CodexSource.recent_events`), `prototype/speak_loop.py` (`is_working` source gate, `turn_context` head-preserving cap)
+
+---
+
 ## Known Bug-Prone Areas
 
 ### Live narration starves during long tool-heavy agent turns

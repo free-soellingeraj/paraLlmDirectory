@@ -200,6 +200,53 @@ class CodexSource(AgentSource):
             if isinstance(c, dict) and c.get("type") in ("output_text", "text") and (c.get("text") or "").strip():
                 yield TextChunk(c["text"].strip(), o.get("timestamp", ""), self.name)
 
+    def recent_events(self, n: int = 800) -> "list[tuple[str, str]]":
+        """Interleave real user prompts with agent text so the catch-up recap can
+        anchor on 'you asked X'. Codex user messages are input_text; the XML-ish
+        ones (<environment_context>, <turn_aborted>, …) are system injections, not
+        things the person typed, so they're skipped — the plain-text ones are the
+        real prompts.
+
+        Codex rollouts interleave ~16 noise records (token_count, event_msg,
+        reasoning) per message, so the last couple of user turns sit ~900+ lines
+        deep. A Claude-sized tail (800) never reaches them and the recap loses its
+        anchor — so read a much larger window here."""
+        p = self.locate()
+        if not p:
+            return []
+        n = max(n, 8000)
+        try:
+            raw = subprocess.run(["tail", "-n", str(n), str(p)],
+                                 capture_output=True, text=True, errors="replace").stdout
+        except Exception:
+            return []
+        ev: "list[tuple[str, str]]" = []
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                o = json.loads(line)
+            except Exception:
+                continue
+            if o.get("type") != "response_item":
+                continue
+            pl = o.get("payload") or {}
+            if pl.get("type") != "message":
+                continue
+            role = pl.get("role")
+            if role == "assistant":
+                for c in (pl.get("content") or []):
+                    if isinstance(c, dict) and c.get("type") in ("output_text", "text") and (c.get("text") or "").strip():
+                        ev.append(("agent", " ".join(c["text"].split())))
+            elif role == "user":
+                txt = " ".join(c.get("text", "") for c in (pl.get("content") or [])
+                               if isinstance(c, dict) and c.get("type") == "input_text")
+                txt = " ".join(txt.split())
+                if txt and not txt.lstrip().startswith("<"):   # skip <environment_context> etc.
+                    ev.append(("user", txt))
+        return ev
+
 
 class PollingSource(AgentSource):
     """Fallback for REPLs with no transcript: capture-pane + filter + settle.
@@ -228,17 +275,69 @@ def _tmux(pane_id: str, fmt: str) -> str:
         return ""
 
 
+def _repl_in_pane(pane_id: str) -> Optional[str]:
+    """Which REPL is actually RUNNING in this pane — 'claude' or 'codex' — from
+    the pane's process tree. This is authoritative; a transcript folder merely
+    existing is not (a worktree that once ran Claude keeps its
+    ~/.claude/projects/<cwd> dir forever, which would otherwise mis-route a Codex
+    pane to that stale, ended Claude transcript). Returns None if inconclusive."""
+    pane_pid = _tmux(pane_id, "#{pane_pid}")
+    if not pane_pid:
+        return None
+    try:
+        out = subprocess.run(["ps", "-o", "pid=,ppid=,command=", "-ax"],
+                             capture_output=True, text=True, timeout=3).stdout
+    except Exception:
+        return None
+    # Build child lists and walk down from the pane's shell, matching the first
+    # descendant whose command names a known REPL.
+    children: "dict[str, list[tuple[str, str]]]" = {}
+    for line in out.splitlines():
+        parts = line.split(None, 2)
+        if len(parts) < 3:
+            continue
+        pid, ppid, cmd = parts
+        children.setdefault(ppid, []).append((pid, cmd))
+    seen, stack = set(), [pane_pid]
+    while stack:
+        cur = stack.pop()
+        for pid, cmd in children.get(cur, []):
+            if pid in seen:
+                continue
+            seen.add(pid)
+            low = cmd.lower()
+            # word-ish match so a path like /opt/homebrew/bin/codex counts but a
+            # cwd argument mentioning the name does not dominate the decision.
+            if re.search(r"(?:^|/)codex(?:\s|$)", low) or " codex " in f" {low} ":
+                return "codex"
+            if re.search(r"(?:^|/)claude(?:\s|$)", low) or " claude " in f" {low} ":
+                return "claude"
+            stack.append(pid)
+    return None
+
+
 def for_pane(pane_or_cwd: str) -> AgentSource:
-    """Pick the right adapter for a pane id (%N) or a raw cwd. Prefers whichever
-    framework has a live transcript for this cwd; polling only if none does."""
+    """Pick the right adapter for a pane id (%N) or a raw cwd. Chooses by the
+    REPL actually running in the pane; only falls back to transcript-existence
+    when that can't be determined (e.g. a raw cwd with no pane)."""
     if pane_or_cwd.startswith("%"):
         cwd = _tmux(pane_or_cwd, "#{pane_current_path}")
+        repl = _repl_in_pane(pane_or_cwd)
     else:
         cwd = pane_or_cwd
+        repl = None
     cc = ClaudeCodeSource(cwd)
+    cx = CodexSource(cwd)
+    # Authoritative: match the source to the running REPL, even if the OTHER
+    # framework left a stale transcript folder in this worktree.
+    if repl == "codex" and cx.locate():
+        return cx
+    if repl == "claude" and cc.locate():
+        return cc
+    # Inconclusive REPL (raw cwd, or detection failed): fall back to whichever
+    # transcript exists, Claude first (its cwd-keyed lookup is exact).
     if cc.locate():
         return cc
-    cx = CodexSource(cwd)
     if cx.locate():
         return cx
     return PollingSource(pane_or_cwd)
