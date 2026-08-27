@@ -480,3 +480,39 @@ works; there is no non-mutating variant. The rotation had to stop depending on
 positional order.
 
 **File**: `plugins/stt/wake-listener.sh` (`do_window`)
+
+## BUG-037: speak mode narrated the WRONG session, so nothing ever streamed
+
+**Reported**: "it doesn't seem to be streaming chunks as they publish."
+
+**Not a streaming bug.** The running loop on pane `%12` was tailing
+`~/.codex/sessions/2026/08/22/rollout-…jsonl` — a Codex rollout from a
+different project, last written three days earlier. `tail -F` on a file nobody
+writes yields nothing, forever, and looks exactly like a broken pipeline.
+
+**Chain of two faults:**
+
+1. **`ClaudeCodeSource._project_dir()` under-encoded the cwd.** It replaced only
+   `[/.]` with `-`; Claude Code replaces anything outside `[A-Za-z0-9-]`. The
+   pane sat in a worktree named `fix+transient-retry-excludes-deliberate-cancels`
+   — the `+` survived our encoding and the real directory (with `-`) was never
+   found. `locate()` returned None though the transcript existed.
+2. **`CodexSource.locate()` fell back to `files[0]`** — the newest rollout
+   ANYWHERE on the machine — when no rollout matched the cwd. So the failed
+   Claude lookup silently handed the pane an unrelated project's dead session.
+
+**Fixes:**
+- Encode with `[^A-Za-z0-9-] -> '-'`. Verified against three real project dirs
+  including the `+` case; 0 misses.
+- When a cwd is known and no rollout matches it, return None. `files[0]` is now
+  reachable only from the cwd-less `--codex` demo path. A wrong transcript is
+  worse than none: none says so (`run()` prints "no transcript for this target"
+  and exits), a wrong one is indistinguishable from a broken pipeline.
+- Warn at startup when the located transcript is already >10 min cold — the
+  signature of having resolved to the wrong session.
+
+**Verified**: pane `%12` now resolves to its live Claude transcript (written
+0.3 min ago) instead of a 3-day-old Codex rollout; an unknown cwd yields
+`CodexSource.locate() -> None` and degrades to the honest "no transcript" exit.
+
+**File**: `prototype/agent_source.py`, `prototype/speak_loop.py`
