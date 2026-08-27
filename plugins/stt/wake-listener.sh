@@ -768,10 +768,25 @@ do_window() {
     if [[ -n "${SPEAKLOOP_PAUSE_FILE:-}" ]]; then
         local ncur target=""
         ncur="$(tmux display-message -pt "$PANE_ID" '#{window_id}' 2>/dev/null)"
+        # Cycle in PANE-ID order, not the order tmux lists them in.
+        #
+        # `list-panes` returns panes by pane_index — a POSITIONAL list — and the
+        # command-center's focus hook (tmux-cc-focus.sh) promotes whatever you
+        # select into the main slot with `swap-pane`, which exchanges exactly
+        # those positions. So walking the listed order ping-pongs: you move to
+        # index 1, promote swaps it to index 0 and puts the pane you left at
+        # index 1, and the next "window" walks straight back to it. On a
+        # six-agent grid that reached two panes and stranded the other four.
+        #
+        # Pane ids are assigned at creation and never move, so sorting by the
+        # numeric part gives a stable round-robin that swap-pane cannot disturb.
+        # It is also creation order, which is a more meaningful cycle than a
+        # layout order the promote hook is actively rewriting under us.
         local panes=() pp pj=0 pidx=-1
         while IFS= read -r pp; do
             panes+=("$pp"); [[ "$pp" == "$PANE_ID" ]] && pidx=$pj; pj=$((pj + 1))
-        done < <(tmux list-panes -t "$ncur" -F '#{pane_id}' 2>/dev/null)
+        done < <(tmux list-panes -t "$ncur" -F '#{pane_id}' 2>/dev/null \
+                 | sort -t% -k2 -n)
         if (( ${#panes[@]} > 1 && pidx >= 0 )); then
             target="${panes[$(( (pidx + 1) % ${#panes[@]} ))]}"
         fi
@@ -823,7 +838,8 @@ do_window() {
             panes+=("$p")
             [[ "$p" == "$PANE_ID" ]] && idx=$i
             i=$((i + 1))
-        done < <(tmux list-panes -t "$sess:" -F '#{pane_id}' 2>/dev/null)
+        done < <(tmux list-panes -t "$sess:" -F '#{pane_id}' 2>/dev/null \
+                 | sort -t% -k2 -n)   # pane-id order: see the new-loop branch
         if [[ "$idx" -ge 0 && "${#panes[@]}" -gt 1 ]]; then
             target="${panes[$(( (idx + 1) % ${#panes[@]} ))]}"
             tmux select-pane -t "$target" 2>/dev/null || true
