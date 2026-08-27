@@ -326,3 +326,52 @@ So the rule is: `blocked`/`ended` from the hook → authoritative silence (this 
 **Trade-off**: still reads one on-screen string (`esc to interrupt`) as the run indicator, because no reliable hook marks "a turn is actively running." That string is Claude Code's own documented status text and is what `state-tracker.sh` and `state-detector.sh` already key on, so it is the least-fragile screen signal available. Adding a `UserPromptSubmit`→working hook and a fix for `Stop` reliability would let this drop the footer entirely.
 
 **File**: `plugins/tts/stream-watcher.sh` (`hook_state`, `footer_running`, `awaiting_user`, `is_working`), `plugins/claude-state-monitor/hooks/state-tracker.sh`
+
+---
+
+## ADR-012: The recap's starting point is chosen by the LLM, not by counting turns
+
+**Decision**: `turn_context` hands the recap model deliberately MORE history than
+the briefing needs (12 turns / 20k chars), and `RECAP_PROMPT` instructs it to
+find where the current thread of work begins and treat everything earlier as
+background. The code no longer tries to decide which turns are relevant.
+
+**Context**: three consecutive rounds of patching a mechanical anchor, each
+fixing a real bug and each producing the next edge case:
+
+1. **BUG-034**: anchored on the second-to-last request (`max_turns=2`), so the
+   briefing opened on the previous question. Also: injected records (skill
+   loads, peer messages) counted as requests and became false anchors; and
+   `CodexSource` had no `recent_events` at all, so Codex panes recapped the
+   entire tail. Fixed → `max_turns=1`.
+2. **BUG-035**: one turn cannot say how you got here. Raised to 3, and found the
+   budget rule kept the HEAD, so with several turns it truncated away the NEWEST
+   turn — the single line that produced both halves of the original complaint.
+3. **This**: any fixed N is wrong the moment a task spans more or fewer
+   exchanges than N. A task that ran 8 turns gets cut at 3; a fresh question
+   drags in 2 turns of finished work.
+
+**The insight (Aaron)**: "we can handle this with the LLM interpretation step.
+We pass it more than it needs, and tell the LLM to find where the story starts."
+Where a thread of work begins is a **semantic** boundary, not a positional one.
+Counting turns approximates it and will keep approximating it wrongly.
+
+**Why it is affordable**: measured on this pipeline, `claude -p` wall clock is
+dominated by process start-up, not input size — a finding that held across three
+separate measurements. Widening 5,766 → 18,563 chars (3 → 8 requests) cost
+**+1.1s** (5.68s → 6.78s median). Verified the model actually uses the
+instruction: given eight requests of history it briefed only the current thread
+and compressed the three earlier ones into a single clause of background.
+
+**What remains mechanical, deliberately**: the window still has a hard ceiling
+(an unbounded transcript is not passable), and the newest-first budget rule from
+BUG-035 still governs what gets shed. At this window size that rule is a safety
+net rather than the primary mechanism, but it must keep existing and must keep
+shedding oldest-first.
+
+**Trade-off**: more tokens per recap, on the owner's Claude Code subscription
+(see ADR-009 on headless metering). Accepted — the recap runs once per Ctrl+b o
+or "repeat", not per block, and the briefing is materially better.
+
+**File**: `prototype/speak_loop.py` (`RECAP_PROMPT`, `RECAP_TURNS`,
+`RECAP_BUDGET`, `turn_context`)
