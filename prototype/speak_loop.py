@@ -80,10 +80,10 @@ RECAP_PROMPT = (
     "and the coding agent's replies marked 'Agent:'. Give them a spoken briefing "
     "in natural spoken English that genuinely orients them.\n"
     "Lead with where things stand RIGHT NOW — the current status and what it is "
-    "waiting on. Then, only if it still matters, what was asked and what the "
-    "agent actually did.\n"
+    "waiting on. The earlier turns are there so you can say how it got here; use "
+    "them for that, briefly, and do not re-narrate them.\n"
     "Speakable prose only: no markdown, no lists, no file paths or code. "
-    "Two to four sentences. Open with the substance — no 'here is' and no "
+    "Two to five sentences. Open with the substance — no 'here is' and no "
     "restating the question.\n"
     "Make the FIRST sentence short — under fifteen words — and put the status "
     "in it. It is synthesized and played before the rest, so a long opening "
@@ -99,8 +99,14 @@ RECAP_PROMPT = (
 # nothing and reads worse. Left on sonnet deliberately; the latency win came
 # from the synth ramp and the shorter context instead (see FIRST_CHARS).
 RECAP_MODEL = os.environ.get("SPEAKLOOP_RECAP_MODEL", "sonnet")
-# How many request/response turns the recap anchors on. One = "where are we".
-RECAP_TURNS = max(1, int(os.environ.get("SPEAKLOOP_RECAP_TURNS", "1")))
+# How many request/response turns the recap covers. Several, not one: a briefing
+# that only sees the current exchange cannot say how you got here, and the thing
+# that made the old recap start "way before we want it to" was never the turn
+# count — it was false anchors (injected records counted as requests) plus a
+# budget that truncated the NEWEST turn away. Both are fixed, so a wider window
+# is cheap: measured, `claude -p` wall clock is dominated by process start-up,
+# not by input size, so three turns costs roughly what one did.
+RECAP_TURNS = max(1, int(os.environ.get("SPEAKLOOP_RECAP_TURNS", "3")))
 _PREAMBLE = re.compile(
     r"\A\s*(?:sure[,!.]?\s*)?(?:here(?:'s| is)?\b[^\n:]{0,40}:|narration:)\s*", re.I)
 _SENT = re.compile(r"(.+?[.!?])(?:\s+|\Z)", re.S)
@@ -528,21 +534,53 @@ def run(args) -> None:
                 audio_q.put((p, c))   # carry the text so the player can publish
                                       # it for the mic self-echo guard
 
-    def turn_context(max_turns: int = RECAP_TURNS, budget: int = 4000) -> str:
+    def _render_turn(turn, per_agent: int, cap: int | None = None) -> str:
+        """One request/response turn as 'You: …' / 'Agent: …'.
+
+        When `cap` is set and the turn is over it, agent blocks are dropped from
+        the FRONT — the user's request and the agent's most recent work are what
+        a "where are we" briefing needs; the middle of a long turn is the part
+        that can go.
+        """
+        user = [t for r, t in turn if r == "user"]
+        agent = [t if len(t) <= per_agent else t[:per_agent] + " …"
+                 for r, t in turn if r == "agent"]
+        head = ["You: " + u for u in user]
+        if cap is not None:
+            used = sum(len(h) + 2 for h in head)
+            kept: list[str] = []
+            for t in reversed(agent):          # newest agent block first
+                line = "Agent: " + t
+                if kept and used + len(line) > cap:
+                    break
+                kept.append(line)
+                used += len(line) + 2
+            agent_lines = list(reversed(kept))
+        else:
+            agent_lines = ["Agent: " + t for t in agent]
+        return "\n\n".join(head + agent_lines)
+
+    def turn_context(max_turns: int = RECAP_TURNS, budget: int = 6000) -> str:
         """The last `max_turns` request/response turns, formatted 'You:'/'Agent:'
         so the recap can anchor on what was actually asked — not just a tail of
         the agent's last few blocks (which is how the recap 'just sucked').
 
-        ONE turn by default, not two. "Repeat" means "get me up to speed on where
-        we are now"; anchoring on the second-to-last request opened the briefing
-        on the PREVIOUS question and made the listener wait through it to reach
-        the thing they asked about. Two turns is still available via
-        SPEAKLOOP_RECAP_TURNS for the rare "how did we get here".
+        SEVERAL turns, but the newest one is never the part that gets cut. The
+        previous version selected a window and then truncated it with `s[:budget]`
+        — keeping the HEAD to protect the anchoring 'You:'. With more than one
+        turn in the window that is backwards: the head is the OLDEST request, so
+        the text being dropped off the end was the agent's most recent work. That
+        is what "repeat isn't capturing the most recent AI turn" was, and it also
+        explains why it felt like it "started way before we want it to" — you got
+        the previous question in full and the current one cut off.
 
-        Agent turns can be enormous (Codex especially), so a naive tail-truncation
-        drops the leading 'You:' and loses the anchor. Instead, keep every user
-        prompt in full and cap each agent block, so the recap always sees what was
-        asked plus a representative slice of what the agent did."""
+        So budget is now spent newest-first: render the latest turn complete, then
+        add older turns while they fit, then put them back in order. Older context
+        is the optional part, which is what it should have been all along.
+
+        Agent turns can also be enormous (Codex especially), so each agent block
+        is capped individually and user prompts are always kept in full.
+        """
         try:
             events = src.recent_events(800)
         except Exception:
@@ -550,18 +588,30 @@ def run(args) -> None:
         if not events:
             return ""
         ui = [i for i, (r, _) in enumerate(events) if r == "user"]
-        start = ui[-max_turns] if len(ui) >= max_turns else (ui[0] if ui else 0)
-        sel = events[start:]
         per_agent = 1400          # cap each agent block; user prompts kept in full
-        parts = []
-        for r, t in sel:
-            if r == "user":
-                parts.append("You: " + t)
-            else:
-                parts.append("Agent: " + (t if len(t) <= per_agent else t[:per_agent] + " …"))
-        s = "\n\n".join(parts)
-        # Final safety cap, but keep the HEAD (the anchoring 'You:'), not the tail.
-        return s if len(s) <= budget else s[:budget] + " …"
+        if not ui:
+            # No anchor at all (a source with no reachable prompts): fall back to
+            # the most recent agent blocks rather than the oldest ones in the tail.
+            return _render_turn([("agent", t) for _, t in events], per_agent,
+                                cap=budget)
+
+        starts = ui[-max_turns:]
+        turns = []
+        for k, st in enumerate(starts):
+            end = starts[k + 1] if k + 1 < len(starts) else len(events)
+            turns.append(events[st:end])
+
+        kept, used = [], 0
+        for i, turn in enumerate(reversed(turns)):
+            # The newest turn is rendered first and is never dropped; if it alone
+            # exceeds the budget it is capped internally instead of discarded.
+            block = _render_turn(turn, per_agent,
+                                 cap=budget if i == 0 else None)
+            if kept and used + len(block) > budget:
+                break                      # older turns are the optional part
+            kept.append(block)
+            used += len(block) + 2
+        return "\n\n".join(reversed(kept))
 
     def enqueue_prio(text: str, marker: str):
         for c in synth_chunks(despeak(text)):
