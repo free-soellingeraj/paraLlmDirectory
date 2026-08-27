@@ -443,3 +443,40 @@ asking for 3 fit 2 within 6000 chars because the third had 19 agent blocks —
 that is the intended degradation, oldest-first.
 
 **File**: `prototype/speak_loop.py` (`turn_context`, `_render_turn`)
+
+## BUG-036: "window" ping-ponged between two panes, stranding the rest
+
+**Reported**: "because of the way that we're rotating tmux screens to make the
+selected one big is causing the window command to cycle between 2 windows."
+
+**Cause — two features that are each correct and together are not**:
+- `do_window` picked the next pane by walking `tmux list-panes`, which returns
+  panes in **pane_index** order: a POSITIONAL list.
+- `tmux-cc-focus.sh promote` (the command-center's "focused agent gets the big
+  main pane" hook) implements promotion with `swap-pane -d -s <active> -t
+  <index 0>` — which exchanges exactly those positions.
+
+So every hand-off rewrote the ordering the next hand-off was about to read.
+Move to index 1, promote swaps it to index 0 and puts the pane you left at
+index 1, and the next "window" walks straight back into it.
+
+**Measured on the live six-pane grid** (`%13` main, then `%20 %21 %12 %10 %11`),
+simulated over 8 hops:
+- before: `%13 -> %20 -> %13 -> %20 -> …` — **2 of 6 panes reachable**
+- after:  `%13 -> %20 -> %21 -> %10 -> %11 -> %12 -> %13 -> …` — **6 of 6**
+
+Confirmed independently: `list-panes` output for that window changed between two
+reads seconds apart (`%13 %20 %21 %12 %10 %11` -> `%12 %20 %21 %13 %10 %11`)
+with no user action — the promote hook shuffling positions underneath.
+
+**Fix**: cycle in **pane-id order** (`sort -t% -k2 -n`), not list order. Pane ids
+are assigned at creation and never move, so `swap-pane` cannot disturb the
+sequence. It is also creation order, which is a more meaningful cycle than a
+layout order the promote hook is actively rewriting. Applied to both cycle sites
+in `do_window` (the speak-loop branch and the legacy single-window fallback).
+
+**Not fixed by changing promote**: `swap-pane` is how `main-vertical` promotion
+works; there is no non-mutating variant. The rotation had to stop depending on
+positional order.
+
+**File**: `plugins/stt/wake-listener.sh` (`do_window`)
