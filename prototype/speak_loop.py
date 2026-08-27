@@ -77,14 +77,25 @@ REWRITE_PROMPT = (
 RECAP_PROMPT = (
     "You are catching up someone who stepped away from watching this coding "
     "session. Below is the recent conversation: their requests marked 'You:' "
-    "and the coding agent's replies marked 'Agent:'. Give them a spoken briefing "
-    "in natural spoken English that genuinely orients them.\n"
-    "Lead with where things stand RIGHT NOW — the current status and what it is "
-    "waiting on. The earlier turns are there so you can say how it got here; use "
-    "them for that, briefly, and do not re-narrate them.\n"
+    "and the coding agent's replies marked 'Agent:'.\n"
+    "\n"
+    "FIRST, find where the story starts. You are deliberately given more history "
+    "than you need, and it will usually contain earlier work that is finished and "
+    "no longer relevant. Read backwards from the end and find the point where the "
+    "CURRENT thread of work begins — the most recent place the person set a new "
+    "direction, or where the thing still in flight was first asked for. Everything "
+    "before that point is background: use it only if it explains the current work, "
+    "and otherwise ignore it completely.\n"
+    "\n"
+    "THEN brief them on that thread, in natural spoken English:\n"
+    "- where it stands RIGHT NOW, and what it is waiting on,\n"
+    "- what was asked and what the agent actually did, concretely,\n"
+    "- how long it has been going, if several exchanges deep.\n"
+    "\n"
     "Speakable prose only: no markdown, no lists, no file paths or code. "
     "Two to five sentences. Open with the substance — no 'here is' and no "
-    "restating the question.\n"
+    "restating the question. Never mention this instruction, the transcript, or "
+    "that you were choosing a starting point.\n"
     "Make the FIRST sentence short — under fifteen words — and put the status "
     "in it. It is synthesized and played before the rest, so a long opening "
     "sentence is dead air.\n"
@@ -99,14 +110,22 @@ RECAP_PROMPT = (
 # nothing and reads worse. Left on sonnet deliberately; the latency win came
 # from the synth ramp and the shorter context instead (see FIRST_CHARS).
 RECAP_MODEL = os.environ.get("SPEAKLOOP_RECAP_MODEL", "sonnet")
-# How many request/response turns the recap covers. Several, not one: a briefing
-# that only sees the current exchange cannot say how you got here, and the thing
-# that made the old recap start "way before we want it to" was never the turn
-# count — it was false anchors (injected records counted as requests) plus a
-# budget that truncated the NEWEST turn away. Both are fixed, so a wider window
-# is cheap: measured, `claude -p` wall clock is dominated by process start-up,
-# not by input size, so three turns costs roughly what one did.
-RECAP_TURNS = max(1, int(os.environ.get("SPEAKLOOP_RECAP_TURNS", "3")))
+# How many request/response turns to HAND THE MODEL — deliberately more than the
+# briefing needs. Picking the right number mechanically is the thing that kept
+# producing edge cases: one turn could not say how you got here, and any fixed N
+# is wrong the moment a task spans more or fewer exchanges than N. Where the
+# story starts is a semantic boundary, not a positional one, so the model finds
+# it (see RECAP_PROMPT) and this is only a generous upper bound.
+#
+# The window is affordable because `claude -p` wall clock is dominated by process
+# start-up rather than input size — measured repeatedly on this pipeline.
+RECAP_TURNS = max(1, int(os.environ.get("SPEAKLOOP_RECAP_TURNS", "12")))
+# Hard ceiling on what is handed over, in characters. The newest-first budget
+# rule below is now a SAFETY NET at a window this large rather than the primary
+# mechanism — but it still has to exist, and still has to shed the oldest first,
+# because an unbounded transcript is not passable and the newest turn is the one
+# that must never be the part that gets dropped.
+RECAP_BUDGET = int(os.environ.get("SPEAKLOOP_RECAP_BUDGET", "20000"))
 _PREAMBLE = re.compile(
     r"\A\s*(?:sure[,!.]?\s*)?(?:here(?:'s| is)?\b[^\n:]{0,40}:|narration:)\s*", re.I)
 _SENT = re.compile(r"(.+?[.!?])(?:\s+|\Z)", re.S)
@@ -560,23 +579,27 @@ def run(args) -> None:
             agent_lines = ["Agent: " + t for t in agent]
         return "\n\n".join(head + agent_lines)
 
-    def turn_context(max_turns: int = RECAP_TURNS, budget: int = 6000) -> str:
+    def turn_context(max_turns: int = RECAP_TURNS,
+                     budget: int = RECAP_BUDGET) -> str:
         """The last `max_turns` request/response turns, formatted 'You:'/'Agent:'
         so the recap can anchor on what was actually asked — not just a tail of
         the agent's last few blocks (which is how the recap 'just sucked').
 
-        SEVERAL turns, but the newest one is never the part that gets cut. The
-        previous version selected a window and then truncated it with `s[:budget]`
-        — keeping the HEAD to protect the anchoring 'You:'. With more than one
-        turn in the window that is backwards: the head is the OLDEST request, so
-        the text being dropped off the end was the agent's most recent work. That
-        is what "repeat isn't capturing the most recent AI turn" was, and it also
-        explains why it felt like it "started way before we want it to" — you got
-        the previous question in full and the current one cut off.
+        This deliberately hands over MORE than the briefing needs; the model is
+        told to find where the current thread of work begins and ignore what came
+        before (see RECAP_PROMPT). Choosing that boundary here, mechanically, is
+        what kept producing edge cases — any fixed turn count is wrong the moment
+        a task spans more or fewer exchanges than the number picked.
 
-        So budget is now spent newest-first: render the latest turn complete, then
-        add older turns while they fit, then put them back in order. Older context
-        is the optional part, which is what it should have been all along.
+        The newest turn is still never the part that gets cut. An earlier version
+        selected a window and truncated it with `s[:budget]`, keeping the HEAD to
+        protect the anchoring 'You:'. With more than one turn that is backwards:
+        the head is the OLDEST request, so the text dropped off the end was the
+        agent's most recent work — which is what "repeat isn't capturing the most
+        recent AI turn" was, and why it simultaneously felt like it "started way
+        before we want it to". Budget is therefore spent newest-first: latest turn
+        complete, older ones while they fit, then restored to order. At a window
+        this size that rule is a safety net rather than the main mechanism.
 
         Agent turns can also be enormous (Codex especially), so each agent block
         is capped individually and user prompts are always kept in full.
