@@ -408,3 +408,38 @@ deliberately detached and otherwise talks over the pane you just switched to.
 
 **Files**: `prototype/speak_loop.py`, `prototype/agent_source.py`,
 `prototype/toggle-speak.sh`
+
+## BUG-035: the recap budget truncated away the NEWEST turn
+
+**Reported**: "on 'repeat' it does need to go back several turns" — a refinement
+of BUG-034, which had over-corrected to a single turn.
+
+**Cause**: `turn_context` selected a window and then capped it with
+`s[:budget] + " …"`, keeping the HEAD. The intent (comment: "keep the HEAD (the
+anchoring 'You:'), not the tail") was to protect the anchor, and with ONE turn
+that is right. With several turns it is backwards: the head is the OLDEST
+request, so the text dropped off the end was the agent's most recent work.
+
+That single line explains both halves of the original report — you got the
+previous question in full and the current one cut off, which reads as both
+"starts way before we want it to" AND "isn't capturing the most recent AI turn".
+
+**Fix**: budget is spent newest-first. Group the window into turns, render the
+latest one complete (capped internally if it alone exceeds budget, shedding
+agent blocks from the FRONT so the request and the latest work survive), then
+add older turns while they fit, then restore chronological order. Older context
+is the optional part. `RECAP_TURNS` default 1 -> 3.
+
+**Demonstrated** on a synthetic 4-turn transcript, budget 3000:
+- old: 3002 chars, most recent turn **absent**
+- new: 1965 chars, most recent turn **present**, older turns shed instead
+
+**Cost of the wider window**: measured 12.46s to first word at 3 turns vs 11.86s
+at 1 — 0.6s for 3x the context. Consistent with BUG-034's finding that
+`claude -p` wall clock is dominated by process start-up, not input size.
+
+**Note**: the effective turn count is budget-bound. On a live transcript,
+asking for 3 fit 2 within 6000 chars because the third had 19 agent blocks —
+that is the intended degradation, oldest-first.
+
+**File**: `prototype/speak_loop.py` (`turn_context`, `_render_turn`)
