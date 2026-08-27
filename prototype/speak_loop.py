@@ -78,20 +78,29 @@ RECAP_PROMPT = (
     "You are catching up someone who stepped away from watching this coding "
     "session. Below is the recent conversation: their requests marked 'You:' "
     "and the coding agent's replies marked 'Agent:'. Give them a spoken briefing "
-    "in natural spoken English that genuinely orients them:\n"
-    "- what they asked for,\n"
-    "- what the agent actually did and found (be concrete and specific),\n"
-    "- the current status: done, in progress, or blocked,\n"
-    "- and what's next or what it's waiting on.\n"
+    "in natural spoken English that genuinely orients them.\n"
+    "Lead with where things stand RIGHT NOW — the current status and what it is "
+    "waiting on. Then, only if it still matters, what was asked and what the "
+    "agent actually did.\n"
     "Speakable prose only: no markdown, no lists, no file paths or code. "
-    "Aim for 4 to 8 sentences — enough to genuinely catch them up, not a "
-    "transcript. Output ONLY the briefing.\n\n"
+    "Two to four sentences. Open with the substance — no 'here is' and no "
+    "restating the question.\n"
+    "Make the FIRST sentence short — under fifteen words — and put the status "
+    "in it. It is synthesized and played before the rest, so a long opening "
+    "sentence is dead air.\n"
+    "Output ONLY the briefing.\n\n"
     "Conversation:\n"
 )
-# The recap runs once per Ctrl+b o / "repeat", so it can afford a stronger model
-# than the per-chunk stream rewrite (haiku). Sonnet gives a markedly better
-# briefing at the same ~9s latency.
+# The recap is on the critical path for time-to-first-word, so the obvious move
+# is a smaller model. MEASURED, and it is the wrong move: on the same one-turn
+# context, 3 runs each, haiku's median was 8.92s against sonnet's 6.96s — and
+# sonnet returned MORE briefing per call. The wall clock here is dominated by
+# `claude -p` process start-up, not by inference, so a cheaper model buys
+# nothing and reads worse. Left on sonnet deliberately; the latency win came
+# from the synth ramp and the shorter context instead (see FIRST_CHARS).
 RECAP_MODEL = os.environ.get("SPEAKLOOP_RECAP_MODEL", "sonnet")
+# How many request/response turns the recap anchors on. One = "where are we".
+RECAP_TURNS = max(1, int(os.environ.get("SPEAKLOOP_RECAP_TURNS", "1")))
 _PREAMBLE = re.compile(
     r"\A\s*(?:sure[,!.]?\s*)?(?:here(?:'s| is)?\b[^\n:]{0,40}:|narration:)\s*", re.I)
 _SENT = re.compile(r"(.+?[.!?])(?:\s+|\Z)", re.S)
@@ -176,6 +185,9 @@ def sentences(text: str):
 # fixed per-call overhead, so one call per ~1KB (≈20s of audio) amortizes it;
 # per-sentence synth pays that 5s on every 2-4s sentence and stutters.
 SYNTH_CHARS = int(os.environ.get("SPEAKLOOP_SYNTH_CHARS", "1100"))
+# The opening chunk is deliberately small so audio starts in ~2s instead of ~9s.
+# 0 disables the ramp and every chunk is SYNTH_CHARS.
+FIRST_CHARS = int(os.environ.get("SPEAKLOOP_FIRST_CHUNK_CHARS", "240"))
 # How many blocks to rewrite in parallel. A single `claude -p` is ~20s; 2 in
 # flight halves effective latency so short blocks don't drain the buffer.
 REWRITE_WORKERS = max(1, int(os.environ.get("SPEAKLOOP_REWRITE_WORKERS", "2")))
@@ -187,18 +199,59 @@ _CODEY = re.compile(
     r"|=>|::|\$\(|\bdef\b|\bclass\b|\bnpm\b|\bgit\b|\bsudo\b", re.I)
 
 
-def synth_chunks(narr: str, target: int = SYNTH_CHARS):
-    """Pack whole sentences into ~target-char chunks for one synth call each."""
+def synth_chunks(narr: str, target: int = SYNTH_CHARS, first: int = FIRST_CHARS):
+    """Pack whole sentences into chunks — a SMALL first one, then ~target-sized.
+
+    Time-to-first-word was the whole latency complaint. edge-tts has ~5s of fixed
+    overhead and then generates roughly in proportion to length, so a 1100-char
+    opening chunk means ~8-10s of silence before anything plays, even though the
+    text was ready. Cutting the FIRST chunk to about a sentence gets audio out in
+    ~2s; the remaining chunks stay large so the 5s overhead still amortises and
+    playback does not stutter. The player is already sequential, so the big
+    chunks synthesize while the short one is being spoken.
+    """
     out, buf = [], ""
+    limit = first if first > 0 else target
     for s in sentences(narr):
-        if buf and len(buf) + len(s) + 1 > target:
+        if buf and len(buf) + len(s) + 1 > limit:
             out.append(buf)
             buf = s
+            limit = target          # only the opening chunk is short
         else:
             buf = (buf + " " + s).strip()
     if buf:
         out.append(buf)
+    # Sentence boundaries alone do not bound the opening chunk: a model that
+    # writes one 360-character sentence hands the ramp nothing to cut on, and
+    # time-to-first-word goes straight back to ~12s (measured). So if the lead
+    # is still long, break it at a CLAUSE boundary — the pause is natural, and
+    # the remainder simply becomes the next chunk.
+    if first > 0 and out and len(out[0]) > first:
+        head, tail = _split_lead(out[0], first)
+        if head:
+            out = [head] + ([tail] if tail else []) + out[1:]
     return out
+
+
+_CLAUSE = re.compile(r"[,;:]\s|\s[—–-]\s")
+
+
+def _split_lead(text: str, limit: int):
+    """Cut an over-long opening chunk at the last clause break before `limit`.
+
+    Returns (head, tail); (None, None) when there is no defensible break, in
+    which case the caller keeps the long chunk rather than slicing mid-phrase —
+    a cut in the wrong place is worse to listen to than a slower start.
+    """
+    window = text[:limit]
+    cuts = [m.end() for m in _CLAUSE.finditer(window)]
+    if not cuts:
+        return None, None
+    i = cuts[-1]
+    head, tail = text[:i].strip(), text[i:].strip()
+    if len(head) < 40 or not tail:      # too short to be worth a chunk of its own
+        return None, None
+    return head, tail
 
 
 # Speaking rate. edge-tts wants a percentage like "+25%" (faster) / "-10%"
@@ -359,6 +412,8 @@ def run(args) -> None:
     prio_q: "queue.Queue" = queue.Queue()   # recap audio, played before narration
     stop = threading.Event()
     speaking = threading.Event()   # true while the narration player has afplay live
+    interrupt = threading.Event()  # set by cancel_speech(): stop the in-flight
+                                   # chunk at once. The player clears it.
     preparing = threading.Event()  # true while the loop is generating/synthesizing
                                    # a recap or replay — the agent may be idle, but
                                    # WE are working, so the heartbeat should tick
@@ -473,10 +528,16 @@ def run(args) -> None:
                 audio_q.put((p, c))   # carry the text so the player can publish
                                       # it for the mic self-echo guard
 
-    def turn_context(max_turns: int = 2, budget: int = 6000) -> str:
+    def turn_context(max_turns: int = RECAP_TURNS, budget: int = 4000) -> str:
         """The last `max_turns` request/response turns, formatted 'You:'/'Agent:'
         so the recap can anchor on what was actually asked — not just a tail of
         the agent's last few blocks (which is how the recap 'just sucked').
+
+        ONE turn by default, not two. "Repeat" means "get me up to speed on where
+        we are now"; anchoring on the second-to-last request opened the briefing
+        on the PREVIOUS question and made the listener wait through it to reach
+        the thing they asked about. Two turns is still available via
+        SPEAKLOOP_RECAP_TURNS for the rare "how did we get here".
 
         Agent turns can be enormous (Codex especially), so a naive tail-truncation
         drops the leading 'You:' and loses the anchor. Instead, keep every user
@@ -513,6 +574,22 @@ def run(args) -> None:
             if a:
                 prio_q.put((a, c))
 
+    def cancel_speech():
+        """Stop talking NOW and drop everything queued.
+
+        "Repeat" means "get me up to speed on where we are, now". Queueing a
+        fresh recap behind narration that is already playing — or behind a recap
+        the previous Ctrl+b o started — makes the listener sit through stale
+        audio to reach the thing they just asked for. So a repeat preempts:
+        interrupt the current chunk, bin both queues, then build the new one.
+        Draining BEFORE synthesis is what keeps the new recap from being eaten
+        by its own flush.
+        """
+        interrupt.set()
+        n = drain(prio_q) + drain(audio_q)
+        if n:
+            print(f"  ✂ cancelled {n} queued chunk(s)", file=sys.stderr)
+
     def controller():
         # Voice-command channels that produce priority (jump-the-queue) audio:
         #   repeat -> spoken "where things stand" recap of the recent transcript
@@ -523,12 +600,17 @@ def run(args) -> None:
                     repeat_file.unlink()
                 except OSError:
                     pass
-                preparing.set()   # keep the heartbeat ticking through the ~9s
-                try:              # LLM + first synth so start isn't dead silence
+                cancel_speech()   # preempt: a recap is always about NOW
+                preparing.set()   # keep the heartbeat ticking through the LLM
+                try:              # + first synth so the wait isn't dead silence
                     ctx = turn_context()
                     if ctx:
                         print("  ⟳ recap requested", file=sys.stderr)
-                        narr = recap(ctx, RECAP_MODEL, timeout=60) or recap(ctx, RECAP_MODEL, timeout=90)
+                        # Shorter than the old 60/90. On one turn of context a
+                        # haiku recap lands in ~2-3s; a 60s first attempt only
+                        # meant a stall cost 150s before you heard the failure.
+                        narr = recap(ctx, RECAP_MODEL, timeout=25) \
+                            or recap(ctx, RECAP_MODEL, timeout=40)
                         if narr:
                             enqueue_prio(narr, "⟳")
                         else:
@@ -540,6 +622,7 @@ def run(args) -> None:
                     replay_file.unlink()
                 except OSError:
                     pass
+                cancel_speech()          # same preempt rule as repeat
                 preparing.set()
                 try:
                     if last_narr[0]:
@@ -586,6 +669,9 @@ def run(args) -> None:
 
     def player():
         while not stop.is_set():
+            # A cancel that arrived while nothing was playing still has to be
+            # consumed, or it would kill the very chunk it made room for.
+            interrupt.clear()
             while pause_file.exists() and not stop.is_set():
                 time.sleep(0.12)
             # "forward": drop the pending narration so we jump to the latest.
@@ -618,8 +704,9 @@ def run(args) -> None:
                                         stderr=subprocess.DEVNULL)
                 last_touch = 0.0
                 while proc.poll() is None:
-                    if stop.is_set() or pause_file.exists() or skip_file.exists():
-                        proc.terminate()   # interrupt current chunk on pause/skip
+                    if (stop.is_set() or pause_file.exists()
+                            or skip_file.exists() or interrupt.is_set()):
+                        proc.terminate()   # interrupt current chunk on pause/skip/cancel
                         break
                     now = time.time()
                     if now - last_touch > 0.4:

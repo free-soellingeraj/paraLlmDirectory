@@ -355,3 +355,56 @@ When fixing bugs, document:
 2. Steps to reproduce
 3. The actual vs expected behavior
 4. Any related issues or PRs
+
+## BUG-034: "repeat" recapped from far too early, and was slow to speak
+
+**Reported**: "the repeat function is not accurately capturing the most recent AI
+turn, so it ends up starting way before we want it to" + "the spoken voice TTS
+is really slow".
+
+**Three independent causes**, all confirmed against real transcripts:
+
+1. **`turn_context(max_turns=2)`** anchored on the SECOND-to-last user message,
+   so every recap opened on the previous question. Measured on a live session:
+   `turns=2` opened with "You: is this PR"; `turns=1` opened with the request
+   actually being asked about. Default is now 1 (`SPEAKLOOP_RECAP_TURNS`).
+
+2. **`_SYS_USER` only matched tags at the START of the text**, so two common
+   machine-injected `user` records counted as real requests and became false
+   anchors: skill injections ("Base directory for this skill: …") and peer
+   messages ("Another Claude session sent a message: <cross-session-message…").
+   On one live transcript this inflated 6 genuine requests to 11. Now matched
+   anywhere in the opening stretch, plus by name.
+
+3. **`CodexSource` never overrode `recent_events`** — it inherited the base
+   implementation, which returns agent text ONLY. With zero `user` rows the
+   anchor fell to index 0 and the recap covered the entire 800-record tail.
+   Claude panes had a turn-aware recap; Codex panes never did. Fixed with a
+   Codex `recent_events` that interleaves user turns and filters Codex's own
+   injected preambles (AGENTS.md block, `<INSTRUCTIONS>`, environment context).
+
+**Latency** — measured, not estimated. Time-to-first-word went 28.24s → 11.86s:
+- The opening synth chunk was ~1100 chars. edge-tts is roughly LINEAR in length,
+  not "5s fixed overhead", so the lead cost ~19.6s. `SPEAKLOOP_FIRST_CHUNK_CHARS`
+  (240) makes only the FIRST chunk short; later chunks stay large so the
+  per-call overhead still amortises and they synthesize while the lead plays.
+- Sentence boundaries alone don't bound the lead — a single 360-char opening
+  sentence defeated the ramp entirely. `_split_lead` cuts at the last clause
+  break before the limit, and returns nothing when there is no defensible break
+  (a cut mid-phrase is worse to listen to than a slower start).
+- Recap timeouts 60/90 → 25/40: a stall used to cost 150s before you heard it.
+
+**A measured non-fix**: switching `RECAP_MODEL` to haiku for speed is a
+regression. Same context, 3 runs each — haiku median 8.92s, sonnet 6.96s, and
+sonnet returned more briefing. The wall clock is dominated by `claude -p`
+process start-up, not inference, so a cheaper model buys nothing and reads
+worse. Left on sonnet deliberately.
+
+**Cancel-on-request**: "repeat"/"rewind" now preempt instead of queueing behind
+whatever is playing — `cancel_speech()` interrupts the in-flight chunk and drains
+both queues before synthesising, so a recap is always about NOW. `Ctrl+b o`
+teardown also `pkill -x say`, because the "window" hand-off announcement is
+deliberately detached and otherwise talks over the pane you just switched to.
+
+**Files**: `prototype/speak_loop.py`, `prototype/agent_source.py`,
+`prototype/toggle-speak.sh`
