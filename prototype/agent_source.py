@@ -67,9 +67,37 @@ class AgentSource(ABC):
     # System-injected "user" records — task-completion notifications, slash
     # command echoes, hook output — are not things the person typed. A recap
     # must anchor on REAL requests, so these are skipped when building turns.
+    # Two shapes leak past a "starts with <tag>" test, and both were observed
+    # anchoring a recap on something the person never said:
+    #   "Base directory for this skill: /private/tmp/.../claude-api  ## ..."
+    #   "Another Claude session sent a message: <cross-session-message from=..."
+    # Neither begins with a tag — they begin with prose — so the recap opened on
+    # a skill dump or another session's chatter instead of the real request.
+    # Hence: match a known tag ANYWHERE in the opening stretch, plus the two
+    # prose preambles by name.
     _SYS_USER = re.compile(
-        r"^\s*<(?:task-notification|command-name|command-message|command-args|"
-        r"local-command|system-reminder|user-prompt-submit-hook)", re.I)
+        r"^\s*(?:"
+        r"<(?:task-notification|command-name|command-message|command-args|"
+        r"local-command|system-reminder|user-prompt-submit-hook|"
+        r"cross-session-message)"
+        r"|Base directory for this skill:"
+        r"|Another Claude session sent a message"
+        r"|Caveat: The messages below were generated"
+        r")", re.I)
+    _SYS_USER_ANYWHERE = re.compile(
+        r"<(?:task-notification|cross-session-message|local-command|"
+        r"user-prompt-submit-hook)\b", re.I)
+
+    @classmethod
+    def _is_system_user(cls, txt: str) -> bool:
+        """True when a `user` record is machine-injected, not typed by a person.
+
+        Checked against the head of the text as well as the start: a peer message
+        or a task notification can arrive with a sentence of framing in front of
+        it, and an anchor is only useful if it lands on a REAL request.
+        """
+        return bool(cls._SYS_USER.match(txt)
+                    or cls._SYS_USER_ANYWHERE.search(txt[:400]))
 
     def recent_events(self, n: int = 800) -> "list[tuple[str, str]]":
         """Recent (role, text) events in order — for a turn-aware catch-up recap
@@ -160,7 +188,7 @@ class ClaudeCodeSource(AgentSource):
                 else:
                     txt = ""
                 txt = " ".join(txt.split())
-                if txt and not self._SYS_USER.match(txt):   # skip tool_results + system injections
+                if txt and not self._is_system_user(txt):   # skip tool_results + system injections
                     ev.append(("user", txt))
         return ev
 
@@ -199,6 +227,16 @@ class CodexSource(AgentSource):
         for c in (p.get("content") or []):
             if isinstance(c, dict) and c.get("type") in ("output_text", "text") and (c.get("text") or "").strip():
                 yield TextChunk(c["text"].strip(), o.get("timestamp", ""), self.name)
+
+    # Codex injects its own preambles as `user` records. The XML-ish ones
+    # (<environment_context>, <turn_aborted>, …) are caught by the leading-"<"
+    # test below, but the AGENTS.md block it is handed at session start opens
+    # with "# AGENTS.md instructions for /Users/…" — prose, not a tag — and was
+    # counting as a real request. Same rule as ClaudeCodeSource: an anchor is
+    # only useful when it lands on something a person actually typed.
+    _CODEX_SYS_USER = re.compile(
+        r"^\s*(?:<(?:INSTRUCTIONS|environment_context|user_instructions)"
+        r"|#\s*AGENTS\.md instructions for)", re.I)
 
     def recent_events(self, n: int = 800) -> "list[tuple[str, str]]":
         """Interleave real user prompts with agent text so the catch-up recap can
@@ -243,7 +281,11 @@ class CodexSource(AgentSource):
                 txt = " ".join(c.get("text", "") for c in (pl.get("content") or [])
                                if isinstance(c, dict) and c.get("type") == "input_text")
                 txt = " ".join(txt.split())
-                if txt and not txt.lstrip().startswith("<"):   # skip <environment_context> etc.
+                # Two filters, not one: the leading "<" catches the XML-ish
+                # injections, _CODEX_SYS_USER catches the AGENTS.md preamble that
+                # opens with "#" and slipped through as a real request.
+                if (txt and not txt.lstrip().startswith("<")
+                        and not self._CODEX_SYS_USER.match(txt)):
                     ev.append(("user", txt))
         return ev
 

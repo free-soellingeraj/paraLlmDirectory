@@ -70,6 +70,13 @@ stop_pane() {
     local w; w="$(cat "$RUN/$safe.wake.pid" 2>/dev/null)"
     [[ -n "$w" ]] && kill -TERM "$w" 2>/dev/null || true
     pkill -f "whisper-stream .*${safe}\.stream" 2>/dev/null || true
+    # The "window" hand-off announces the target with a DETACHED `say` (a
+    # subshell backgrounds it so the outgoing stack's group-kill can't take the
+    # launcher with it). That same detachment means it survives this teardown
+    # and keeps talking over the pane you just switched to — so Ctrl+b o has to
+    # silence it explicitly. Speak mode owns the audio channel by design, so
+    # killing `say` outright is in scope rather than over-broad.
+    pkill -x say 2>/dev/null || true
     rm -f "$RUN/$safe.pid" "$RUN/$safe.wake.pid" "$RUN/$safe.pause" \
           "$RUN/$safe.repeat" "$RUN/$safe.skip" "$RUN/$safe.replay"
     rm -rf "$TTS_DIR/$safe.stream" 2>/dev/null || true
