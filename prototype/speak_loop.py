@@ -45,10 +45,22 @@ import threading
 import time
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from agent_source import for_pane  # noqa: E402
+
+
+def _ts_epoch(ts: str) -> float | None:
+    """Parse a transcript ISO timestamp ('2026-08-13T16:47:26.417Z') to epoch
+    seconds. None if absent/unparseable — callers fail open (speak it)."""
+    if not ts:
+        return None
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+    except (ValueError, AttributeError):
+        return None
 
 REWRITE_PROMPT = (
     "Rewrite the captured coding-agent output below as natural spoken narration "
@@ -295,6 +307,13 @@ def run(args) -> None:
     src = for_pane(args.target)
     loc = src.locate()
     print(f"[source: {src.name}]  {loc}", file=sys.stderr)
+    # Enable moment. Live-follow only speaks blocks written AFTER this, so
+    # pressing Ctrl+b o "just starts listening and plays future messages" — the
+    # block the agent was already finishing as you enabled (whose write can flush
+    # right at start and otherwise leak in, sounding like a recap) is skipped.
+    # --backlog N is an explicit request for history and bypasses this gate.
+    enable_epoch = time.time()
+    only_new = os.environ.get("SPEAKLOOP_ONLY_NEW", "1") != "0"
 
     # Pause channel: while this file exists, hold playback and interrupt the
     # in-flight chunk (the wake-listener touches it for "pause" / dictation so
@@ -355,6 +374,13 @@ def run(args) -> None:
                 for ch in src.follow():
                     if stop.is_set():
                         break
+                    # Skip a block the agent finished writing before enable (its
+                    # append can flush right at start). Fail open if no timestamp.
+                    if only_new and args.backlog == 0:
+                        te = _ts_epoch(getattr(ch, "ts", ""))
+                        if te is not None and te < enable_epoch:
+                            print(f"  ⤼ skip pre-enable block ({ch.ts})", file=sys.stderr)
+                            continue
                     chunk_q.put(ch)
             except Exception as e:
                 print(f"[follow ended: {e}]", file=sys.stderr)
