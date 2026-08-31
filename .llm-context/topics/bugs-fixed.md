@@ -516,3 +516,38 @@ writes yields nothing, forever, and looks exactly like a broken pipeline.
 `CodexSource.locate() -> None` and degrades to the honest "no transcript" exit.
 
 **File**: `prototype/agent_source.py`, `prototype/speak_loop.py`
+
+## BUG-038: "window" stopped announcing which agent you landed on
+
+**Reported**: "when I say the window word, it doesn't announce which window I'm
+in anymore."
+
+**Cause — a regression from BUG-034's `pkill -x say`.** That fix added a `say`
+kill to `stop_pane` so a detached announcement could not keep talking after the
+user pressed Ctrl+b o to turn speak mode OFF. But `stop_pane` has **two callers
+with opposite needs**:
+
+| Caller | Intent | Should kill `say`? |
+|---|---|---|
+| toggle-off (`is_running` -> stop_pane -> exit) | "quiet now" | **yes** |
+| eviction of the previous owner during a `window` hand-off | move narration | **no** |
+
+`do_window` starts the announcement and then launches `toggle-speak.sh` on the
+target, which evicts the old owner — so the kill landed on the announcement that
+had started milliseconds earlier. A 4.36s label was silenced almost instantly.
+
+**Fix**: move `pkill -x say` out of `stop_pane` and into the toggle-off branch
+only. Turning the mode off still silences a `say` mid-word; a hand-off no longer
+kills the cue for the pane you are moving to.
+
+**Verified** by extracting the real `stop_pane` and running the eviction path
+against a live `say`:
+- deployed code (`b13f039`): `survives eviction: NO`
+- this fix: `survives eviction: YES`
+
+**Lesson worth keeping**: a shared teardown helper is the wrong home for a
+"silence everything" action when one of its callers is a hand-off. The check
+that would have caught this is "does every caller of stop_pane want this?" —
+the answer was no, and the second caller was two lines further down the file.
+
+**File**: `prototype/toggle-speak.sh`
