@@ -212,7 +212,8 @@ STT_WAKE_TRANSCRIBE_WORD="transcribe"  # Toggles dictation: say it to start, say
 STT_WAKE_REPEAT_WORD="recap"     # Re-runs the recap. NOT "repeat": the echo guard suppresses any
                                  # command word the narration is currently speaking, and "repeat" is
                                  # common in narration, so it refused to fire when you needed it.
-STT_WAKE_CANCEL_WORD="cancel"    # Stops playback and discards queued audio AND pending synthesis
+STT_WAKE_CANCEL_WORD="cancel"    # Skips the chunk currently playing, continues with the queue
+                                 # ("forward" is the wider one: skip to the latest)
 STT_WAKE_DEBOUNCE_SECS="4"       # Ignore the same command re-said within this many seconds (0 = off).
                                  # Repeats of "window" used to stack hand-offs and race two loops.
 STT_WAKE_SEND_WORD="send"        # Presses Enter in the bound pane

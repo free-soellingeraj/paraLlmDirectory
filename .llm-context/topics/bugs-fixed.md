@@ -626,3 +626,52 @@ a moment later and start talking again.
 
 **File**: `plugins/stt/wake-listener.sh`, `prototype/speak_loop.py`,
 `prototype/toggle-speak.sh`, `install.sh`
+
+## BUG-041: rapid "window" announcements overlapped; ack fired too late
+
+**Reported**: "if I say window rapidly it doesn't cancel, so they overlap each
+other" and "it would reduce the need for a debounce if you played the acceptance
+tone as soon as the voice command was recognized — it does it sometimes, but not
+always."
+
+**Overlapping announcements.** BUG-038 moved `pkill -x say` off the eviction path
+so the announcement for the pane you are moving TO survives. Correct, but it also
+let announcements from EARLIER hand-offs survive: each label is ~4s and rapid
+hand-offs are ~1s apart, so three names talk over each other. Both blunt fixes
+are wrong — killing all `say` silences the new one, killing none lets them stack.
+
+Fixed with a tracked pid in a GLOBAL file (`$TTS_DIR/announce.pid`): each
+hand-off kills the previous announcement before starting its own. Global because
+every hand-off is announced by a DIFFERENT listener process, so the new one needs
+to find the old one's pid. Exactly one label speaks, and it is always the newest
+— the one that describes where you actually are.
+
+**Late acknowledgement.** `ack` fired inside each handler, i.e. AFTER the work:
+instant for a channel-file touch, ~3s for `send` (which waits for the input box
+to settle first). An acknowledgement that sometimes lands and sometimes does not
+is worse than none — you assume it was not heard and say it again, which is what
+made repeats pile up. Moved to the dispatch site: the tone now fires the instant
+a command is recognised, before any handler runs. `send` acks on recognition and
+still plays Hero only on confirmed submission, so it is a two-stage signal.
+
+It also acks a **debounced** command. A swallowed command that made no sound is
+precisely the case that provokes another repeat; the tone says "heard you",
+separately from whether it acted.
+
+**Debounce re-tuned** now that feedback is immediate — it is protection against
+duplicated work, not a general input filter:
+
+| command | window | why |
+|---|---|---|
+| recap / digest / diagnostic | 4s | each repeat spawns a model call |
+| window | 1s | cycling agents by repeating it is a REAL sequence |
+| cancel / forward / rewind / clear | none | cheap, and repeating them is meaningful |
+| send / transcribe | none | "send send send" is the escape hatch (BUG-027) |
+
+**`cancel` semantics corrected** after clarification: it drops the chunk that is
+PLAYING and continues with the queue — it does not flush. `forward` keeps the
+wider meaning (skip to the latest) and now also bumps the generation counter, so
+a rewrite or synth already in flight is discarded rather than arriving late and
+talking.
+
+**File**: `plugins/stt/wake-listener.sh`, `prototype/speak_loop.py`

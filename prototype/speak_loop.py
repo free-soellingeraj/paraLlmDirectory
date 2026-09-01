@@ -678,8 +678,24 @@ def run(args) -> None:
     # so "cancel" cancels the REQUESTS, not just the backlog.
     gen = [0]
 
+    def skip_current():
+        """"cancel": drop the chunk that is PLAYING and move to the next one.
+
+        Deliberately narrow. It does not touch the queue and does not bump the
+        generation — the rest of what the agent said is still wanted, just not
+        this piece of it. The player clears `interrupt` at the top of its next
+        iteration and picks up the following item, so one cancel skips exactly
+        one chunk. "forward" remains the wider hammer (below).
+        """
+        interrupt.set()
+        print("  ⏭ cancel: skipping the current chunk", file=sys.stderr)
+
     def cancel_all(reason: str):
-        """Everything stops: current audio, queued audio, and pending TTS work."""
+        """Everything stops: current audio, queued audio, and pending TTS work.
+
+        This is what "forward" means — jump to the latest, and do not let work
+        that was already in flight arrive late and start talking again.
+        """
         gen[0] += 1
         interrupt.set()
         n = drain(prio_q) + drain(audio_q) + drain(synth_q) + drain(chunk_q)
@@ -715,7 +731,7 @@ def run(args) -> None:
                 # Checked before repeat/replay on purpose: if both are pending,
                 # "cancel" is the later intent and must not be undone by a recap
                 # that was already queued.
-                cancel_all("voice command")
+                skip_current()
             elif repeat_file.exists():
                 try:
                     repeat_file.unlink()
@@ -802,7 +818,10 @@ def run(args) -> None:
                     skip_file.unlink()
                 except OSError:
                     pass
-                drain(audio_q)
+                # Not just drain(audio_q): a rewrite or synth already running
+                # would land a moment later and start talking, which is not
+                # "skip to the latest". The generation bump discards it.
+                cancel_all("forward")
             # A recap/replay (prio_q) preempts pending narration; we check it
             # before each sentence, so "repeat"/"rewind" is heard right away.
             try:
