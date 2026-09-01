@@ -551,3 +551,78 @@ that would have caught this is "does every caller of stop_pane want this?" —
 the answer was no, and the second caller was two lines further down the file.
 
 **File**: `prototype/toggle-speak.sh`
+
+## BUG-039: narration kept playing for panes that no longer owned speak mode
+
+**Reported**: "playback is not strictly linked to the purple screen — I'm getting
+confusing playback for sessions I'm not selected to" and "figure out how a
+duplicate process got started."
+
+**Root cause: `speak_loop.py` had NO ownership check.** The wake-listener has
+always self-terminated (`while mode_active`, comparing `stream.pane` to its own
+pane); the narration loop only ever stopped when something killed it. Combined
+with an unsynchronized claim in `toggle-speak.sh`:
+
+```
+PREV=$(cat stream.pane)        # read
+stop_pane "%$PREV"             # evict
+   ...25 lines later...
+echo "$SAFE" > stream.pane      # claim   <- inside the whisper branch
+```
+
+Read/evict/claim was not atomic, so two overlapping hand-offs both read the same
+previous owner, both evicted it, and **both survived**. Whichever wrote
+`stream.pane` last got the purple pane; the other kept narrating into the room.
+
+Evidence found in the wild: stale `29.pid` / `29.wake.pid` for a dead process —
+`stop_pane` never ran on `%29`, i.e. it left ownership without eviction. Its
+loop only stopped by luck (no transcript: `[source: poll] None`). A pane WITH a
+transcript would still have been talking.
+
+**Amplifier**: a command that seems not to work gets re-said, and every repeat
+fired. Three "window"s meant three hand-offs — exactly the overlap that races
+two loops into existence.
+
+**Fixes:**
+1. **Ownership watchdog** (`speak_loop.py`): a thread compares `stream.pane` to
+   its own pane every 0.5s and stops the loop when it names someone else. An
+   ABSENT file means nobody claimed the mode (whisper missing, or our own
+   eviction cleared it) and is not a reason to die. 8s startup grace, dropped as
+   soon as the claim is observed. This closes the hole regardless of cause —
+   missed eviction, lost race, crashed teardown.
+2. **Atomic claim** (`toggle-speak.sh`): `mkdir` lock around read/evict/claim,
+   and the claim hoisted OUT of the whisper branch so ownership is meaningful
+   even when voice commands are unavailable.
+3. **Debounce** (`wake-listener.sh`): the same command re-said within
+   `STT_WAKE_DEBOUNCE_SECS` (4) is swallowed. Applied to recap/digest/window/
+   cancel/forward/rewind/diagnostic/clear. NOT to `transcribe` (start/stop
+   asymmetry — swallowing one strands a dictation) and NOT to `send` ("send send
+   send" is the documented escape hatch, BUG-027).
+
+**Verified** by running the real loop against a throwaway `stream.pane`:
+- new code: `loop exited on ownership loss: YES`
+- deployed code: `NO — still narrating`
+
+**File**: `prototype/speak_loop.py`, `prototype/toggle-speak.sh`,
+`plugins/stt/wake-listener.sh`
+
+## BUG-040: "repeat" was suppressed by the echo guard; renamed to "recap"
+
+`tts_recently_said()` drops any command word the narration is currently
+speaking, for `STT_WAKE_ECHO_COOLDOWN` (4s) after each mention — the mic-echo
+defense. While working ON the repeat feature, the agent's own narration said
+"repeat" constantly, so the command refused to fire exactly when it was wanted.
+
+Renamed to **"recap"**, a word the narration does not reach for. `digest` still
+triggers the same action. Default changed in `wake-listener.sh`, the config
+template in `install.sh`, and the live config.
+
+**Also added**: **"cancel"** — stops playback and discards queued audio, text
+awaiting synthesis, AND blocks still being rewritten. Distinct from `pause`
+(holds, resumable) and `forward` (skips to latest). Implemented with a
+generation counter so work already in flight is dropped when it completes rather
+than played: draining queues alone would let an in-flight rewrite or synth land
+a moment later and start talking again.
+
+**File**: `plugins/stt/wake-listener.sh`, `prototype/speak_loop.py`,
+`prototype/toggle-speak.sh`, `install.sh`
