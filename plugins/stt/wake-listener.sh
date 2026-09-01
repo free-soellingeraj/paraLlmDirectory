@@ -40,7 +40,7 @@ STT_WAKE_TRANSCRIBE_WORD="${STT_WAKE_TRANSCRIBE_WORD:-transcribe}"
 # constantly — so the command silently refused to fire exactly when you most
 # wanted it. "recap" is not vocabulary the narration reaches for.
 STT_WAKE_REPEAT_WORD="${STT_WAKE_REPEAT_WORD:-recap}"
-# "cancel": drop the chunk currently playing and continue with the next.
+# "cancel": clear the whole playback buffer; keep narrating new output.
 STT_WAKE_CANCEL_WORD="${STT_WAKE_CANCEL_WORD:-cancel}"
 STT_WAKE_SEND_WORD="${STT_WAKE_SEND_WORD:-send}"
 STT_WAKE_WINDOW_WORD="${STT_WAKE_WINDOW_WORD:-window}"
@@ -974,11 +974,12 @@ kill_inflight_afplay() {
     done
 }
 
-# "cancel": drop the chunk that is PLAYING and move on to the next one.
-# Deliberately narrow — the queue is left alone, because the rest of what the
-# agent said is still wanted, just not this piece of it. "forward" is the wider
-# one (skip to the latest, discarding queued and in-flight speech). Clears a
-# standing pause so the next chunk is actually audible.
+# "cancel": clear the WHOLE buffer and go quiet, but keep listening. Said when
+# the narration has fallen behind and stopped being worth hearing — everything
+# ordered so far is dropped, and new output still narrates. A clean slate, the
+# same effect changing windows has, not an off switch. ("forward" is the
+# narrower one: drop what is synthesised and waiting, keep work in flight.)
+# Clears a standing pause so future narration is actually audible.
 do_cancel() {
     if [[ -z "${SPEAKLOOP_PAUSE_FILE:-}" ]]; then
         buzz
@@ -990,8 +991,8 @@ do_cancel() {
         PAUSED=0; rm -f "$SPOOL/paused"; resume_playback
     fi
     kill_inflight_afplay
-    log_lifecycle "cancel: skipped the current chunk"
-    tmux display-message -t "$PANE_ID" "⏭ Skipped" 2>/dev/null || true
+    log_lifecycle "cancel: cleared the playback buffer, still listening"
+    tmux display-message -t "$PANE_ID" "⛔ Cleared — still listening" 2>/dev/null || true
     tmux refresh-client -S 2>/dev/null || true
 }
 

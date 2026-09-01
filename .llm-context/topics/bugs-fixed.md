@@ -668,10 +668,21 @@ duplicated work, not a general input filter:
 | cancel / forward / rewind / clear | none | cheap, and repeating them is meaningful |
 | send / transcribe | none | "send send send" is the escape hatch (BUG-027) |
 
-**`cancel` semantics corrected** after clarification: it drops the chunk that is
-PLAYING and continues with the queue — it does not flush. `forward` keeps the
-wider meaning (skip to the latest) and now also bumps the generation counter, so
-a rewrite or synth already in flight is discarded rather than arriving late and
-talking.
+**`cancel` vs `forward`, settled** (it took two clarifications to land):
+
+| | drops | keeps | meaning |
+|---|---|---|---|
+| `forward` | synthesised audio waiting to play | work in flight (rewrites, synths) | get me to the current state — the in-flight work IS the current state |
+| `cancel` | everything ordered: playing chunk, synthesised queue, text awaiting synthesis, blocks not yet rewritten | the loop itself | clean slate; said when narration has fallen behind and stopped being worth hearing |
+
+`cancel` bumps a generation counter as well as draining. Draining alone would
+let a rewrite or synth already running land a moment later and start talking —
+exactly the "it kept going" feeling being cancelled. It is NOT an off switch:
+blocks the agent writes afterwards still narrate, the same effect changing
+windows has.
+
+Measured on the same queue shape (3 unrewritten blocks, 2 awaiting synthesis,
+4 synthesised): `forward` drops 4 and in-flight work survives; `cancel` drops 9
+and it does not.
 
 **File**: `plugins/stt/wake-listener.sh`, `prototype/speak_loop.py`

@@ -678,23 +678,32 @@ def run(args) -> None:
     # so "cancel" cancels the REQUESTS, not just the backlog.
     gen = [0]
 
-    def skip_current():
-        """"cancel": drop the chunk that is PLAYING and move to the next one.
+    def skip_ahead():
+        """"forward": drop what is SYNTHESISED and waiting, keep what is coming.
 
-        Deliberately narrow. It does not touch the queue and does not bump the
-        generation — the rest of what the agent said is still wanted, just not
-        this piece of it. The player clears `interrupt` at the top of its next
-        iteration and picks up the following item, so one cancel skips exactly
-        one chunk. "forward" remains the wider hammer (below).
+        The narrower of the two. Work already in flight — a block being rewritten,
+        a chunk being synthesised — is deliberately left alone, because "forward"
+        means get me to the current state, and that work IS the current state. So
+        the generation is not bumped: those results still arrive and play.
         """
         interrupt.set()
-        print("  ⏭ cancel: skipping the current chunk", file=sys.stderr)
+        n = drain(audio_q)
+        print(f"  ⏩ forward: dropped {n} synthesised chunk(s), "
+              f"keeping work in flight", file=sys.stderr)
 
     def cancel_all(reason: str):
-        """Everything stops: current audio, queued audio, and pending TTS work.
+        """"cancel": clear the whole buffer and go quiet, but keep listening.
 
-        This is what "forward" means — jump to the latest, and do not let work
-        that was already in flight arrive late and start talking again.
+        Said when the narration has fallen behind and stopped being worth
+        hearing, so everything ordered so far is dropped: the chunk playing, the
+        synthesised queue, text awaiting synthesis, and blocks not yet rewritten.
+        The generation bump is what makes it total — draining alone would let a
+        rewrite or synth already running land a moment later and start talking
+        again, which is exactly the "it kept going" feeling being cancelled.
+
+        The loop itself keeps running. New blocks the agent writes after this
+        still narrate; it is a clean slate, not an off switch — the same effect
+        changing windows has.
         """
         gen[0] += 1
         interrupt.set()
@@ -731,7 +740,7 @@ def run(args) -> None:
                 # Checked before repeat/replay on purpose: if both are pending,
                 # "cancel" is the later intent and must not be undone by a recap
                 # that was already queued.
-                skip_current()
+                cancel_all("voice command")
             elif repeat_file.exists():
                 try:
                     repeat_file.unlink()
@@ -818,10 +827,7 @@ def run(args) -> None:
                     skip_file.unlink()
                 except OSError:
                     pass
-                # Not just drain(audio_q): a rewrite or synth already running
-                # would land a moment later and start talking, which is not
-                # "skip to the latest". The generation bump discards it.
-                cancel_all("forward")
+                skip_ahead()
             # A recap/replay (prio_q) preempts pending narration; we check it
             # before each sentence, so "repeat"/"rewind" is heard right away.
             try:
