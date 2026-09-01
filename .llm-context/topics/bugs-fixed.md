@@ -686,3 +686,42 @@ Measured on the same queue shape (3 unrewritten blocks, 2 awaiting synthesis,
 and it does not.
 
 **File**: `plugins/stt/wake-listener.sh`, `prototype/speak_loop.py`
+
+## BUG-042: "send" felt dead — no tone, and long dictations silently failed
+
+**Reported**: "the Send command is very difficult, I have to say it multiple
+times… it is not playing the acceptance tone even when it accepts."
+
+**Cause 1 — the dictating branch had NO ack.** BUG-041 moved `ack` to the
+dispatch site, but only in the `listening` branch. The path used every time you
+dictate and finish with "Send." lives in the `dictating` branch
+(`ends_with_send` → `end_dictation` → `do_send`) and had none. Timeline of the
+first sound you actually heard:
+
+```
+t=0      send-end trigger              (silence)
+t=?      end_dictation: kill recorder, RMS check, base.en on the WHOLE file
+t≈2-3s   Bottle  (injection landed)
+t≈3-6s   Hero    (submit verified)
+```
+
+Three seconds of silence after a command reads as failure, so it gets said
+again. `ack` now fires before any of that work, in both dictating-branch paths.
+
+**Cause 2 — `wait_input_ready` was capped at a flat 2.5s.** Claude Code ingests
+a large `send-keys` paste asynchronously; on a timeout, Enter fires before the
+text has landed and nothing submits ("Enter pressed but input still non-empty").
+Today's two failures were 933 and 818 chars, while a 1022-char one that happened
+to settle in time succeeded — the signature of a cap that is too tight, not a
+broken paste. The cap now scales with what was injected (2.5s + 5ms/char, 12s
+ceiling). It is only a CEILING: `wait_input_ready` returns as soon as the box is
+stable across two reads, so a longer cap costs nothing when things settle fast.
+
+**Not a bug — the "randomly lost voice commands" report.** The mode had drifted
+to `%40` via earlier `window` hand-offs while the user was working in `%43`, so
+commands were landing on a pane they were not attending to. `Ctrl+b o` on the
+intended pane rebound it, which is why that appeared to fix it. Nothing crashed.
+The real gap is that eyes-free there is no way to ask where the binding is — the
+purple pane and status chip are both visual. Worth a "where" command.
+
+**File**: `plugins/stt/wake-listener.sh`

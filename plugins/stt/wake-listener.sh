@@ -638,6 +638,7 @@ PY
         log_lifecycle "dictation dropped: mode no longer active on this pane"
         return 0
     fi
+    INJECTED_CHARS=${#text}
     tmux send-keys -t "$PANE_ID" -l "$text" 2>/dev/null && INJECTED=1
     if [[ "$INJECTED" == "1" ]]; then chime "$STT_WAKE_STOP_SOUND"; else buzz; fi
     local preview="$text"
@@ -697,8 +698,11 @@ do_send() {
     # fires before the text lands and submits nothing, stranding it in the box
     # (BUG-030). This is the common "transcribe to inject, then say 'send'"
     # flow — not just the combined send-end path — so the wait lives here.
-    wait_input_ready \
-        || log_lifecycle "send: input never settled; submitting best-effort"
+    # ~1s per 200 chars on top of the base, capped at 12s.
+    local _need=$(( 2500 + (INJECTED_CHARS * 5) ))
+    (( _need > 12000 )) && _need=12000
+    wait_input_ready "$_need" \
+        || log_lifecycle "send: input never settled after ${_need}ms; submitting best-effort"
     if ! tmux send-keys -t "$PANE_ID" Enter 2>/dev/null; then
         log_lifecycle "send FAILED: send-keys error"
         buzz
@@ -747,7 +751,14 @@ capture_input_region() {
 # and unchanged across two reads; capped so a genuinely busy/streaming pane
 # still submits best-effort rather than hanging.
 wait_input_ready() {
-    local prev="" cur stable=0 waited=0 max=2500
+    # Scale with the size of what was injected. Claude Code ingests a big
+    # send-keys paste asynchronously, and a flat 2.5s cap timed out on long
+    # dictations — Enter then fired before the text had landed and nothing
+    # submitted. Both of today's failures were long (933 and 818 chars) while
+    # the 1022-char one that happened to settle in time succeeded, which is the
+    # signature of a cap that is simply too tight rather than a broken paste.
+    local prev="" cur stable=0 waited=0
+    local max="${1:-2500}"
     while (( waited < max )); do
         cur="$(capture_input_region)"
         if [[ -n "$cur" ]]; then
@@ -941,6 +952,7 @@ do_window() {
 
 PAUSED=0
 INJECTED=0
+INJECTED_CHARS=0
 
 # "send" while dictating: the closing word often lands in the SAME whisper
 # segment as the last dictated words ("...make it purple. Send.") — the old
@@ -1188,12 +1200,20 @@ while mode_active; do
             if [[ "$echo_stem" != "$TRANSCRIBE_STEM" ]] \
                 && matches_transcribe "$norm_line" end; then
                 log_lifecycle "transcribe-end trigger: '$line'"
+                ack                      # BEFORE transcription, not after it
                 end_dictation
                 echo_stem="$TRANSCRIBE_STEM"
             elif [[ "$echo_stem" != "$SEND_STEM" ]] \
                 && ends_with_send "$norm_line" "$line"; then
                 # "send" closes the take AND submits — no second "transcribe".
                 log_lifecycle "send-end trigger: '$line'"
+                # The dictating branch had no ack at all, which is why "send"
+                # felt dead: the first sound was Bottle at t≈2-3s (after a
+                # whole-file base.en transcription) and Hero at t≈3-6s. Three
+                # seconds of silence after a command reads as failure, so it
+                # gets said again — and again. The tone has to be the FIRST
+                # thing that happens, before any work.
+                ack
                 end_dictation "$STT_WAKE_SEND_WORD"
                 # do_send now waits for the injected text to settle (BUG-030)
                 # and verifies the box cleared, so no separate wait here.
