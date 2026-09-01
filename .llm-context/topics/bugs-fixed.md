@@ -551,3 +551,138 @@ that would have caught this is "does every caller of stop_pane want this?" —
 the answer was no, and the second caller was two lines further down the file.
 
 **File**: `prototype/toggle-speak.sh`
+
+## BUG-039: narration kept playing for panes that no longer owned speak mode
+
+**Reported**: "playback is not strictly linked to the purple screen — I'm getting
+confusing playback for sessions I'm not selected to" and "figure out how a
+duplicate process got started."
+
+**Root cause: `speak_loop.py` had NO ownership check.** The wake-listener has
+always self-terminated (`while mode_active`, comparing `stream.pane` to its own
+pane); the narration loop only ever stopped when something killed it. Combined
+with an unsynchronized claim in `toggle-speak.sh`:
+
+```
+PREV=$(cat stream.pane)        # read
+stop_pane "%$PREV"             # evict
+   ...25 lines later...
+echo "$SAFE" > stream.pane      # claim   <- inside the whisper branch
+```
+
+Read/evict/claim was not atomic, so two overlapping hand-offs both read the same
+previous owner, both evicted it, and **both survived**. Whichever wrote
+`stream.pane` last got the purple pane; the other kept narrating into the room.
+
+Evidence found in the wild: stale `29.pid` / `29.wake.pid` for a dead process —
+`stop_pane` never ran on `%29`, i.e. it left ownership without eviction. Its
+loop only stopped by luck (no transcript: `[source: poll] None`). A pane WITH a
+transcript would still have been talking.
+
+**Amplifier**: a command that seems not to work gets re-said, and every repeat
+fired. Three "window"s meant three hand-offs — exactly the overlap that races
+two loops into existence.
+
+**Fixes:**
+1. **Ownership watchdog** (`speak_loop.py`): a thread compares `stream.pane` to
+   its own pane every 0.5s and stops the loop when it names someone else. An
+   ABSENT file means nobody claimed the mode (whisper missing, or our own
+   eviction cleared it) and is not a reason to die. 8s startup grace, dropped as
+   soon as the claim is observed. This closes the hole regardless of cause —
+   missed eviction, lost race, crashed teardown.
+2. **Atomic claim** (`toggle-speak.sh`): `mkdir` lock around read/evict/claim,
+   and the claim hoisted OUT of the whisper branch so ownership is meaningful
+   even when voice commands are unavailable.
+3. **Debounce** (`wake-listener.sh`): the same command re-said within
+   `STT_WAKE_DEBOUNCE_SECS` (4) is swallowed. Applied to recap/digest/window/
+   cancel/forward/rewind/diagnostic/clear. NOT to `transcribe` (start/stop
+   asymmetry — swallowing one strands a dictation) and NOT to `send` ("send send
+   send" is the documented escape hatch, BUG-027).
+
+**Verified** by running the real loop against a throwaway `stream.pane`:
+- new code: `loop exited on ownership loss: YES`
+- deployed code: `NO — still narrating`
+
+**File**: `prototype/speak_loop.py`, `prototype/toggle-speak.sh`,
+`plugins/stt/wake-listener.sh`
+
+## BUG-040: "repeat" was suppressed by the echo guard; renamed to "recap"
+
+`tts_recently_said()` drops any command word the narration is currently
+speaking, for `STT_WAKE_ECHO_COOLDOWN` (4s) after each mention — the mic-echo
+defense. While working ON the repeat feature, the agent's own narration said
+"repeat" constantly, so the command refused to fire exactly when it was wanted.
+
+Renamed to **"recap"**, a word the narration does not reach for. `digest` still
+triggers the same action. Default changed in `wake-listener.sh`, the config
+template in `install.sh`, and the live config.
+
+**Also added**: **"cancel"** — stops playback and discards queued audio, text
+awaiting synthesis, AND blocks still being rewritten. Distinct from `pause`
+(holds, resumable) and `forward` (skips to latest). Implemented with a
+generation counter so work already in flight is dropped when it completes rather
+than played: draining queues alone would let an in-flight rewrite or synth land
+a moment later and start talking again.
+
+**File**: `plugins/stt/wake-listener.sh`, `prototype/speak_loop.py`,
+`prototype/toggle-speak.sh`, `install.sh`
+
+## BUG-041: rapid "window" announcements overlapped; ack fired too late
+
+**Reported**: "if I say window rapidly it doesn't cancel, so they overlap each
+other" and "it would reduce the need for a debounce if you played the acceptance
+tone as soon as the voice command was recognized — it does it sometimes, but not
+always."
+
+**Overlapping announcements.** BUG-038 moved `pkill -x say` off the eviction path
+so the announcement for the pane you are moving TO survives. Correct, but it also
+let announcements from EARLIER hand-offs survive: each label is ~4s and rapid
+hand-offs are ~1s apart, so three names talk over each other. Both blunt fixes
+are wrong — killing all `say` silences the new one, killing none lets them stack.
+
+Fixed with a tracked pid in a GLOBAL file (`$TTS_DIR/announce.pid`): each
+hand-off kills the previous announcement before starting its own. Global because
+every hand-off is announced by a DIFFERENT listener process, so the new one needs
+to find the old one's pid. Exactly one label speaks, and it is always the newest
+— the one that describes where you actually are.
+
+**Late acknowledgement.** `ack` fired inside each handler, i.e. AFTER the work:
+instant for a channel-file touch, ~3s for `send` (which waits for the input box
+to settle first). An acknowledgement that sometimes lands and sometimes does not
+is worse than none — you assume it was not heard and say it again, which is what
+made repeats pile up. Moved to the dispatch site: the tone now fires the instant
+a command is recognised, before any handler runs. `send` acks on recognition and
+still plays Hero only on confirmed submission, so it is a two-stage signal.
+
+It also acks a **debounced** command. A swallowed command that made no sound is
+precisely the case that provokes another repeat; the tone says "heard you",
+separately from whether it acted.
+
+**Debounce re-tuned** now that feedback is immediate — it is protection against
+duplicated work, not a general input filter:
+
+| command | window | why |
+|---|---|---|
+| recap / digest / diagnostic | 4s | each repeat spawns a model call |
+| window | 1s | cycling agents by repeating it is a REAL sequence |
+| cancel / forward / rewind / clear | none | cheap, and repeating them is meaningful |
+| send / transcribe | none | "send send send" is the escape hatch (BUG-027) |
+
+**`cancel` vs `forward`, settled** (it took two clarifications to land):
+
+| | drops | keeps | meaning |
+|---|---|---|---|
+| `forward` | synthesised audio waiting to play | work in flight (rewrites, synths) | get me to the current state — the in-flight work IS the current state |
+| `cancel` | everything ordered: playing chunk, synthesised queue, text awaiting synthesis, blocks not yet rewritten | the loop itself | clean slate; said when narration has fallen behind and stopped being worth hearing |
+
+`cancel` bumps a generation counter as well as draining. Draining alone would
+let a rewrite or synth already running land a moment later and start talking —
+exactly the "it kept going" feeling being cancelled. It is NOT an off switch:
+blocks the agent writes afterwards still narrate, the same effect changing
+windows has.
+
+Measured on the same queue shape (3 unrewritten blocks, 2 awaiting synthesis,
+4 synthesised): `forward` drops 4 and in-flight work survives; `cancel` drops 9
+and it does not.
+
+**File**: `plugins/stt/wake-listener.sh`, `prototype/speak_loop.py`

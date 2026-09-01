@@ -209,7 +209,14 @@ TTS_STREAM_REWRITE_TIMEOUT="45"  # Max seconds per rewrite batch before falling 
 # Hands-free voice commands while speak mode is on (wake-listener.sh)
 STT_WAKE_ENABLED=1               # Listen for the words below while speak mode is on (0 = off)
 STT_WAKE_TRANSCRIBE_WORD="transcribe"  # Toggles dictation: say it to start, say it again to inject (no Enter)
-STT_WAKE_REPEAT_WORD="repeat"    # Re-runs the recap (spoken summary of the pane)
+STT_WAKE_REPEAT_WORD="recap"     # Re-runs the recap. NOT "repeat": the echo guard suppresses any
+                                 # command word the narration is currently speaking, and "repeat" is
+                                 # common in narration, so it refused to fire when you needed it.
+STT_WAKE_CANCEL_WORD="cancel"    # Clears the whole playback buffer and goes quiet, but keeps
+                                 # narrating new output ("forward" only drops what is already
+                                 # synthesised, keeping work in flight)
+STT_WAKE_DEBOUNCE_SECS="4"       # Ignore the same command re-said within this many seconds (0 = off).
+                                 # Repeats of "window" used to stack hand-offs and race two loops.
 STT_WAKE_SEND_WORD="send"        # Presses Enter in the bound pane
 STT_WAKE_WINDOW_WORD="window"    # Moves speak mode to the next window (or next pane if one window)
 STT_WAKE_PAUSE_WORD="pause"      # Stops playback until "play"; queued speech ages out so resume is current

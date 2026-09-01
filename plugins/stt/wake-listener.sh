@@ -35,7 +35,13 @@ fi
 # Single-word voice commands. "transcribe" toggles dictation; "repeat" re-runs
 # the recap; "send" presses Enter in the bound pane.
 STT_WAKE_TRANSCRIBE_WORD="${STT_WAKE_TRANSCRIBE_WORD:-transcribe}"
-STT_WAKE_REPEAT_WORD="${STT_WAKE_REPEAT_WORD:-repeat}"
+# "recap", not "repeat". The echo guard suppresses any command word the agent is
+# currently narrating, and "repeat" is a word this project's own narration says
+# constantly — so the command silently refused to fire exactly when you most
+# wanted it. "recap" is not vocabulary the narration reaches for.
+STT_WAKE_REPEAT_WORD="${STT_WAKE_REPEAT_WORD:-recap}"
+# "cancel": clear the whole playback buffer; keep narrating new output.
+STT_WAKE_CANCEL_WORD="${STT_WAKE_CANCEL_WORD:-cancel}"
 STT_WAKE_SEND_WORD="${STT_WAKE_SEND_WORD:-send}"
 STT_WAKE_WINDOW_WORD="${STT_WAKE_WINDOW_WORD:-window}"
 # Playback transport + input clearing.
@@ -219,6 +225,7 @@ matches_transcribe() {
         || matches_word "$1" "$TRANSCRIBE_ALT_STEM" "${2:-normal}"
 }
 REPEAT_STEM="$(stem8 "$STT_WAKE_REPEAT_WORD")"
+CANCEL_STEM="$(stem8 "$STT_WAKE_CANCEL_WORD")"
 SEND_STEM="$(stem8 "$STT_WAKE_SEND_WORD")"
 # Whole-word matches only: "send", its plural "sends", and the common whisper
 # mishearing "sent" (a clipped "send"). NEVER a prefix — "sending", "sender"
@@ -280,6 +287,80 @@ matches_clear() {
     [[ "$count" -le 4 ]]
 }
 
+# --- Command debounce ---------------------------------------------------------
+# A command that seems not to have worked gets said again, and again. Every
+# repeat used to fire: three "window"s meant three hand-offs, which is precisely
+# the overlap that raced two narration loops into existence. So the SAME command
+# within a short window is swallowed once it has already fired.
+#
+# Deliberately per-command, not global: saying "window" then immediately "recap"
+# is a real sequence and must still work. And deliberately short — this is for
+# the impatient re-say, not for stopping you using a command twice on purpose.
+STT_WAKE_DEBOUNCE_SECS="${STT_WAKE_DEBOUNCE_SECS:-4}"
+# ...but only where a repeat is EXPENSIVE. With the tone now firing the instant a
+# command is recognised, the impatient re-say mostly stops happening, so debounce
+# is back to what it should be: protection against duplicated work, not a general
+# input filter.
+#   recap/digest/diagnostic  full window — each repeat spawns a model call
+#   window                   1s — cycling agents by saying it repeatedly is a
+#                            REAL sequence; a 4s swallow would break it
+#   cancel/forward/rewind/clear  none — cheap, and repeating them is meaningful
+STT_WAKE_WINDOW_DEBOUNCE_SECS="${STT_WAKE_WINDOW_DEBOUNCE_SECS:-1}"
+LAST_CMD_STEM=""
+LAST_CMD_AT=-999
+
+debounced() {
+    local stem="$1" secs="$STT_WAKE_DEBOUNCE_SECS"
+    case "$stem" in
+        "$WINDOW_STEM") secs="$STT_WAKE_WINDOW_DEBOUNCE_SECS" ;;
+        "$CANCEL_STEM"|"$FORWARD_STEM"|"$REWIND_STEM"|"$CLEAR_STEM") secs=0 ;;
+    esac
+    [[ "$secs" == "0" ]] && return 1
+    if [[ "$stem" == "$LAST_CMD_STEM" ]] \
+        && (( SECONDS - LAST_CMD_AT < secs )); then
+        log_lifecycle "debounced '$stem' ($(( SECONDS - LAST_CMD_AT ))s since last)"
+        return 0
+    fi
+    LAST_CMD_STEM="$stem"; LAST_CMD_AT=$SECONDS
+    return 1
+}
+
+# The "window" hand-off speaks the target's name. Said rapidly, those pile up:
+# each announcement is ~4s and a hand-off can be a second apart, so you hear
+# three names talking over each other.
+#
+# The pid is tracked in a GLOBAL file rather than killed with `pkill -x say`,
+# because the two obvious blunt fixes are both wrong: killing all `say` on
+# teardown silenced the announcement for the pane you were moving TO (BUG-038),
+# and doing nothing lets them overlap. Each hand-off is announced by a DIFFERENT
+# listener process, so the file has to be global for the new one to find the old
+# one's announcement. Exactly one label speaks at a time, and it is always the
+# newest — which is the one that describes where you actually are.
+ANNOUNCE_PID_FILE="$TTS_DIR/announce.pid"
+
+announce() {
+    local text="$1" prev
+    [[ -n "$text" ]] || return 0
+    command -v say >/dev/null 2>&1 || return 0
+    prev="$(cat "$ANNOUNCE_PID_FILE" 2>/dev/null)"
+    if [[ -n "$prev" ]] && kill -0 "$prev" 2>/dev/null; then
+        kill "$prev" 2>/dev/null || true      # the older name is now stale
+    fi
+    say "$text" >/dev/null 2>&1 &
+    echo "$!" > "$ANNOUNCE_PID_FILE" 2>/dev/null || true
+}
+
+# Fired the moment a command is RECOGNISED — before the handler does any work.
+#
+# It used to fire inside each handler, i.e. after the work, so the tone arrived
+# anywhere from instantly (touch a channel file) to ~3s later ("send" waits for
+# the input box to settle first). An acknowledgement that sometimes lands and
+# sometimes does not is worse than none: you assume it did not hear you and say
+# it again, which is what made repeats pile up in the first place.
+#
+# It also fires for a DEBOUNCED command. A swallowed command that made no sound
+# is exactly the case that provokes another repeat — the tone has to say "heard
+# you", separately from whether it acted.
 ack() { chime "$STT_WAKE_ACK_SOUND"; }
 buzz() { chime "$STT_WAKE_FAIL_SOUND"; }
 
@@ -580,7 +661,6 @@ do_repeat() {
             log_lifecycle "repeat: implicit play (was paused)"
         fi
         : > "$rf"
-        ack
         log_lifecycle "repeat: recap requested (new loop) -> $rf"
         tmux display-message -t "$PANE_ID" "🔁 Recapping…" 2>/dev/null || true
         return 0
@@ -602,7 +682,6 @@ do_repeat() {
         log_lifecycle "repeat: implicit play (was paused)"
     fi
     log_lifecycle "repeat: recap requested"
-    ack
     touch "$SPOOL/framing.lock"
     TTS_STREAM_RECAP_CHARS="${TTS_STREAM_DIGEST_CHARS:-900}" \
         nohup "$SCRIPT_DIR/../tts/stream-framing.sh" "$PANE_ID" "$SPOOL" >/dev/null 2>&1 &
@@ -695,7 +774,6 @@ do_diagnostic() {
     # New tail->rewrite->speak loop: the old worker/queue model doesn't apply
     # (it would report "all dead"). Report the honest new-loop state instead.
     if [[ -n "${SPEAKLOOP_PAUSE_FILE:-}" ]]; then
-        ack
         local report="" sp
         sp="$(cat "${SPEAKLOOP_PAUSE_FILE%.pause}.pid" 2>/dev/null)"
         if [[ -n "$sp" ]] && kill -0 "$sp" 2>/dev/null; then
@@ -719,7 +797,6 @@ do_diagnostic() {
         tmux display-message -t "$PANE_ID" "🩺 $report" 2>/dev/null || true
         return 0
     fi
-    ack
     local report="" dead="" f pid
     for f in watcher synth player rewrite wake; do
         pid="$(cat "$SPOOL/$f.pid" 2>/dev/null)"
@@ -796,7 +873,6 @@ do_window() {
             return 0
         fi
         log_lifecycle "window (new loop): move narration $PANE_ID -> $target (same window)"
-        ack
         # Instant spoken cue of the target agent (env name, else window name);
         # the recap-on-start follows with the fuller framing.
         local tpath tlabel=""
@@ -805,7 +881,7 @@ do_window() {
             */envs/*) tlabel="${tpath#*/envs/}"; tlabel="${tlabel%%/*}" ;;
             *)        tlabel="$(tmux display-message -pt "$target" '#{window_name}' 2>/dev/null)" ;;
         esac
-        [[ -n "$tlabel" ]] && command -v say >/dev/null 2>&1 && ( say "$tlabel" >/dev/null 2>&1 & )
+        announce "$tlabel"
         # Focus the target pane but STAY in this window (no select-window — that
         # would leave the command grid).
         tmux select-pane -t "$target" 2>/dev/null || true
@@ -851,7 +927,6 @@ do_window() {
         return 0
     fi
     log_lifecycle "window: moving speak mode to $target"
-    ack
     # Announce where we landed — env name if the pane lives in an env,
     # else the tmux window name.
     local tpath tlabel
@@ -860,9 +935,7 @@ do_window() {
         */envs/*) tlabel="${tpath#*/envs/}"; tlabel="${tlabel%%/*}" ;;
         *)        tlabel="$(tmux display-message -pt "$target" '#{window_name}' 2>/dev/null)" ;;
     esac
-    if [[ -n "$tlabel" ]] && command -v say >/dev/null 2>&1; then
-        ( say "$tlabel" >/dev/null 2>&1 & )
-    fi
+    announce "$tlabel"
     nohup "$SCRIPT_DIR/../tts/toggle-stream.sh" "$target" >/dev/null 2>&1 &
 }
 
@@ -901,6 +974,28 @@ kill_inflight_afplay() {
     done
 }
 
+# "cancel": clear the WHOLE buffer and go quiet, but keep listening. Said when
+# the narration has fallen behind and stopped being worth hearing — everything
+# ordered so far is dropped, and new output still narrates. A clean slate, the
+# same effect changing windows has, not an off switch. ("forward" is the
+# narrower one: drop what is synthesised and waiting, keep work in flight.)
+# Clears a standing pause so future narration is actually audible.
+do_cancel() {
+    if [[ -z "${SPEAKLOOP_PAUSE_FILE:-}" ]]; then
+        buzz
+        log_lifecycle "cancel: not supported by the old stream mode"
+        return 0
+    fi
+    : > "${SPEAKLOOP_CANCEL_FILE:-${SPEAKLOOP_PAUSE_FILE%.pause}.cancel}"
+    if [[ "$PAUSED" == "1" ]]; then
+        PAUSED=0; rm -f "$SPOOL/paused"; resume_playback
+    fi
+    kill_inflight_afplay
+    log_lifecycle "cancel: cleared the playback buffer, still listening"
+    tmux display-message -t "$PANE_ID" "⛔ Cleared — still listening" 2>/dev/null || true
+    tmux refresh-client -S 2>/dev/null || true
+}
+
 # "pause": stop talking NOW and stay quiet until "play". Queued audio ages out
 # via the stale-skip, so resume lands on current content, not the backlog.
 do_pause() {
@@ -911,7 +1006,6 @@ do_pause() {
     PAUSED=1
     touch "$SPOOL/paused"
     pause_playback
-    ack
     log_lifecycle "pause"
     tmux display-message -t "$PANE_ID" "⏸ Paused — say '$STT_WAKE_PLAY_WORD' to resume" 2>/dev/null || true
     tmux refresh-client -S 2>/dev/null || true
@@ -925,7 +1019,6 @@ do_play() {
     PAUSED=0
     rm -f "$SPOOL/paused"
     resume_playback
-    ack
     log_lifecycle "play"
     tmux refresh-client -S 2>/dev/null || true
 }
@@ -936,13 +1029,11 @@ do_forward() {
     # New loop: flush pending narration to catch up to the latest.
     if [[ -n "${SPEAKLOOP_PAUSE_FILE:-}" ]]; then
         : > "${SPEAKLOOP_SKIP_FILE:-${SPEAKLOOP_PAUSE_FILE%.pause}.skip}"
-        ack
         log_lifecycle "forward: skip to latest (new loop)"
         return 0
     fi
     echo "skip 1" > "$SPOOL/player.cmd"
     kill_inflight_afplay
-    ack
     log_lifecycle "forward"
 }
 
@@ -953,13 +1044,11 @@ do_rewind() {
             PAUSED=0; rm -f "$SPOOL/paused"; resume_playback
         fi
         : > "${SPEAKLOOP_REPLAY_FILE:-${SPEAKLOOP_PAUSE_FILE%.pause}.replay}"
-        ack
         log_lifecycle "rewind: replay last block (new loop)"
         return 0
     fi
     echo "back 2" > "$SPOOL/player.cmd"
     kill_inflight_afplay
-    ack
     log_lifecycle "rewind"
 }
 
@@ -969,13 +1058,11 @@ do_rewind() {
 # capture the input region first and only send C-c when there's text to clear.
 do_clear() {
     if [[ -z "$(capture_input_region)" ]]; then
-        ack
         log_lifecycle "clear: input already empty, no-op"
         tmux display-message -t "$PANE_ID" "🗑 Input already empty" 2>/dev/null || true
         return 0
     fi
     if tmux send-keys -t "$PANE_ID" C-c 2>/dev/null; then
-        ack
         log_lifecycle "clear: input box cleared"
         tmux display-message -t "$PANE_ID" "🗑 Input cleared" 2>/dev/null || true
     else
@@ -1028,23 +1115,27 @@ while mode_active; do
             elif [[ "$echo_stem" != "$REPEAT_STEM" ]] \
                 && matches_word "$norm_line" "$REPEAT_STEM"; then
                 log_lifecycle "repeat trigger: '$line'"
-                do_repeat
+                ack
+                debounced "$REPEAT_STEM" || do_repeat
                 echo_stem="$REPEAT_STEM"
             elif [[ "$echo_stem" != "$DIGEST_STEM" ]] \
                 && matches_word "$norm_line" "$DIGEST_STEM"; then
                 log_lifecycle "digest trigger: '$line'"
-                do_repeat
+                ack
+                debounced "$DIGEST_STEM" || do_repeat
                 echo_stem="$DIGEST_STEM"
             elif [[ "$echo_stem" != "$SEND_STEM" ]] \
                 && { matches_send "$norm_line" || [[ "$SEND_FORCE" == "1" ]]; }; then
                 [[ "$SEND_FORCE" == "1" ]] && _how=" (forced: lone send x2)" || _how=""
                 log_lifecycle "send trigger: '$line'$_how"
+                ack                      # heard you; Hero later means SUBMITTED
                 do_send
                 echo_stem="$SEND_STEM"
             elif [[ "$echo_stem" != "$DIAGNOSTIC_STEM" ]] \
                 && matches_word "$norm_line" "$DIAGNOSTIC_STEM"; then
                 log_lifecycle "diagnostic trigger: '$line'"
-                do_diagnostic
+                ack
+                debounced "$DIAGNOSTIC_STEM" || do_diagnostic
                 echo_stem="$DIAGNOSTIC_STEM"
             elif [[ "$echo_stem" != "$WINDOW_STEM" ]] \
                 && matches_word "$norm_line" "$WINDOW_STEM"; then
@@ -1053,32 +1144,44 @@ while mode_active; do
                 # (Still blocked during dictation: that's the else-branch below,
                 # where the mic is capturing the user's words, not commands.)
                 log_lifecycle "window trigger: '$line'"
-                do_window
+                ack
+                debounced "$WINDOW_STEM" || do_window
                 echo_stem="$WINDOW_STEM"
+            elif [[ "$echo_stem" != "$CANCEL_STEM" ]] \
+                && matches_word "$norm_line" "$CANCEL_STEM"; then
+                log_lifecycle "cancel trigger: '$line'"
+                ack
+                debounced "$CANCEL_STEM" || do_cancel
+                echo_stem="$CANCEL_STEM"
             elif [[ "$echo_stem" != "$PAUSE_STEM" ]] \
                 && matches_word "$norm_line" "$PAUSE_STEM"; then
                 log_lifecycle "pause trigger: '$line'"
+                ack
                 do_pause
                 echo_stem="$PAUSE_STEM"
             elif ! player_speaking && [[ "$echo_stem" != "$PLAY_STEM" ]] \
                 && matches_word "$norm_line" "$PLAY_STEM"; then
                 log_lifecycle "play trigger: '$line'"
+                ack
                 do_play
                 echo_stem="$PLAY_STEM"
             elif [[ "$echo_stem" != "$FORWARD_STEM" ]] \
                 && matches_word "$norm_line" "$FORWARD_STEM"; then
                 log_lifecycle "forward trigger: '$line'"
-                do_forward
+                ack
+                debounced "$FORWARD_STEM" || do_forward
                 echo_stem="$FORWARD_STEM"
             elif [[ "$echo_stem" != "$REWIND_STEM" ]] \
                 && matches_word "$norm_line" "$REWIND_STEM"; then
                 log_lifecycle "rewind trigger: '$line'"
-                do_rewind
+                ack
+                debounced "$REWIND_STEM" || do_rewind
                 echo_stem="$REWIND_STEM"
             elif ! player_speaking && [[ "$echo_stem" != "$CLEAR_STEM" ]] \
                 && matches_clear "$norm_line"; then
                 log_lifecycle "clear trigger: '$line'"
-                do_clear
+                ack
+                debounced "$CLEAR_STEM" || do_clear
                 echo_stem="$CLEAR_STEM"
             fi
         else

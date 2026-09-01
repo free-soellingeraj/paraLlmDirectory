@@ -424,6 +424,11 @@ def run(args) -> None:
     # so the listener and this loop agree without extra env wiring.
     skip_file = Path(os.environ.get("SPEAKLOOP_SKIP_FILE", _base + ".skip"))
     replay_file = Path(os.environ.get("SPEAKLOOP_REPLAY_FILE", _base + ".replay"))
+    # "cancel": stop talking and throw away everything pending — queued audio,
+    # text awaiting synthesis, and blocks still being rewritten. Distinct from
+    # "pause" (which holds and can resume) and from "forward" (which skips to the
+    # latest). Cancel means: I do not want any of this.
+    cancel_file = Path(os.environ.get("SPEAKLOOP_CANCEL_FILE", _base + ".cancel"))
     last_narr = [""]     # narration of the last completed block (for rewind)
     # Working heartbeat ("sticks"): plays while the agent is working but the
     # loop isn't speaking, so silence means "waiting for you" (or only subagents
@@ -545,9 +550,12 @@ def run(args) -> None:
                 narr = ""
             if not narr:
                 continue
+            g = gen[0]                          # generation this block belongs to
             last_narr[0] = narr                 # remember for "rewind"
             for c in synth_chunks(narr):
                 if stop.is_set():
+                    break
+                if g != gen[0]:          # cancelled while this was rewriting
                     break
                 print(f"  ▶ {c[:90]}", file=sys.stderr)
                 synth_q.put(c)
@@ -562,8 +570,9 @@ def run(args) -> None:
                 return
             if args.dry:
                 continue
+            g = gen[0]
             p = synth(c, args.engine)
-            if p:
+            if p and g == gen[0]:     # cancelled mid-synth -> throw the audio away
                 audio_q.put((p, c))   # carry the text so the player can publish
                                       # it for the mic self-echo guard
 
@@ -651,15 +660,56 @@ def run(args) -> None:
         return "\n\n".join(reversed(kept))
 
     def enqueue_prio(text: str, marker: str):
+        g = gen[0]
         for c in synth_chunks(despeak(text)):
-            if stop.is_set():
+            if stop.is_set() or g != gen[0]:
                 break
             print(f"  {marker} {c[:90]}", file=sys.stderr)
             if args.dry:
                 continue
             a = synth(c, args.engine)
-            if a:
+            if a and g == gen[0]:
                 prio_q.put((a, c))
+
+    # Generation counter for "cancel". Draining the queues only removes work that
+    # has already been produced; a rewrite or a synth already in flight would land
+    # in the queue a moment later and start talking again. Every producer captures
+    # the generation it started under and drops its result if `gen` has moved —
+    # so "cancel" cancels the REQUESTS, not just the backlog.
+    gen = [0]
+
+    def skip_ahead():
+        """"forward": drop what is SYNTHESISED and waiting, keep what is coming.
+
+        The narrower of the two. Work already in flight — a block being rewritten,
+        a chunk being synthesised — is deliberately left alone, because "forward"
+        means get me to the current state, and that work IS the current state. So
+        the generation is not bumped: those results still arrive and play.
+        """
+        interrupt.set()
+        n = drain(audio_q)
+        print(f"  ⏩ forward: dropped {n} synthesised chunk(s), "
+              f"keeping work in flight", file=sys.stderr)
+
+    def cancel_all(reason: str):
+        """"cancel": clear the whole buffer and go quiet, but keep listening.
+
+        Said when the narration has fallen behind and stopped being worth
+        hearing, so everything ordered so far is dropped: the chunk playing, the
+        synthesised queue, text awaiting synthesis, and blocks not yet rewritten.
+        The generation bump is what makes it total — draining alone would let a
+        rewrite or synth already running land a moment later and start talking
+        again, which is exactly the "it kept going" feeling being cancelled.
+
+        The loop itself keeps running. New blocks the agent writes after this
+        still narrate; it is a clean slate, not an off switch — the same effect
+        changing windows has.
+        """
+        gen[0] += 1
+        interrupt.set()
+        n = drain(prio_q) + drain(audio_q) + drain(synth_q) + drain(chunk_q)
+        print(f"  ⛔ cancel ({reason}): dropped {n} queued item(s), "
+              f"generation now {gen[0]}", file=sys.stderr)
 
     def cancel_speech():
         """Stop talking NOW and drop everything queued.
@@ -682,7 +732,16 @@ def run(args) -> None:
         #   repeat -> spoken "where things stand" recap of the recent transcript
         #   rewind -> replay the last block's narration verbatim
         while not stop.is_set():
-            if repeat_file.exists():
+            if cancel_file.exists():
+                try:
+                    cancel_file.unlink()
+                except OSError:
+                    pass
+                # Checked before repeat/replay on purpose: if both are pending,
+                # "cancel" is the later intent and must not be undone by a recap
+                # that was already queued.
+                cancel_all("voice command")
+            elif repeat_file.exists():
                 try:
                     repeat_file.unlink()
                 except OSError:
@@ -768,7 +827,7 @@ def run(args) -> None:
                     skip_file.unlink()
                 except OSError:
                     pass
-                drain(audio_q)
+                skip_ahead()
             # A recap/replay (prio_q) preempts pending narration; we check it
             # before each sentence, so "repeat"/"rewind" is heard right away.
             try:
@@ -862,6 +921,46 @@ def run(args) -> None:
             else:
                 time.sleep(0.25)
 
+    def ownership():
+        """Stop the moment this pane is no longer the one speak mode owns.
+
+        THE LOOP HAD NO OWNERSHIP CHECK AT ALL. The wake-listener has always had
+        one (`while mode_active`, comparing stream.pane to its own pane), but the
+        narration loop only ever stopped when something killed it — and
+        toggle-speak's read-PREV / evict / claim sequence is not atomic. Two
+        overlapping hand-offs both read the same previous owner, both evict it,
+        and both survive; whichever writes stream.pane last gets the purple pane
+        while the other keeps narrating into the room. That is the "playback for
+        sessions I'm not selected to" report, and repeating a command that seemed
+        not to work is exactly what produces the overlap.
+
+        Making the loop responsible for its own liveness closes it for good: a
+        missed eviction, a lost race, a crashed teardown — whatever the cause, a
+        loop that does not own stream.pane exits on its own within a second.
+
+        An ABSENT stream.pane means nobody has claimed the mode (whisper missing,
+        or the file was cleared by our own eviction), which is NOT a reason to
+        die — only a file naming a DIFFERENT pane is. The grace period covers
+        startup, where toggle-speak writes the claim moments after launching us.
+        """
+        grace = time.time() + 8.0
+        while not stop.is_set():
+            try:
+                owner = Path(TTS_DIR, "stream.pane").read_text().strip()
+            except OSError:
+                owner = ""
+            if owner and owner != safe:
+                if time.time() > grace:
+                    print(f"  ⨯ pane %{safe} no longer owns speak mode "
+                          f"(now %{owner}) — stopping", file=sys.stderr)
+                    stop.set()
+                    with pcv:
+                        pcv.notify_all()
+                    return
+            elif owner == safe:
+                grace = 0.0          # claim seen; enforce strictly from now on
+            time.sleep(0.5)
+
     tf = threading.Thread(target=feeder, daemon=True)
     tsub = threading.Thread(target=submitter, daemon=True)
     tcol = threading.Thread(target=collector, daemon=True)
@@ -869,7 +968,8 @@ def run(args) -> None:
     tp = threading.Thread(target=player, daemon=True)
     tr = threading.Thread(target=controller, daemon=True)
     th = threading.Thread(target=heartbeat, daemon=True)
-    for t in (tf, tsub, tcol, tsyn, tp, tr, th):
+    town = threading.Thread(target=ownership, daemon=True)
+    for t in (tf, tsub, tcol, tsyn, tp, tr, th, town):
         t.start()
     try:
         if args.no_follow:

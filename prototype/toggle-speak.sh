@@ -31,6 +31,7 @@ PAUSE_FILE="$RUN/$SAFE.pause"
 REPEAT_FILE="$RUN/$SAFE.repeat"
 SKIP_FILE="$RUN/$SAFE.skip"
 REPLAY_FILE="$RUN/$SAFE.replay"
+CANCEL_FILE="$RUN/$SAFE.cancel"
 LOG="$RUN/$SAFE.log"
 
 MODEL="${TTS_STREAM_REWRITE_MODEL:-haiku}"
@@ -74,7 +75,8 @@ stop_pane() {
     # stop_pane has two callers with opposite needs, and killing `say` in the
     # shared path silenced the "window" announcement (BUG-038).
     rm -f "$RUN/$safe.pid" "$RUN/$safe.wake.pid" "$RUN/$safe.pause" \
-          "$RUN/$safe.repeat" "$RUN/$safe.skip" "$RUN/$safe.replay"
+          "$RUN/$safe.repeat" "$RUN/$safe.skip" "$RUN/$safe.replay" \
+          "$RUN/$safe.cancel"
     rm -rf "$TTS_DIR/$safe.stream" 2>/dev/null || true
     tmux set-option -pt "$pane" -u @speakloop 2>/dev/null || true
     tmux set-option -pt "$pane" -u @speak_on 2>/dev/null || true
@@ -100,15 +102,42 @@ fi
 command -v python3 >/dev/null 2>&1 || { tmux display-message "speak-loop: python3 not found"; exit 1; }
 
 # Single owner: evict whatever pane currently owns speak mode before we claim it.
+# Read-evict-claim must be ATOMIC. It used to be three unsynchronized steps with
+# the claim 25 lines further down, so two overlapping hand-offs both read the
+# same previous owner, both evicted it, and both survived — leaving a narration
+# loop running for a pane that no longer had the purple. Saying a command twice
+# because it seemed not to work is exactly what produced that overlap.
+#
+# mkdir is the atomic primitive available in POSIX shell: it succeeds for exactly
+# one racer. The loser waits, then reads a stream.pane the winner has already
+# written, so it evicts the RIGHT pane instead of a stale one.
+CLAIM_LOCK="$TTS_DIR/claim.lock"
+mkdir -p "$TTS_DIR"
+_locked=0
+for _ in $(seq 1 100); do                 # ~5s ceiling, then proceed anyway
+    if mkdir "$CLAIM_LOCK" 2>/dev/null; then _locked=1; break; fi
+    # A lock older than 30s is a crashed toggle, not a live one.
+    if [[ -d "$CLAIM_LOCK" ]] && [[ -n "$(find "$CLAIM_LOCK" -maxdepth 0 -mmin +0.5 2>/dev/null)" ]]; then
+        rmdir "$CLAIM_LOCK" 2>/dev/null || true
+    fi
+    sleep 0.05
+done
+
 PREV="$(cat "$STREAM_PANE" 2>/dev/null)"
 [[ -n "$PREV" && "$PREV" != "$SAFE" ]] && stop_pane "%$PREV"
+# Claim NOW, inside the lock — not later inside the whisper branch. The
+# narration loop watches this file to decide whether it still owns the mode, so
+# it has to name the owner even when whisper/sox are absent.
+echo "$SAFE" > "$STREAM_PANE"
+[[ "$_locked" == "1" ]] && rmdir "$CLAIM_LOCK" 2>/dev/null || true
 
 mkdir -p "$SPOOL"
-rm -f "$PAUSE_FILE" "$REPEAT_FILE" "$SKIP_FILE" "$REPLAY_FILE"
+rm -f "$PAUSE_FILE" "$REPEAT_FILE" "$SKIP_FILE" "$REPLAY_FILE" "$CANCEL_FILE"
 
 # --- narration loop (owns repeat/rewind/forward channels) ---
 SPEAKLOOP_PAUSE_FILE="$PAUSE_FILE" SPEAKLOOP_REPEAT_FILE="$REPEAT_FILE" \
 SPEAKLOOP_SKIP_FILE="$SKIP_FILE" SPEAKLOOP_REPLAY_FILE="$REPLAY_FILE" \
+SPEAKLOOP_CANCEL_FILE="$CANCEL_FILE" \
 TTS_STREAM_REWRITE_MODEL="$MODEL" \
     nohup python3 "$DIR/speak_loop.py" "$PANE_ID" \
         --backlog 0 --model "$MODEL" --engine "$ENGINE" > "$LOG" 2>&1 &
@@ -124,9 +153,9 @@ resolve_label > "$SPOOL/label"
 if command -v whisper-stream >/dev/null 2>&1 && command -v rec >/dev/null 2>&1; then
     mkdir -p "$TTS_DIR"
     rm -f "$TTS_DIR/keepalive" 2>/dev/null || true   # stop old keeper reviving old workers
-    echo "$SAFE" > "$STREAM_PANE"
     SPEAKLOOP_PAUSE_FILE="$PAUSE_FILE" SPEAKLOOP_REPEAT_FILE="$REPEAT_FILE" \
     SPEAKLOOP_SKIP_FILE="$SKIP_FILE" SPEAKLOOP_REPLAY_FILE="$REPLAY_FILE" \
+    SPEAKLOOP_CANCEL_FILE="$CANCEL_FILE" \
         nohup bash "$ROOT/plugins/stt/wake-listener.sh" "$PANE_ID" "$SPOOL" \
             > "$RUN/$SAFE.wake.log" 2>&1 &
     echo $! > "$WAKE_PIDF"
