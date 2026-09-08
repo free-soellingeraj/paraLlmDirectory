@@ -209,7 +209,25 @@ def sentences(text: str):
 # Group whole sentences into ~SYNTH_CHARS-sized chunks. edge-tts has ~5s of
 # fixed per-call overhead, so one call per ~1KB (≈20s of audio) amortizes it;
 # per-sentence synth pays that 5s on every 2-4s sentence and stutters.
-SYNTH_CHARS = int(os.environ.get("SPEAKLOOP_SYNTH_CHARS", "1100"))
+# MEASURED, and the old 1100 was not merely suboptimal — it was failing:
+#   240 chars   synth  1.2s  ->  11.2s of audio   (ratio 0.10)
+#   600 chars   FAILED, 40s timeout, no audio at all
+#   1100 chars  FAILED, 40s timeout, no audio at all
+# So the pipeline spoke chunk one, then went silent for the length of a timeout
+# and produced nothing — "speaks a chunk then pauses a loooong time". Small
+# chunks synthesize an order of magnitude faster than they play, which is the
+# margin that keeps playback continuous. The per-call overhead the old comment
+# worried about is real but tiny next to a dropped chunk.
+SYNTH_CHARS = int(os.environ.get("SPEAKLOOP_SYNTH_CHARS", "400"))
+# A failed synth costs this much silence, so it should not be 40s.
+EDGE_TIMEOUT = int(os.environ.get("SPEAKLOOP_EDGE_TIMEOUT", "20"))
+# A synth "succeeded" whenever the file was non-empty, which let a 16-byte stub
+# count as audio. Real speech is tens of KB; anything this small is a failure
+# wearing a success's clothes.
+MIN_AUDIO_BYTES = 1024
+# Concurrent edge-tts calls. Playback stays strictly ordered; this only hides
+# the per-call jitter that no chunk size can remove.
+SYNTH_WORKERS = max(1, int(os.environ.get("SPEAKLOOP_SYNTH_WORKERS", "3")))
 # The opening chunk is deliberately small so audio starts in ~2s instead of ~9s.
 # 0 disables the ramp and every chunk is SYNTH_CHARS.
 FIRST_CHARS = int(os.environ.get("SPEAKLOOP_FIRST_CHUNK_CHARS", "240"))
@@ -292,28 +310,60 @@ def _say_wpm(rate: str) -> str | None:
 
 
 def synth(text: str, engine: str) -> str | None:
-    """Speak `text` into an audio file; return the path."""
+    """Speak `text` into an audio file; return the path.
+
+    The local `say` fallback used to be unreachable in the case that actually
+    happens. Both calls sat in ONE try block, so a `TimeoutExpired` from
+    edge-tts jumped straight to `except Exception: return None` and skipped the
+    fallback entirely — it only ever ran when edge-tts failed *quickly*, which
+    is the rare failure. A timeout is the common one, and it silently dropped
+    the chunk: you heard one chunk, then a long nothing.
+    """
     suffix = ".mp3" if engine == "edge" else ".aiff"
     fd, path = tempfile.mkstemp(suffix=suffix, prefix="speakloop-")
     os.close(fd)
-    try:
-        if engine == "edge":
-            cmd = ["edge-tts", "--voice", "en-US-AndrewNeural",
-                   "--text", text, "--write-media", path]
-            if SPEAK_RATE:
-                cmd.append(f"--rate={SPEAK_RATE}")   # =form: safe for -NN% too
-            r = subprocess.run(cmd, capture_output=True, timeout=40)
-            if r.returncode == 0 and os.path.getsize(path) > 0:
+    if engine == "edge":
+        cmd = ["edge-tts", "--voice", "en-US-AndrewNeural",
+               "--text", text, "--write-media", path]
+        if SPEAK_RATE:
+            cmd.append(f"--rate={SPEAK_RATE}")   # =form: safe for -NN% too
+        try:
+            r = subprocess.run(cmd, capture_output=True, timeout=EDGE_TIMEOUT)
+            if r.returncode == 0 and os.path.getsize(path) > MIN_AUDIO_BYTES:
                 return path
-        say_cmd = ["say", "-o", path]
+            print(f"  ! edge-tts rc={r.returncode} on {len(text)} chars "
+                  f"— falling back to local say", file=sys.stderr)
+        except Exception as e:
+            print(f"  ! edge-tts {type(e).__name__} on {len(text)} chars "
+                  f"— falling back to local say", file=sys.stderr)
+    # `say` must write to its OWN .aiff path. Handed the edge path (a .mp3), it
+    # produces a 16-BYTE file rather than failing — which sails past a
+    # `size > 0` check and is returned as valid audio, so afplay plays nothing.
+    # Measured: `say -o x.mp3` -> 16 bytes, afinfo cannot read it;
+    #           `say -o x.aiff` -> 91408 bytes, 1.98s of speech.
+    try:
+        fd2, aiff = tempfile.mkstemp(suffix=".aiff", prefix="speakloop-")
+        os.close(fd2)
+        say_cmd = ["say", "-o", aiff]
         wpm = _say_wpm(SPEAK_RATE)
         if wpm:
             say_cmd += ["-r", wpm]
         say_cmd.append(text)
         subprocess.run(say_cmd, capture_output=True, timeout=40)
-        return path if os.path.getsize(path) > 0 else None
+        if os.path.getsize(aiff) > MIN_AUDIO_BYTES:
+            try:
+                os.unlink(path)          # the unused edge-tts temp
+            except OSError:
+                pass
+            return aiff
+        os.unlink(aiff)
     except Exception:
-        return None
+        pass
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+    return None
 
 
 TTS_DIR = "/tmp/para-llm-tts"
@@ -561,20 +611,58 @@ def run(args) -> None:
                 synth_q.put(c)
 
     def synthesizer():
-        # One edge-tts call per ~1KB chunk (not per sentence). Order preserved:
-        # single thread, FIFO in, FIFO out.
-        while not stop.is_set():
-            c = synth_q.get()
-            if c is None:
-                audio_q.put(None)
-                return
-            if args.dry:
-                continue
-            g = gen[0]
-            p = synth(c, args.engine)
-            if p and g == gen[0]:     # cancelled mid-synth -> throw the audio away
-                audio_q.put((p, c))   # carry the text so the player can publish
-                                      # it for the mic self-echo guard
+        """Synthesize several chunks CONCURRENTLY, emit strictly in order.
+
+        It used to be one call at a time, which made every gap in playback a
+        direct function of one network round-trip. Measured on four chunks of
+        similar size: 6.7s, 11.3s, 1.9s, 8.4s. That spread is jitter, not
+        length, so no choice of chunk size removes it — a single slow call
+        always outlasts the chunk currently playing and you hear the pause.
+
+        A small ordered pool hides it: while one call is slow the others are
+        already finishing, and results are still consumed in submission order so
+        playback order is unchanged. Same shape as the rewrite pool above.
+        """
+        pool = ThreadPoolExecutor(max_workers=SYNTH_WORKERS)
+        pend: "deque" = deque()
+        drained = False
+        try:
+            while not stop.is_set():
+                # Keep the pool fed, but only a little ahead — a deep backlog
+                # would be work thrown away by the next "cancel".
+                while not drained and len(pend) < SYNTH_WORKERS + 1:
+                    try:
+                        c = synth_q.get(timeout=0.05 if pend else 0.3)
+                    except queue.Empty:
+                        break
+                    if c is None:
+                        drained = True
+                        break
+                    if args.dry:
+                        continue
+                    pend.append((pool.submit(synth, c, args.engine), c, gen[0]))
+                if not pend:
+                    if drained:
+                        audio_q.put(None)
+                        return
+                    continue
+                fut, c, g = pend.popleft()
+                try:
+                    p = fut.result()
+                except Exception:
+                    p = None
+                if not p:
+                    continue
+                if g == gen[0]:           # cancelled mid-synth -> discard
+                    audio_q.put((p, c))   # carry the text so the player can
+                                          # publish it for the mic echo guard
+                else:
+                    try:
+                        os.unlink(p)
+                    except OSError:
+                        pass
+        finally:
+            pool.shutdown(wait=False)
 
     def _render_turn(turn, per_agent: int, cap: int | None = None) -> str:
         """One request/response turn as 'You: …' / 'Agent: …'.
