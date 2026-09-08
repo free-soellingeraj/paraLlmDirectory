@@ -25,6 +25,8 @@ import json
 import re
 import subprocess
 import sys
+import threading
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
@@ -106,18 +108,46 @@ class AgentSource(ABC):
         to interleave 'user' events for anchoring."""
         return [("agent", ch.text) for ch in self.backlog(n)]
 
+    #: How often follow() re-checks which transcript is live.
+    RELOCATE_SECS = 5.0
+
     def follow(self) -> Iterator[TextChunk]:
-        """Yield text blocks as they are appended — the OS does the follow."""
-        p = self.locate()
-        if not p:
-            return
-        proc = subprocess.Popen(["tail", "-n", "0", "-F", str(p)],
-                                stdout=subprocess.PIPE, text=True)
-        try:
-            for line in proc.stdout:            # blocks until the file grows
-                yield from self._parse(line)
-        finally:
-            proc.terminate()
+        """Yield text blocks as they are appended — the OS does the follow.
+
+        Re-checks which file is live rather than tailing whatever was newest at
+        start-up forever. Without this, a `/clear`, a resume, or a second session
+        started in the same directory leaves the loop reading a transcript nobody
+        is writing to — indistinguishable from "it stopped talking", and the
+        reason it could narrate the wrong conversation.
+        """
+        while True:
+            p = self.locate()
+            if not p:
+                return
+            proc = subprocess.Popen(["tail", "-n", "0", "-F", str(p)],
+                                    stdout=subprocess.PIPE, text=True)
+            switched = threading.Event()
+
+            def watch(current=p, proc=proc):
+                while not switched.wait(self.RELOCATE_SECS):
+                    try:
+                        if self.locate() != current:
+                            proc.terminate()
+                            return
+                    except Exception:
+                        return
+
+            t = threading.Thread(target=watch, daemon=True)
+            t.start()
+            try:
+                for line in proc.stdout:        # blocks until the file grows
+                    yield from self._parse(line)
+            finally:
+                switched.set()
+                proc.terminate()
+            if self.locate() == p:              # tail died for another reason
+                return
+            print(f"[transcript switched -> {self.locate()}]", file=sys.stderr)
 
     def _parse(self, line: str) -> Iterator[TextChunk]:
         line = line.strip()
@@ -148,10 +178,41 @@ class ClaudeCodeSource(AgentSource):
         enc = re.sub(r"[^A-Za-z0-9-]", "-", self.cwd)
         return Path.home() / ".claude" / "projects" / enc
 
+    def _live_session_id(self) -> Optional[str]:
+        """The session Claude Code is ACTUALLY running in this cwd.
+
+        Claude publishes it through the hooks this repo already installs
+        (`state-tracker.sh` -> /tmp/claude-state/by-cwd/<cwd_safe>.json), the
+        same source ADR-011 uses for working state. Reading it beats guessing.
+        """
+        safe = re.sub(r"^_", "", self.cwd.replace("/", "_"))
+        try:
+            data = json.loads(
+                Path(f"/tmp/claude-state/by-cwd/{safe}.json").read_text())
+        except (OSError, ValueError):
+            return None
+        sid = data.get("session_id")
+        return sid if sid and sid != "unknown" else None
+
     def locate(self) -> Optional[Path]:
+        """The transcript for THIS pane's session.
+
+        Newest-by-mtime is only a proxy for "the session this pane is running",
+        and it is wrong whenever several sessions share a cwd — which is normal:
+        one project directory here held SIX transcripts, and the loop picked the
+        third-newest and narrated somebody else's conversation while the purple
+        pane was entirely correct. Ask Claude which session is live; fall back to
+        mtime only when the hook file is missing (older session, hooks not
+        installed).
+        """
         d = self._project_dir()
         if not d.is_dir():
             return None
+        sid = self._live_session_id()
+        if sid:
+            f = d / f"{sid}.jsonl"
+            if f.is_file():
+                return f
         files = sorted(d.glob("*.jsonl"), key=lambda f: f.stat().st_mtime, reverse=True)
         return files[0] if files else None
 

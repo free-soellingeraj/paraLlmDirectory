@@ -809,3 +809,38 @@ were going to succeed and dropped to the local voice.
 **8/8 kept the edge voice, 0 fallbacks, 3.8s wall, slowest call 1.4s.**
 
 **File**: `prototype/speak_loop.py`
+
+## BUG-045: narrated the wrong session — right pane, wrong conversation
+
+**Reported**: "it's speaking the wrong pane, it's supposed to speak the purple
+one."
+
+**The purple was correct.** Ownership all agreed: `@speak_on` on `%54`,
+`stream.pane = 54`, loop bound to `%54`. What was wrong was WHICH TRANSCRIPT
+inside that pane's project directory it had opened.
+
+`ClaudeCodeSource.locate()` picked the newest `.jsonl` by **mtime**. That is only
+a proxy for "the session this pane is running", and this project directory holds
+**34 transcripts** — one per session ever started in that cwd. The loop had
+opened `5709bcb8`, the third-newest, while the pane's live session was
+`88b9aeb5`. Right pane, someone else's conversation.
+
+**Claude publishes the answer.** `state-tracker.sh` (the hooks this repo already
+installs, and the same source ADR-011 uses for working state) writes
+`/tmp/claude-state/by-cwd/<cwd_safe>.json` containing `session_id`. `locate()`
+now reads it and opens that transcript, falling back to mtime only when the hook
+file is missing (older session, or hooks not installed).
+
+**Second defect: it never re-checked.** `follow()` resolved once at start-up and
+tailed that file forever, so a `/clear`, a resume, or a second session in the
+same directory left it reading a transcript nobody writes to — indistinguishable
+from "it stopped talking". `follow()` now re-locates every `RELOCATE_SECS` (5s)
+and restarts the tail when the live file changes.
+
+**Verified**: on this project's 34 sessions, `locate()` now returns the
+hook-reported live session (mtime happened to agree at that instant and would
+not have minutes earlier); with the hook file removed it still falls back to
+mtime. And a simulated mid-follow switch was picked up — heard "session A", saw
+the switch, heard "session B".
+
+**File**: `prototype/agent_source.py`
