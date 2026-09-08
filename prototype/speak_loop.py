@@ -219,8 +219,21 @@ def sentences(text: str):
 # margin that keeps playback continuous. The per-call overhead the old comment
 # worried about is real but tiny next to a dropped chunk.
 SYNTH_CHARS = int(os.environ.get("SPEAKLOOP_SYNTH_CHARS", "400"))
-# A failed synth costs this much silence, so it should not be 40s.
-EDGE_TIMEOUT = int(os.environ.get("SPEAKLOOP_EDGE_TIMEOUT", "20"))
+# MUST sit above edge-tts's own internal stall, or we abandon calls that were
+# going to succeed and drop to the local voice — which sounds far worse than
+# waiting. Measured IN-PROCESS (so this is not our process spawning), four
+# sequential synths of the same 380-char text:
+#
+#     call 1  13.27s     call 2   0.83s
+#     call 3  14.93s     call 4   0.87s
+#
+# Every other connection stalls ~14s: edge-tts retrying its own 403 / clock-skew
+# handshake with Microsoft. 20s sat right on top of that, so ordinary variance
+# tipped a recoverable call into the fallback voice. 45s clears it with room,
+# and costs nothing when calls are fast because SYNTH_WORKERS keeps three in
+# flight — a straggler overlaps the others rather than stopping playback.
+# (Verified: three CONCURRENT 380-char calls finish in 2.1s wall.)
+EDGE_TIMEOUT = int(os.environ.get("SPEAKLOOP_EDGE_TIMEOUT", "45"))
 # A synth "succeeded" whenever the file was non-empty, which let a 16-byte stub
 # count as audio. Real speech is tens of KB; anything this small is a failure
 # wearing a success's clothes.
@@ -228,6 +241,7 @@ MIN_AUDIO_BYTES = 1024
 # Concurrent edge-tts calls. Playback stays strictly ordered; this only hides
 # the per-call jitter that no chunk size can remove.
 SYNTH_WORKERS = max(1, int(os.environ.get("SPEAKLOOP_SYNTH_WORKERS", "3")))
+SAY_VOICE = os.environ.get("SPEAKLOOP_SAY_VOICE", "Samantha")
 # The opening chunk is deliberately small so audio starts in ~2s instead of ~9s.
 # 0 disables the ramp and every chunk is SYNTH_CHARS.
 FIRST_CHARS = int(os.environ.get("SPEAKLOOP_FIRST_CHUNK_CHARS", "240"))
@@ -319,6 +333,11 @@ def synth(text: str, engine: str) -> str | None:
     is the rare failure. A timeout is the common one, and it silently dropped
     the chunk: you heard one chunk, then a long nothing.
     """
+    # Blank text is not a synthesis failure, it is nothing to say. Without this
+    # it burned the full retry cycle against edge-tts and then produced a silent
+    # `say` file, which the player dutifully "played".
+    if not text or not text.strip():
+        return None
     suffix = ".mp3" if engine == "edge" else ".aiff"
     fd, path = tempfile.mkstemp(suffix=suffix, prefix="speakloop-")
     os.close(fd)
@@ -327,15 +346,30 @@ def synth(text: str, engine: str) -> str | None:
                "--text", text, "--write-media", path]
         if SPEAK_RATE:
             cmd.append(f"--rate={SPEAK_RATE}")   # =form: safe for -NN% too
-        try:
-            r = subprocess.run(cmd, capture_output=True, timeout=EDGE_TIMEOUT)
-            if r.returncode == 0 and os.path.getsize(path) > MIN_AUDIO_BYTES:
-                return path
-            print(f"  ! edge-tts rc={r.returncode} on {len(text)} chars "
-                  f"— falling back to local say", file=sys.stderr)
-        except Exception as e:
-            print(f"  ! edge-tts {type(e).__name__} on {len(text)} chars "
-                  f"— falling back to local say", file=sys.stderr)
+        # RETRY ONCE before degrading to the robot voice. Measured serially on
+        # 380-char chunks: 15.3s, then 1.7s, then 1.2s — the cost is establishing
+        # the WebSocket, not the synthesis, so a failure is nearly always a cold
+        # connection and the retry lands on a warm one. Neither size nor
+        # concurrency is implicated: three CONCURRENT 380-char calls finished in
+        # 2.1s wall. Falling straight back to `say` swapped the voice mid-
+        # narration for what a second attempt fixes.
+        for attempt in (1, 2, 3):
+            try:
+                r = subprocess.run(cmd, capture_output=True, timeout=EDGE_TIMEOUT)
+                if r.returncode == 0 and os.path.getsize(path) > MIN_AUDIO_BYTES:
+                    if attempt == 2:
+                        print(f"  · edge-tts recovered on retry "
+                              f"({len(text)} chars)", file=sys.stderr)
+                    return path
+                why = f"rc={r.returncode}"
+            except Exception as e:
+                why = type(e).__name__
+            if attempt < 3:
+                print(f"  · edge-tts {why} on {len(text)} chars "
+                      f"— retry {attempt}", file=sys.stderr)
+            else:
+                print(f"  ! edge-tts {why} on {len(text)} chars after 3 tries "
+                      f"— falling back to local say", file=sys.stderr)
     # `say` must write to its OWN .aiff path. Handed the edge path (a .mp3), it
     # produces a 16-BYTE file rather than failing — which sails past a
     # `size > 0` check and is returned as valid audio, so afplay plays nothing.
@@ -344,7 +378,10 @@ def synth(text: str, engine: str) -> str | None:
     try:
         fd2, aiff = tempfile.mkstemp(suffix=".aiff", prefix="speakloop-")
         os.close(fd2)
-        say_cmd = ["say", "-o", aiff]
+        # Of the 37 local voices, all but Samantha are novelty ("Bells",
+        # "Bubbles", "Bad News"). Name it rather than inherit whatever the
+        # system default happens to be.
+        say_cmd = ["say", "-o", aiff, "-v", SAY_VOICE]
         wpm = _say_wpm(SPEAK_RATE)
         if wpm:
             say_cmd += ["-r", wpm]
@@ -1048,6 +1085,22 @@ def run(args) -> None:
             elif owner == safe:
                 grace = 0.0          # claim seen; enforce strictly from now on
             time.sleep(0.5)
+
+    def warm_tts():
+        """Pay the WebSocket cold start on a throwaway phrase, not on your first
+        sentence. Measured: a cold edge-tts call runs ~15s where a warm one runs
+        ~1.5s, and that first call is exactly the one sitting between you and
+        time-to-first-word."""
+        if args.dry or args.engine != "edge":
+            return
+        p = synth("Ready.", "edge")
+        if p:
+            try:
+                os.unlink(p)
+            except OSError:
+                pass
+
+    threading.Thread(target=warm_tts, daemon=True).start()
 
     tf = threading.Thread(target=feeder, daemon=True)
     tsub = threading.Thread(target=submitter, daemon=True)
