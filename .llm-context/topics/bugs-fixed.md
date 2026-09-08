@@ -844,3 +844,32 @@ mtime. And a simulated mid-follow switch was picked up — heard "session A", sa
 the switch, heard "session B".
 
 **File**: `prototype/agent_source.py`
+
+## BUG-046: the acknowledgement tone was inaudible under narration
+
+**Found by watching the live logs**, not reported directly:
+
+```
+14:10:27  wake[%40]  repeat trigger: '(buzzing) Recap.'   -> fired, acked
+14:10:30  wake[%40]  repeat trigger: 'recap.'             -> debounced
+```
+
+The command was said again three seconds after it had already fired and acked.
+Narration was playing at the time (`tts.speaking` live, a recap mid-flight), and
+`chime()` called `afplay` with **no `-v`** — so Pop.aiff, a short quiet click,
+simply disappeared under continuous speech.
+
+This is the same complaint as BUG-041/042 surviving both fixes: the tone was
+firing at the right *moment*, it just could not be heard. Since the tone is the
+entire mechanism that stops commands being repeated — and repeats are what
+stack hand-offs and race the pipeline — it has to win against the voice.
+
+`chime()` now takes a volume; `ack` and `buzz` use `STT_WAKE_ACK_VOLUME` (2.5,
+an afplay multiplier where 1.0 is as-recorded). The dictation pair (Glass /
+Bottle) deliberately stays at unity — nothing is playing then, by construction.
+
+**Also observed working in production** in the same log window:
+`edge-tts rc=1 on 85 chars — retry 1` followed by `recovered on retry`. Before
+BUG-044 that was a drop to the local voice.
+
+**File**: `plugins/stt/wake-listener.sh`

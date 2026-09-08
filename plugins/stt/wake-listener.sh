@@ -113,8 +113,18 @@ kill_recorder() {
     done
 }
 
+# Volume for the acknowledgement, which competes with live narration. afplay's
+# -v is a multiplier (1.0 = as recorded), and Pop.aiff is a short quiet click —
+# at unity it simply disappears under speech. Observed: a "recap" acked at
+# 14:10:27 while narration was playing, and the same command was said again 3s
+# later, i.e. the tone fired and was not heard. The tone is the whole mechanism
+# that stops commands being repeated, so it has to win against the voice.
+STT_WAKE_ACK_VOLUME="${STT_WAKE_ACK_VOLUME:-2.5}"
+
 chime() {
-    [[ -f "$1" ]] && command -v afplay >/dev/null 2>&1 && afplay "$1" >/dev/null 2>&1 &
+    local f="$1" vol="${2:-1}"
+    [[ -f "$f" ]] && command -v afplay >/dev/null 2>&1 \
+        && afplay -v "$vol" "$f" >/dev/null 2>&1 &
 }
 
 player_pid() { cat "$SPOOL/player.pid" 2>/dev/null; }
@@ -361,8 +371,8 @@ announce() {
 # It also fires for a DEBOUNCED command. A swallowed command that made no sound
 # is exactly the case that provokes another repeat — the tone has to say "heard
 # you", separately from whether it acted.
-ack() { chime "$STT_WAKE_ACK_SOUND"; }
-buzz() { chime "$STT_WAKE_FAIL_SOUND"; }
+ack() { chime "$STT_WAKE_ACK_SOUND" "$STT_WAKE_ACK_VOLUME"; }
+buzz() { chime "$STT_WAKE_FAIL_SOUND" "$STT_WAKE_ACK_VOLUME"; }
 
 # --- Mic self-echo guard -----------------------------------------------------
 # The TTS plays through the speakers, the mic hears it, and a magic word IN THE
