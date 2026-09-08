@@ -767,3 +767,45 @@ order is unchanged — verified with a jittered fake synth: 12/12 chunks, order
 preserved.
 
 **File**: `prototype/speak_loop.py`
+
+## BUG-044: the local fallback voice kept taking over
+
+**Reported**: "it's using the fallback voice which is total shit and I hate it —
+what is the problem? Can we not get what we need on edge-tts?"
+
+**Yes we can.** It was never edge-tts's capability, and it was neither chunk size
+nor our concurrency. Both were measured and cleared:
+
+```
+3 CONCURRENT 380-char calls  ->  all ok, 2.1s wall
+SERIAL 380-char calls        ->  15.3s, then 1.7s, then 1.2s
+```
+
+**The real mechanism**, measured IN-PROCESS under python3.11 so process spawning
+is excluded — four sequential synths of identical text:
+
+```
+call 1  13.27s      call 2  0.83s
+call 3  14.93s      call 4  0.87s
+```
+
+Every OTHER connection stalls ~14s. That is edge-tts retrying its own 403 /
+clock-skew handshake against Microsoft, inside the library. `EDGE_TIMEOUT=20`
+sat directly on top of that stall, so ordinary variance abandoned calls that
+were going to succeed and dropped to the local voice.
+
+**Fixes:**
+- `EDGE_TIMEOUT` 20 → **45**, clearing the ~14s stall with headroom. It costs
+  nothing when calls are fast, because `SYNTH_WORKERS=3` keeps three in flight —
+  a straggler overlaps the others instead of stopping playback.
+- **3 attempts** before degrading (was 2).
+- The fallback names **Samantha** explicitly. Of 37 local voices all the others
+  are novelty ("Bells", "Bubbles", "Bad News"); inheriting the system default was
+  leaving it to chance.
+- **Blank text short-circuits.** It used to burn the whole retry cycle against
+  edge-tts and then produce a silent `say` file that the player "played".
+
+**Verified**: 8 real 380-char chunks through the parallel pipeline —
+**8/8 kept the edge voice, 0 fallbacks, 3.8s wall, slowest call 1.4s.**
+
+**File**: `prototype/speak_loop.py`
