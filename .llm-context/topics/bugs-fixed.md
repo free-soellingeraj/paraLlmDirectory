@@ -725,3 +725,45 @@ The real gap is that eyes-free there is no way to ask where the binding is — t
 purple pane and status chip are both visual. Worth a "where" command.
 
 **File**: `plugins/stt/wake-listener.sh`
+
+## BUG-043: "speaks a chunk then pauses a loooong time" — large chunks failed outright
+
+**Reported**: chunk size on the Ctrl+b o path felt too large — one chunk, then a
+very long pause.
+
+**Measured, and it was worse than sizing.** At `SYNTH_CHARS=1100`:
+
+```
+ 240 chars   synth  1.2s  ->  11.2s of audio   ratio 0.10
+ 600 chars   FAILED — 40s timeout, no audio
+1100 chars   FAILED — 40s timeout, no audio
+```
+
+Large chunks were not slow, they were **failing**. So playback was: chunk one
+(~11s), then a 40s timeout producing nothing, then the next block. Exactly the
+reported symptom.
+
+**Three defects, each hiding the next:**
+
+1. **`SYNTH_CHARS` 1100 → 400.** Small chunks synthesize an order of magnitude
+   faster than they play, which is the margin that keeps playback continuous.
+2. **The `say` fallback was unreachable.** Both calls sat in ONE `try`, so a
+   `TimeoutExpired` from edge-tts jumped to `except Exception: return None` and
+   skipped the fallback — it only ran when edge-tts failed *quickly*, the rare
+   case. Timeout is the common one, and it dropped the chunk to silence. The
+   edge call now has its own try/except and logs the fallback.
+3. **The fallback wrote to the wrong extension.** `say -o file.mp3` produces a
+   **16-byte** file rather than failing; that passed the `size > 0` check and was
+   returned as valid audio, so afplay played nothing. Measured: `say -o x.mp3` →
+   16 bytes, unreadable; `say -o x.aiff` → 91408 bytes, 1.98s of speech. The
+   fallback now writes its own `.aiff`, and `MIN_AUDIO_BYTES` (1024) rejects a
+   stub that is "non-empty" but not audio.
+
+**And a fourth, which chunk size cannot fix: jitter.** Four chunks of similar
+size measured 6.7s, 11.3s, 1.9s, 8.4s. A single-threaded synthesizer turns any
+slow call into a gap. `SYNTH_WORKERS` (3) synthesizes concurrently and consumes
+futures in submission order, so a slow call hides behind the others and playback
+order is unchanged — verified with a jittered fake synth: 12/12 chunks, order
+preserved.
+
+**File**: `prototype/speak_loop.py`
