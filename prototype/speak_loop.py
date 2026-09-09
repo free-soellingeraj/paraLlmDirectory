@@ -473,17 +473,29 @@ def run(args) -> None:
     loc = src.locate()
     print(f"[source: {src.name}]  {loc}", file=sys.stderr)
     # A transcript nobody is writing to produces exactly the symptom "it stopped
-    # streaming chunks", and looks identical to a broken pipeline. Say so at
-    # startup: if the file we are about to `tail -F` is already cold, the pane
-    # almost certainly resolved to the wrong session.
+    # streaming chunks". But COLD IS NOT WRONG: a correct session that has simply
+    # been idle looks identical, and this warned on exactly that — the live loop
+    # for this very pane, on the right file, after 38 quiet minutes. A diagnostic
+    # that cries wolf on the healthy case is worse than none, because it is the
+    # one you learn to ignore.
+    #
+    # locate() now knows which session Claude says is live (see
+    # ClaudeCodeSource._live_session_id), so the warning can be precise: only
+    # complain when the file is cold AND we could not confirm it is the live
+    # one, i.e. we guessed by mtime.
     if loc is not None:
         try:
             age = time.time() - loc.stat().st_mtime
-            if age > 600:
+            confirmed = False
+            getter = getattr(src, "_live_session_id", None)
+            if getter:
+                sid = getter()
+                confirmed = bool(sid and loc.stem == sid)
+            if age > 600 and not confirmed:
                 print(f"[warning: that transcript was last written "
-                      f"{int(age // 60)} min ago — if this pane is active, it "
-                      f"resolved to the WRONG session and nothing will stream]",
-                      file=sys.stderr)
+                      f"{int(age // 60)} min ago and is NOT the session Claude "
+                      f"reports as live — this pane may be narrating the wrong "
+                      f"conversation]", file=sys.stderr)
         except OSError:
             pass
     # Enable moment. Live-follow only speaks blocks written AFTER this, so
