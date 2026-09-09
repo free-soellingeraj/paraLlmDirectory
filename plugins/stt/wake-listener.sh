@@ -711,7 +711,10 @@ do_send() {
     # ~1s per 200 chars on top of the base, capped at 12s.
     local _need=$(( 2500 + (INJECTED_CHARS * 5) ))
     (( _need > 12000 )) && _need=12000
-    wait_input_ready "$_need" \
+    # Do not accept "stable" before the paste has plausibly finished arriving.
+    local _floor=$(( 300 + (INJECTED_CHARS * 2) ))
+    (( _floor > 4000 )) && _floor=4000
+    wait_input_ready "$_need" "$_floor" \
         || log_lifecycle "send: input never settled after ${_need}ms; submitting best-effort"
     if ! tmux send-keys -t "$PANE_ID" Enter 2>/dev/null; then
         log_lifecycle "send FAILED: send-keys error"
@@ -767,14 +770,27 @@ wait_input_ready() {
     # submitted. Both of today's failures were long (933 and 818 chars) while
     # the 1022-char one that happened to settle in time succeeded, which is the
     # signature of a cap that is simply too tight rather than a broken paste.
+    # "Unchanged across two reads" is not sufficient on its own. capture-pane
+    # reads the RENDERED box, and while a large paste is still arriving two
+    # consecutive reads can return the SAME partial text — which looks stable and
+    # is not. Observed: 329 chars injected, Enter fired 1s later against a
+    # budget of 4.1s, and the box still held text afterwards. Across a day that
+    # was 42 failed submits against 37 successful ones.
+    #
+    # So stability must also clear a FLOOR that scales with what was sent. The
+    # floor is a minimum, `max` is the ceiling, and the length check is
+    # deliberately not used as the signal: the rendered box wraps and truncates,
+    # so its character count is not comparable to what was injected.
     local prev="" cur stable=0 waited=0
     local max="${1:-2500}"
+    local floor="${2:-0}"
+    (( floor > max )) && floor=$max
     while (( waited < max )); do
         cur="$(capture_input_region)"
         if [[ -n "$cur" ]]; then
             if [[ "$cur" == "$prev" ]]; then
                 stable=$((stable + 1))
-                (( stable >= 2 )) && return 0
+                (( stable >= 2 && waited >= floor )) && return 0
             else
                 stable=0
             fi

@@ -873,3 +873,45 @@ Bottle) deliberately stays at unity — nothing is playing then, by construction
 BUG-044 that was a drop to the local voice.
 
 **File**: `plugins/stt/wake-listener.sh`
+
+## BUG-047: "send" pressed Enter on a half-arrived paste (53% failure rate)
+
+**Found in the monitor**, then confirmed against the day's tally:
+
+```
+submitted=37   not-submitted=42   never-settled=5     -> 53% of sends failed
+```
+
+A representative failure:
+
+```
+12:04:28  dictation injected: 329 chars
+12:04:29  send: Enter pressed but input still non-empty — not submitted
+```
+
+One second, against a budget of `2500 + 329*5 = 4145ms`. `wait_input_ready`
+returned EARLY.
+
+**Cause**: "unchanged across two reads" is not sufficient on its own.
+`capture_input_region` reads the RENDERED box, and while a large `send-keys`
+paste is still arriving two consecutive reads can return the SAME partial text.
+That looks stable and is not, so Enter fired against a box that was still
+filling — and the leftover text is exactly what the post-check then reports as
+"still non-empty".
+
+**Fix**: stability must also clear a FLOOR that scales with what was injected
+(`300ms + 2ms/char`, capped at 4s), alongside the existing ceiling
+(`2500ms + 5ms/char`, capped at 12s). The rendered box wraps and truncates, so
+its character count is NOT comparable to the injected length — a length check
+would be the obvious signal and is the wrong one. Time is the honest proxy.
+
+**Verified** by replaying a paste that reads identical twice and then completes:
+- old: returned after **223ms**, accepting the partial box
+- new: returned after **1105ms**, once the rest had landed
+
+**Caveat**: validated in isolation only. The machine was at load ~100 with swap
+97% exhausted when this was written, so the end-to-end rate needs re-measuring
+after a reboot. Load makes the false-stable read far more likely (capture-pane
+lags) but is not the cause — the heuristic was always able to be fooled.
+
+**File**: `plugins/stt/wake-listener.sh`
