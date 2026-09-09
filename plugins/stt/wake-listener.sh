@@ -1121,7 +1121,21 @@ while mode_active; do
         # The triggered word has left the window once a line arrives without it
         # (alias-aware: transcribe's "subscribe" echo and send's "sent" echo
         # must also keep the guard armed, or the command re-fires on itself).
-        if [[ -n "$echo_stem" ]] && ! line_has_echo "$norm_line" "$echo_stem"; then
+        #
+        # A line whose normalized form is EMPTY does not count. whisper emits
+        # "[BLANK_AUDIO]" constantly during silence, and normalize() strips it to
+        # nothing — which used to read as "a line without the stem" and disarmed
+        # the guard. The trigger word then re-fired on its own echo from whisper's
+        # 6s sliding window, so a dictation ended one second after it started:
+        #
+        #   08:30:29  transcribe trigger: '>> Transcribing.'   <- starts
+        #   08:30:30  transcribe-end trigger: 'transcribe.'    <- its own echo
+        #   08:30:30  dictation ended: no speech
+        #
+        # Silence carries no evidence that the word has left the window, so it
+        # must leave the latch exactly as it was.
+        if [[ -n "$echo_stem" && -n "$norm_line" ]] \
+            && ! line_has_echo "$norm_line" "$echo_stem"; then
             echo_stem=""
         fi
         if [[ "$state" == "listening" ]]; then
