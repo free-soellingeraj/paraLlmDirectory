@@ -135,3 +135,28 @@ REMOTE_SAVE_SCRIPT="${INSTALL_DIR:-}/plugins/remote-save/remote-save.sh"
 if [[ -n "${INSTALL_DIR:-}" && -x "$REMOTE_SAVE_SCRIPT" ]]; then
     "$REMOTE_SAVE_SCRIPT" &
 fi
+
+# --- Prune old resurrect saves ------------------------------------------------
+# tmux-continuum saves every minute and tmux-resurrect never deletes anything, so
+# this directory grows without bound: it reached 32,896 files / 131 MB here,
+# ~5 months of one-per-minute snapshots. That is not merely untidy — at that size
+# a plain `ls tmux_resurrect_*.txt` blows past ARG_MAX and fails, so ordinary
+# tooling (including anything of ours that globs the directory) silently stops
+# working on exactly the data a restore depends on.
+#
+# Keep the newest RESURRECT_KEEP, and NEVER touch whatever `last` points at —
+# that is the file a restore actually reads. `find | xargs` throughout, because
+# a glob is what breaks at this scale.
+RESURRECT_KEEP="${RESURRECT_KEEP:-50}"
+RESURRECT_DIR="$PARA_LLM_ROOT/recovery/resurrect"
+if [[ -d "$RESURRECT_DIR" ]]; then
+    keep_target="$(readlink "$RESURRECT_DIR/last" 2>/dev/null || true)"
+    find "$RESURRECT_DIR" -maxdepth 1 -name 'tmux_resurrect_*.txt' -type f -print0 2>/dev/null \
+        | xargs -0 stat -f '%m %N' 2>/dev/null \
+        | sort -rn \
+        | tail -n +$((RESURRECT_KEEP + 1)) \
+        | cut -d' ' -f2- \
+        | { [[ -n "$keep_target" ]] && grep -vF "$keep_target" || cat; } \
+        | tr '\n' '\0' \
+        | xargs -0 rm -f 2>/dev/null || true
+fi
