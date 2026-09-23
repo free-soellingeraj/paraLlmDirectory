@@ -915,3 +915,42 @@ after a reboot. Load makes the false-stable read far more likely (capture-pane
 lags) but is not the cause — the heuristic was always able to be fooled.
 
 **File**: `plugins/stt/wake-listener.sh`
+
+## BUG-048: nothing ever checked whether the microphone was working
+
+**Reported three separate times** as "voice commands don't work", "the magic
+words aren't working", "transcription keywords are not working". Every time the
+cause was the same one line: macOS input volume sitting at **27**.
+
+**Why it kept costing 20 minutes**: a deaf microphone and a broken pipeline are
+indistinguishable from the outside. `wake.state` says `listening`, all workers
+are alive, whisper is running and writing to `wake.log`, nothing errors — and
+`do_diagnostic` reported exactly that: workers alive, queues empty, speech
+service reachable. It never looked at whether AUDIO WAS ARRIVING, which was the
+only thing wrong.
+
+The first two times this was misdiagnosed here as an AirPods routing problem,
+then as mic contention with `rec`. Both were guesses at a mechanism when the
+input level was one `osascript` call away.
+
+**Fix, two halves:**
+- `mic_health()` — of the last 40 whisper segments, how many contain speech?
+  Judged by `normalize()`, the same function the command matcher uses, so
+  `[BLANK_AUDIO]` and `(birds chirping)` correctly count as NOT speech. Reports
+  the input volume alongside, because a person not talking produces the same
+  silence as a dead mic — the volume is what separates them. Wired into
+  `diagnostic`.
+- A start-up warning when input volume is below `STT_WAKE_MIN_INPUT_VOLUME`
+  (40): logged, shown in tmux, and SPOKEN, so an eyes-free user hears it at the
+  moment they enable the mode rather than discovering it later.
+
+**Deliberately warns rather than raising the volume itself.** Silently
+rewriting a system audio setting is the kind of thing that surprises someone
+mid-meeting; being told is enough, since the fix is one slider.
+
+Sample output, live: `I can hear you: 31 of the last 31 segments had speech.
+Input volume is 75.` And on the failure: `I am hearing silence: none of the last
+2 segments contained speech. Input volume is 27 out of 100, which is too low to
+hear you — raise it in Sound settings.`
+
+**File**: `plugins/stt/wake-listener.sh`
