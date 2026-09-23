@@ -174,6 +174,55 @@ normalize() {
         | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z ' | tr -s ' '
 }
 
+# --- Mic health ---------------------------------------------------------------
+# The diagnostic could report every worker alive, every queue empty and the
+# speech service reachable while the microphone delivered nothing but silence,
+# because nothing ever looked at whether AUDIO WAS ARRIVING. That failure has
+# now cost three separate debugging sessions, each ending at the same one-line
+# cause: macOS input volume sitting at 27.
+#
+# "Silence" is judged the way the command matcher judges it — by normalize(),
+# which strips whisper's noise annotations. "[BLANK_AUDIO]" and "(birds
+# chirping)" are NOT speech, and a run of them is exactly what a too-quiet mic
+# produces. A person simply not talking looks the same, which is why the input
+# volume is reported alongside rather than inferred from the silence.
+STT_WAKE_MIN_INPUT_VOLUME="${STT_WAKE_MIN_INPUT_VOLUME:-40}"
+
+input_volume() {
+    command -v osascript >/dev/null 2>&1 || return 1
+    osascript -e 'input volume of (get volume settings)' 2>/dev/null
+}
+
+# Echoes a spoken-English sentence about whether the mic is working.
+mic_health() {
+    local lines heard=0 total=0 vol line n
+    lines="$(tail -n 40 "$WAKE_LOG" 2>/dev/null)"
+    while IFS= read -r line; do
+        [[ -n "$line" ]] || continue
+        total=$((total + 1))
+        n="$(normalize "$line")"
+        [[ -n "$n" ]] && heard=$((heard + 1))
+    done <<< "$lines"
+
+    vol="$(input_volume)"
+    local volmsg=""
+    if [[ -n "$vol" ]]; then
+        if [[ "$vol" -lt "$STT_WAKE_MIN_INPUT_VOLUME" ]]; then
+            volmsg=" Input volume is $vol out of 100, which is too low to hear you — raise it in Sound settings."
+        else
+            volmsg=" Input volume is $vol."
+        fi
+    fi
+
+    if [[ "$total" -eq 0 ]]; then
+        printf '%s' "I have not transcribed anything yet.$volmsg"
+    elif [[ "$heard" -eq 0 ]]; then
+        printf '%s' "I am hearing silence: none of the last $total segments contained speech.$volmsg"
+    else
+        printf '%s' "I can hear you: $heard of the last $total segments had speech.$volmsg"
+    fi
+}
+
 cleanup() {
     local pid
     pid="$(cat "$REC_PID_FILE" 2>/dev/null)"
@@ -474,6 +523,25 @@ whisper-stream -m "$MODEL_PATH" -t 4 --step "$STT_WAKE_STEP_MS" --length 6000 \
 echo "$!" > "$STREAM_PID_FILE"
 echo "listening" > "$STATE_FILE"
 log_lifecycle "listening for '$STT_WAKE_TRANSCRIBE_WORD' / '$STT_WAKE_REPEAT_WORD' / '$STT_WAKE_SEND_WORD'"
+
+# Say something the moment the mic is too quiet to work, rather than waiting for
+# someone to notice that no command has landed for twenty minutes and think to
+# ask for a diagnostic. Checked at start-up only: input volume is a system
+# setting other apps change (a call, a meeting), so it is right at exactly the
+# moment the mode is turned on and can drift afterwards — the `diagnostic`
+# command covers the drift case.
+#
+# Deliberately warns rather than raising the volume itself. Silently rewriting a
+# system audio setting is the kind of thing that surprises someone mid-meeting,
+# and being told is enough: the fix is one slider.
+_vol="$(input_volume)"
+if [[ -n "$_vol" && "$_vol" -lt "$STT_WAKE_MIN_INPUT_VOLUME" ]]; then
+    log_lifecycle "WARNING: input volume $_vol < $STT_WAKE_MIN_INPUT_VOLUME — voice commands will not be heard"
+    tmux display-message -t "$PANE_ID" \
+        "🎤 Input volume $_vol is too low — voice commands will not be heard" 2>/dev/null || true
+    command -v say >/dev/null 2>&1 && \
+        ( say "Warning. Microphone input volume is $_vol, too low to hear commands." >/dev/null 2>&1 & )
+fi
 
 state="listening"
 dict_started=0
@@ -823,6 +891,7 @@ do_diagnostic() {
         else
             report="$report Voice listener is down."
         fi
+        report="$report $(mic_health)"
         [[ "$PAUSED" == "1" ]] && report="$report Playback paused, say ${STT_WAKE_PLAY_WORD} to resume."
         if curl -s -m 3 -o /dev/null "https://speech.platform.bing.com" 2>/dev/null; then
             report="$report Speech service reachable."
