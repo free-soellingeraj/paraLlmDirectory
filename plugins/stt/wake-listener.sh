@@ -193,6 +193,19 @@ input_volume() {
     osascript -e 'input volume of (get volume settings)' 2>/dev/null
 }
 
+# WHICH device the level belongs to. macOS stores input volume PER DEVICE, and
+# that is the whole reason this problem kept coming back: raising the level on
+# the MacBook mic did nothing the next time AirPods became the default input,
+# because AirPods carries its own stored 27. Reporting a bare number sent three
+# debugging sessions looking for something that was "resetting" a setting that
+# was never reset — a different device was simply selected.
+input_device() {
+    command -v system_profiler >/dev/null 2>&1 || return 1
+    system_profiler SPAudioDataType 2>/dev/null | awk '
+        /^        [A-Za-z].*:$/ { dev = $0; sub(/^ +/, "", dev); sub(/:$/, "", dev) }
+        /Default Input Device: Yes/ { print dev; exit }'
+}
+
 # Echoes a spoken-English sentence about whether the mic is working.
 mic_health() {
     local lines heard=0 total=0 vol line n
@@ -205,12 +218,14 @@ mic_health() {
     done <<< "$lines"
 
     vol="$(input_volume)"
-    local volmsg=""
+    local dev volmsg=""
+    dev="$(input_device)"
+    [[ -n "$dev" ]] || dev="the input device"
     if [[ -n "$vol" ]]; then
         if [[ "$vol" -lt "$STT_WAKE_MIN_INPUT_VOLUME" ]]; then
-            volmsg=" Input volume is $vol out of 100, which is too low to hear you — raise it in Sound settings."
+            volmsg=" Input is $dev at volume $vol out of 100, too low to hear you. Raise it in Sound settings, or switch input to the MacBook microphone."
         else
-            volmsg=" Input volume is $vol."
+            volmsg=" Input is $dev at volume $vol."
         fi
     fi
 
@@ -536,11 +551,12 @@ log_lifecycle "listening for '$STT_WAKE_TRANSCRIBE_WORD' / '$STT_WAKE_REPEAT_WOR
 # and being told is enough: the fix is one slider.
 _vol="$(input_volume)"
 if [[ -n "$_vol" && "$_vol" -lt "$STT_WAKE_MIN_INPUT_VOLUME" ]]; then
-    log_lifecycle "WARNING: input volume $_vol < $STT_WAKE_MIN_INPUT_VOLUME — voice commands will not be heard"
+    _dev="$(input_device)"; [[ -n "$_dev" ]] || _dev="the input device"
+    log_lifecycle "WARNING: $_dev input volume $_vol < $STT_WAKE_MIN_INPUT_VOLUME — voice commands will not be heard"
     tmux display-message -t "$PANE_ID" \
-        "🎤 Input volume $_vol is too low — voice commands will not be heard" 2>/dev/null || true
+        "🎤 $_dev input volume $_vol is too low — voice commands will not be heard" 2>/dev/null || true
     command -v say >/dev/null 2>&1 && \
-        ( say "Warning. Microphone input volume is $_vol, too low to hear commands." >/dev/null 2>&1 & )
+        ( say "Warning. $_dev input volume is $_vol, too low to hear commands." >/dev/null 2>&1 & )
 fi
 
 state="listening"
