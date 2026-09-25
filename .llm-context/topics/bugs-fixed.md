@@ -954,3 +954,33 @@ Input volume is 75.` And on the failure: `I am hearing silence: none of the last
 hear you — raise it in Sound settings.`
 
 **File**: `plugins/stt/wake-listener.sh`
+
+## BUG-049: input volume is PER DEVICE — nothing was "resetting" it
+
+**Reported** a fourth time, this time by the new start-up warning itself:
+"microphone input volume is too low to hear commands".
+
+**The mechanism, finally.** macOS stores input volume **per input device**. The
+default input had switched to **AirPods Pro**, which carries its own stored
+level of 27. Raising the level in an earlier session only ever raised the
+MacBook Pro Microphone — so the moment AirPods became the default input again,
+the reading was 27 and voice commands went dead.
+
+Nothing was resetting anything. A different device was selected, with its own
+gain. Three sessions were spent hunting for a culprit that did not exist, and
+the reason the search went nowhere is that the diagnostic reported a bare
+number: "Input volume is 27" invites the question "what keeps changing it?",
+where "Input is AirPods Pro at volume 27" answers it outright.
+
+**Fix**: `input_device()` reports the current default input, and both the
+`diagnostic` sentence and the start-up warning now name it. The low-volume
+message also suggests switching input to the MacBook microphone, which is the
+durable fix for this setup.
+
+**Worth knowing for AirPods specifically**: using them as the INPUT device forces
+the low-quality bidirectional codec, degrading both the microphone and the TTS
+audio you hear. AirPods for OUTPUT with the MacBook microphone for INPUT gives
+better speech recognition *and* better narration audio, and sidesteps the
+per-device volume trap entirely.
+
+**File**: `plugins/stt/wake-listener.sh`
