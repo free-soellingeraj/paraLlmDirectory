@@ -549,14 +549,49 @@ log_lifecycle "listening for '$STT_WAKE_TRANSCRIBE_WORD' / '$STT_WAKE_REPEAT_WOR
 # Deliberately warns rather than raising the volume itself. Silently rewriting a
 # system audio setting is the kind of thing that surprises someone mid-meeting,
 # and being told is enough: the fix is one slider.
+# Raise it rather than only complaining. Five separate sessions have now ended
+# at a too-quiet input, and the warning added earlier did its job — it named the
+# cause immediately instead of costing twenty minutes — but the remaining step
+# was still a human walking to Sound settings every time.
+#
+# The earlier argument against touching a system setting was that it could
+# surprise someone mid-meeting. That does not apply HERE: this runs only when
+# speak mode is deliberately switched on, and voice mode with an inaudible
+# microphone is not a state anyone wants. It raises only to a floor, never
+# lowers, says out loud what it changed, and is one config flag to disable.
+#
+# Observed levels when found broken: 27, 27, 29 — and once raised it holds, so
+# whatever sets it is an event (device switch, a call, sleep/wake) rather than a
+# process continuously fighting us.
+STT_WAKE_AUTO_RAISE_INPUT="${STT_WAKE_AUTO_RAISE_INPUT:-1}"
+STT_WAKE_TARGET_INPUT_VOLUME="${STT_WAKE_TARGET_INPUT_VOLUME:-75}"
+
 _vol="$(input_volume)"
 if [[ -n "$_vol" && "$_vol" -lt "$STT_WAKE_MIN_INPUT_VOLUME" ]]; then
     _dev="$(input_device)"; [[ -n "$_dev" ]] || _dev="the input device"
-    log_lifecycle "WARNING: $_dev input volume $_vol < $STT_WAKE_MIN_INPUT_VOLUME — voice commands will not be heard"
-    tmux display-message -t "$PANE_ID" \
-        "🎤 $_dev input volume $_vol is too low — voice commands will not be heard" 2>/dev/null || true
-    command -v say >/dev/null 2>&1 && \
-        ( say "Warning. $_dev input volume is $_vol, too low to hear commands." >/dev/null 2>&1 & )
+    if [[ "$STT_WAKE_AUTO_RAISE_INPUT" == "1" ]] && command -v osascript >/dev/null 2>&1; then
+        osascript -e "set volume input volume $STT_WAKE_TARGET_INPUT_VOLUME" 2>/dev/null
+        _new="$(input_volume)"
+        if [[ -n "$_new" && "$_new" -ge "$STT_WAKE_MIN_INPUT_VOLUME" ]]; then
+            log_lifecycle "raised $_dev input volume $_vol -> $_new (was below $STT_WAKE_MIN_INPUT_VOLUME)"
+            tmux display-message -t "$PANE_ID" \
+                "🎤 Raised $_dev input volume $_vol → $_new" 2>/dev/null || true
+            command -v say >/dev/null 2>&1 && \
+                ( say "Microphone was too quiet. Raised $_dev input to $_new." >/dev/null 2>&1 & )
+        else
+            log_lifecycle "WARNING: could not raise $_dev input volume (still ${_new:-$_vol})"
+            tmux display-message -t "$PANE_ID" \
+                "🎤 $_dev input volume ${_new:-$_vol} is too low and could not be raised" 2>/dev/null || true
+            command -v say >/dev/null 2>&1 && \
+                ( say "Warning. $_dev input is too quiet and I could not raise it." >/dev/null 2>&1 & )
+        fi
+    else
+        log_lifecycle "WARNING: $_dev input volume $_vol < $STT_WAKE_MIN_INPUT_VOLUME — voice commands will not be heard"
+        tmux display-message -t "$PANE_ID" \
+            "🎤 $_dev input volume $_vol is too low — voice commands will not be heard" 2>/dev/null || true
+        command -v say >/dev/null 2>&1 && \
+            ( say "Warning. $_dev input volume is $_vol, too low to hear commands." >/dev/null 2>&1 & )
+    fi
 fi
 
 state="listening"
