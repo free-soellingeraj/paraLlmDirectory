@@ -984,3 +984,33 @@ better speech recognition *and* better narration audio, and sidesteps the
 per-device volume trap entirely.
 
 **File**: `plugins/stt/wake-listener.sh`
+
+## BUG-050: stop warning about the quiet mic and just raise it
+
+**Fifth occurrence.** The warning from BUG-048/049 worked exactly as designed —
+it named the cause the instant speak mode started, instead of costing twenty
+minutes of pipeline archaeology. But the remaining step was still a human
+walking to Sound settings, every time.
+
+Levels found when broken: **27, 27, 29**. Once raised it holds — watched for 25s
+with no drift — so whatever sets it low is an EVENT (device switch, a call,
+sleep/wake), not a process continuously fighting us. That also means raising it
+once per speak-mode start is sufficient.
+
+**Reversing an earlier call, deliberately.** BUG-048 chose to warn rather than
+raise, on the grounds that silently rewriting a system audio setting could
+surprise someone mid-meeting. That reasoning does not survive contact with the
+fifth repeat, and it was wrong in a specific way: this code runs ONLY when
+speak mode is deliberately switched on. Voice mode with an inaudible microphone
+is not a state anyone has ever wanted. The risk it was guarding against —
+changing audio behind someone's back — is not what happens when the user just
+asked for voice control.
+
+Guard rails kept: raises only to a floor and never lowers, announces out loud
+what it changed, logs it, and `STT_WAKE_AUTO_RAISE_INPUT=0` restores
+warn-only behaviour.
+
+**Verified** all three branches: raises 25 -> 75 when low; leaves the level
+untouched and warns when opted out; does nothing at all when already fine.
+
+**File**: `plugins/stt/wake-listener.sh`
