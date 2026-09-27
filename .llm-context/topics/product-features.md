@@ -473,3 +473,40 @@ prose, skipping tool calls/results, spinners, echoed input, and other chrome.
     └── ProjectName-feature/
         └── ProjectName/      # Cloned repo
 ```
+
+### 12. "repeat" vs "recap" — two different needs
+
+Both are voice commands in speak mode (`Ctrl+b o`), and they deliberately do
+different things:
+
+| | `repeat` | `recap` |
+|---|---|---|
+| what you hear | the narration you already heard, verbatim | a new spoken briefing |
+| scope | ONE turn — the current one, from its start | roughly the last 5 turns |
+| model call | none | yes (sonnet) |
+| latency | immediate (audio is re-synthesised from kept text) | ~7s |
+| use it when | you missed a sentence, or want the turn from the top | you stepped away and need orienting |
+
+**`repeat`** replays the whole current turn rather than the last block. A turn
+usually spans several narration blocks, so replaying only the last one — which
+is what `rewind` did before — gave you the tail of the thing you missed. The loop
+keeps `cur` and `prev` turn buffers, rotated on a turn boundary emitted by
+`AgentSource.extract` as a `kind="turn"` chunk. `repeat` prefers `cur` (you are
+mid-turn) and falls back to `prev` (the turn just finished).
+
+**`rewind` is an alias for `repeat`.** Deliberate: "repeat" was renamed to
+"recap" in the first place because the mic echo guard drops any command word the
+narration is currently speaking, and narration says "repeat" often. `rewind` is
+a word narration rarely uses, so it always gets through. Saying "repeat repeat"
+also works — a clean burst bypasses the echo guard by design.
+
+**`recap` narrowed from 12 turns to 5.** The wide window existed because recap
+had to serve both needs at once and the model was left to find where the story
+started (ADR-012). With `repeat` covering "say that again", recap can be what
+its name suggests. The boundary-finding still runs, in a smaller window.
+
+**Config**: `STT_WAKE_REPEAT_TURN_WORD` (repeat), `STT_WAKE_REPEAT_WORD` (recap),
+`SPEAKLOOP_RECAP_TURNS` (5).
+
+**File**: `plugins/stt/wake-listener.sh`, `prototype/speak_loop.py`,
+`prototype/agent_source.py`

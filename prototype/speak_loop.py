@@ -119,7 +119,14 @@ RECAP_MODEL = os.environ.get("SPEAKLOOP_RECAP_MODEL", "sonnet")
 #
 # The window is affordable because `claude -p` wall clock is dominated by process
 # start-up rather than input size — measured repeatedly on this pipeline.
-RECAP_TURNS = max(1, int(os.environ.get("SPEAKLOOP_RECAP_TURNS", "12")))
+#
+# FIVE, deliberately, now that "repeat" exists. The two commands divide the job:
+# "repeat" replays one turn verbatim for the case of having simply missed it,
+# and "recap" is the zoomed-out view of roughly the last five exchanges. Before
+# the split, recap had to serve both and the window was widened to 12 to let the
+# model find the story on its own (ADR-012). That boundary-finding still runs —
+# it just has a smaller, better-aimed window to find it in.
+RECAP_TURNS = max(1, int(os.environ.get("SPEAKLOOP_RECAP_TURNS", "5")))
 # Hard ceiling on what is handed over, in characters. The newest-first budget
 # rule below is now a SAFETY NET at a window this large rather than the primary
 # mechanism — but it still has to exist, and still has to shed the oldest first,
@@ -528,7 +535,18 @@ def run(args) -> None:
     # "pause" (which holds and can resume) and from "forward" (which skips to the
     # latest). Cancel means: I do not want any of this.
     cancel_file = Path(os.environ.get("SPEAKLOOP_CANCEL_FILE", _base + ".cancel"))
+    # "repeat": say the current turn again from the start (or the previous turn
+    # if this one has not begun). Verbatim — no model call, nothing summarised.
+    # Distinct from "recap", which is a zoomed-out briefing across turns.
+    replayturn_file = Path(os.environ.get("SPEAKLOOP_REPLAYTURN_FILE",
+                                          _base + ".replayturn"))
     last_narr = [""]     # narration of the last completed block (for rewind)
+    # Narration accumulated per TURN, so "repeat" can replay the whole exchange
+    # rather than only the final block. `cur` is the turn in progress; `prev` is
+    # the one before it. "Repeat" prefers `cur` — you missed part of what is
+    # being said, or want it from the top — and falls back to `prev` once the
+    # agent has finished and nothing new has started.
+    turn_narr = {"cur": [], "prev": []}
     # Working heartbeat ("sticks"): plays while the agent is working but the
     # loop isn't speaking, so silence means "waiting for you" (or only subagents
     # are busy). Reads Claude's hook state + the live footer, same as old mode.
@@ -622,6 +640,14 @@ def run(args) -> None:
                     pending.append(None)        # sentinel -> collector
                     pcv.notify_all()
                 return
+            if getattr(ch, "kind", "text") == "turn":
+                # Pushed through the ORDERED queue rather than handled here, so
+                # the boundary lands between the right blocks even though
+                # rewrites finish out of order.
+                with pcv:
+                    pending.append("TURN")
+                    pcv.notify_all()
+                continue
             fut = executor.submit(block_narration, ch.text)
             with pcv:
                 while len(pending) >= CAP and not stop.is_set():
@@ -640,6 +666,12 @@ def run(args) -> None:
                     continue
                 fut = pending.popleft()
                 pcv.notify_all()
+            if fut == "TURN":
+                if turn_narr["cur"]:
+                    turn_narr["prev"] = turn_narr["cur"]
+                turn_narr["cur"] = []
+                print("  ⟦turn boundary⟧", file=sys.stderr)
+                continue
             if fut is None:
                 synth_q.put(None)
                 return
@@ -651,6 +683,7 @@ def run(args) -> None:
                 continue
             g = gen[0]                          # generation this block belongs to
             last_narr[0] = narr                 # remember for "rewind"
+            turn_narr["cur"].append(narr)       # remember for "repeat"
             for c in synth_chunks(narr):
                 if stop.is_set():
                     break
@@ -898,6 +931,24 @@ def run(args) -> None:
                             enqueue_prio(narr, "⟳")
                         else:
                             print("  ✗ recap failed", file=sys.stderr)
+                finally:
+                    preparing.clear()
+            elif replayturn_file.exists():
+                try:
+                    replayturn_file.unlink()
+                except OSError:
+                    pass
+                cancel_speech()          # start it over, do not queue behind
+                preparing.set()
+                try:
+                    blocks = turn_narr["cur"] or turn_narr["prev"]
+                    if blocks:
+                        which = "this turn" if turn_narr["cur"] else "the previous turn"
+                        print(f"  ⟲ repeat {which}: {len(blocks)} block(s)",
+                              file=sys.stderr)
+                        enqueue_prio(" ".join(blocks), "⟲")
+                    else:
+                        print("  ⟲ repeat: nothing narrated yet", file=sys.stderr)
                 finally:
                     preparing.clear()
             elif replay_file.exists():
