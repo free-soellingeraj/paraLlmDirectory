@@ -474,18 +474,27 @@ prose, skipping tool calls/results, spinners, echoed input, and other chrome.
         └── ProjectName/      # Cloned repo
 ```
 
-### 12. "repeat" vs "recap" — two different needs
+### 12. "rewind" vs "repeat" vs "recap" — three scopes
 
 Both are voice commands in speak mode (`Ctrl+b o`), and they deliberately do
 different things:
 
-| | `repeat` | `recap` |
-|---|---|---|
-| what you hear | the narration you already heard, verbatim | a new spoken briefing |
-| scope | ONE turn — the current one, from its start | roughly the last 5 turns |
-| model call | none | yes (sonnet) |
-| latency | immediate (audio is re-synthesised from kept text) | ~7s |
-| use it when | you missed a sentence, or want the turn from the top | you stepped away and need orienting |
+Three commands, three scopes, smallest to largest:
+
+| | `rewind` | `repeat` | `recap` |
+|---|---|---|---|
+| scope | **-1 block**, and it steps | the whole **latest agent turn** | last **5 turns**, both sides |
+| what you hear | verbatim | verbatim | a new spoken briefing |
+| model call | none | none | yes (sonnet) |
+| latency | immediate | immediate | ~7s |
+| use it when | you lost one sentence | you missed the exchange, or want it from the top | you stepped away |
+
+**`rewind` steps.** Say it twice and you are two blocks back, the way a tape
+works; replaying one fixed block forever made the second "rewind" identical to
+the first. The cursor resets whenever fresh narration arrives, because "one
+block back" is relative to where the voice actually is, not to wherever you last
+rewound to. It bottoms out with "already at the oldest" rather than silently
+repeating.
 
 **`repeat`** replays the whole current turn rather than the last block. A turn
 usually spans several narration blocks, so replaying only the last one — which

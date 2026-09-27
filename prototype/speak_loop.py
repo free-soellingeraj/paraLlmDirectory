@@ -547,6 +547,16 @@ def run(args) -> None:
     # being said, or want it from the top — and falls back to `prev` once the
     # agent has finished and nothing new has started.
     turn_narr = {"cur": [], "prev": []}
+    # Block history for "rewind", which means MINUS ONE BLOCK and has to keep
+    # stepping: say it twice and you expect to be two blocks back, the way a
+    # tape works. Replaying one fixed block forever — which is what it did —
+    # makes the second "rewind" indistinguishable from the first.
+    #
+    # The cursor is an offset from the newest block. It resets whenever fresh
+    # narration arrives, because "one block back" is relative to where the voice
+    # actually is, not to wherever you last rewound to.
+    block_hist: "deque" = deque(maxlen=30)
+    rewind_at = [0]
     # Working heartbeat ("sticks"): plays while the agent is working but the
     # loop isn't speaking, so silence means "waiting for you" (or only subagents
     # are busy). Reads Claude's hook state + the live footer, same as old mode.
@@ -684,6 +694,8 @@ def run(args) -> None:
             g = gen[0]                          # generation this block belongs to
             last_narr[0] = narr                 # remember for "rewind"
             turn_narr["cur"].append(narr)       # remember for "repeat"
+            block_hist.append(narr)             # remember for "rewind"
+            rewind_at[0] = 0                    # new audio: rewind is relative to here
             for c in synth_chunks(narr):
                 if stop.is_set():
                     break
@@ -959,11 +971,19 @@ def run(args) -> None:
                 cancel_speech()          # same preempt rule as repeat
                 preparing.set()
                 try:
-                    if last_narr[0]:
-                        print("  ↺ replay last block", file=sys.stderr)
-                        enqueue_prio(last_narr[0], "↺")
+                    if not block_hist:
+                        print("  ↺ rewind: nothing spoken yet", file=sys.stderr)
+                    elif rewind_at[0] >= len(block_hist):
+                        print(f"  ↺ rewind: already at the oldest of "
+                              f"{len(block_hist)} blocks", file=sys.stderr)
                     else:
-                        print("  ↺ replay: nothing spoken yet", file=sys.stderr)
+                        idx = len(block_hist) - 1 - rewind_at[0]
+                        blk = block_hist[idx]
+                        print(f"  ↺ rewind -{rewind_at[0]} block "
+                              f"({rewind_at[0] + 1} of {len(block_hist)})",
+                              file=sys.stderr)
+                        rewind_at[0] += 1      # next rewind steps further back
+                        enqueue_prio(blk, "↺")
                 finally:
                     preparing.clear()
             else:
