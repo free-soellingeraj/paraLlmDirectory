@@ -32,6 +32,7 @@ REPEAT_FILE="$RUN/$SAFE.repeat"
 SKIP_FILE="$RUN/$SAFE.skip"
 REPLAY_FILE="$RUN/$SAFE.replay"
 CANCEL_FILE="$RUN/$SAFE.cancel"
+REPLAYTURN_FILE="$RUN/$SAFE.replayturn"
 LOG="$RUN/$SAFE.log"
 
 MODEL="${TTS_STREAM_REWRITE_MODEL:-haiku}"
@@ -76,7 +77,7 @@ stop_pane() {
     # shared path silenced the "window" announcement (BUG-038).
     rm -f "$RUN/$safe.pid" "$RUN/$safe.wake.pid" "$RUN/$safe.pause" \
           "$RUN/$safe.repeat" "$RUN/$safe.skip" "$RUN/$safe.replay" \
-          "$RUN/$safe.cancel"
+          "$RUN/$safe.cancel" "$RUN/$safe.replayturn"
     rm -rf "$TTS_DIR/$safe.stream" 2>/dev/null || true
     tmux set-option -pt "$pane" -u @speakloop 2>/dev/null || true
     tmux set-option -pt "$pane" -u @speak_on 2>/dev/null || true
@@ -132,12 +133,13 @@ echo "$SAFE" > "$STREAM_PANE"
 [[ "$_locked" == "1" ]] && rmdir "$CLAIM_LOCK" 2>/dev/null || true
 
 mkdir -p "$SPOOL"
-rm -f "$PAUSE_FILE" "$REPEAT_FILE" "$SKIP_FILE" "$REPLAY_FILE" "$CANCEL_FILE"
+rm -f "$PAUSE_FILE" "$REPEAT_FILE" "$SKIP_FILE" "$REPLAY_FILE" "$CANCEL_FILE" \
+      "$REPLAYTURN_FILE"
 
 # --- narration loop (owns repeat/rewind/forward channels) ---
 SPEAKLOOP_PAUSE_FILE="$PAUSE_FILE" SPEAKLOOP_REPEAT_FILE="$REPEAT_FILE" \
 SPEAKLOOP_SKIP_FILE="$SKIP_FILE" SPEAKLOOP_REPLAY_FILE="$REPLAY_FILE" \
-SPEAKLOOP_CANCEL_FILE="$CANCEL_FILE" \
+SPEAKLOOP_CANCEL_FILE="$CANCEL_FILE" SPEAKLOOP_REPLAYTURN_FILE="$REPLAYTURN_FILE" \
 TTS_STREAM_REWRITE_MODEL="$MODEL" \
     nohup python3 "$DIR/speak_loop.py" "$PANE_ID" \
         --backlog 0 --model "$MODEL" --engine "$ENGINE" > "$LOG" 2>&1 &
@@ -155,11 +157,11 @@ if command -v whisper-stream >/dev/null 2>&1 && command -v rec >/dev/null 2>&1; 
     rm -f "$TTS_DIR/keepalive" 2>/dev/null || true   # stop old keeper reviving old workers
     SPEAKLOOP_PAUSE_FILE="$PAUSE_FILE" SPEAKLOOP_REPEAT_FILE="$REPEAT_FILE" \
     SPEAKLOOP_SKIP_FILE="$SKIP_FILE" SPEAKLOOP_REPLAY_FILE="$REPLAY_FILE" \
-    SPEAKLOOP_CANCEL_FILE="$CANCEL_FILE" \
+    SPEAKLOOP_CANCEL_FILE="$CANCEL_FILE" SPEAKLOOP_REPLAYTURN_FILE="$REPLAYTURN_FILE" \
         nohup bash "$ROOT/plugins/stt/wake-listener.sh" "$PANE_ID" "$SPOOL" \
             > "$RUN/$SAFE.wake.log" 2>&1 &
     echo $! > "$WAKE_PIDF"
-    HINT="transcribe / send / pause / play / repeat / rewind / forward / window"
+    HINT="transcribe / send / pause / play / repeat / recap / cancel / forward / window"
 else
     HINT="narration only (whisper/sox missing)"
 fi

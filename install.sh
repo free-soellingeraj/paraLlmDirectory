@@ -212,6 +212,10 @@ STT_WAKE_TRANSCRIBE_WORD="transcribe"  # Toggles dictation: say it to start, say
 STT_WAKE_REPEAT_WORD="recap"     # Re-runs the recap. NOT "repeat": the echo guard suppresses any
                                  # command word the narration is currently speaking, and "repeat" is
                                  # common in narration, so it refused to fire when you needed it.
+STT_WAKE_REPEAT_TURN_WORD="repeat"  # Replays THIS turn from the start, verbatim (you missed it, or
+                                 # want it again mid-way). "rewind" is an alias that the mic echo
+                                 # guard cannot suppress, since narration says "repeat" often.
+STT_WAKE_RECAP_TURNS="5"         # How many turns "recap" zooms out over
 STT_WAKE_CANCEL_WORD="cancel"    # Clears the whole playback buffer and goes quiet, but keeps
                                  # narrating new output ("forward" only drops what is already
                                  # synthesised, keeping work in flight)

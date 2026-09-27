@@ -42,6 +42,17 @@ STT_WAKE_TRANSCRIBE_WORD="${STT_WAKE_TRANSCRIBE_WORD:-transcribe}"
 STT_WAKE_REPEAT_WORD="${STT_WAKE_REPEAT_WORD:-recap}"
 # "cancel": clear the whole playback buffer; keep narrating new output.
 STT_WAKE_CANCEL_WORD="${STT_WAKE_CANCEL_WORD:-cancel}"
+# "repeat": say the current turn again from the start, verbatim — for when you
+# simply missed it, or want it from the top mid-way through. Distinct from
+# "recap", which is the zoomed-out briefing across several turns.
+#
+# NOTE, because this word has history: "repeat" was RENAMED to "recap" precisely
+# because the mic echo guard drops any command word the narration is currently
+# speaking, and narration says "repeat" often. Re-introducing it re-introduces
+# that collision. Two mitigations: saying it twice ("repeat repeat") is a clean
+# burst, which bypasses the echo guard by design; and STT_WAKE_REWIND_WORD
+# ("rewind") is wired to the same action as a word narration rarely uses.
+STT_WAKE_REPEAT_TURN_WORD="${STT_WAKE_REPEAT_TURN_WORD:-repeat}"
 STT_WAKE_SEND_WORD="${STT_WAKE_SEND_WORD:-send}"
 STT_WAKE_WINDOW_WORD="${STT_WAKE_WINDOW_WORD:-window}"
 # Playback transport + input clearing.
@@ -300,6 +311,7 @@ matches_transcribe() {
 }
 REPEAT_STEM="$(stem8 "$STT_WAKE_REPEAT_WORD")"
 CANCEL_STEM="$(stem8 "$STT_WAKE_CANCEL_WORD")"
+REPEAT_TURN_STEM="$(stem8 "$STT_WAKE_REPEAT_TURN_WORD")"
 SEND_STEM="$(stem8 "$STT_WAKE_SEND_WORD")"
 # Whole-word matches only: "send", its plural "sends", and the common whisper
 # mishearing "sent" (a clipped "send"). NEVER a prefix — "sending", "sender"
@@ -1154,6 +1166,23 @@ do_cancel() {
     tmux refresh-client -S 2>/dev/null || true
 }
 
+# "repeat": replay the current turn's narration from the beginning, verbatim.
+# No model call — this is the words you already heard, again. Clears a standing
+# pause, since asking to hear something is an unambiguous request for audio.
+do_repeat_turn() {
+    if [[ -z "${SPEAKLOOP_PAUSE_FILE:-}" ]]; then
+        buzz
+        log_lifecycle "repeat: not supported by the old stream mode"
+        return 0
+    fi
+    if [[ "$PAUSED" == "1" ]]; then
+        PAUSED=0; rm -f "$SPOOL/paused"; resume_playback
+    fi
+    : > "${SPEAKLOOP_REPLAYTURN_FILE:-${SPEAKLOOP_PAUSE_FILE%.pause}.replayturn}"
+    log_lifecycle "repeat: replaying this turn from the start"
+    tmux display-message -t "$PANE_ID" "⟲ Repeating this turn" 2>/dev/null || true
+}
+
 # "pause": stop talking NOW and stay quiet until "play". Queued audio ages out
 # via the stale-skip, so resume lands on current content, not the backlog.
 do_pause() {
@@ -1284,6 +1313,12 @@ while mode_active; do
                 log_lifecycle "transcribe trigger: '$line'"
                 begin_dictation
                 echo_stem="$TRANSCRIBE_STEM"
+            elif [[ "$echo_stem" != "$REPEAT_TURN_STEM" ]] \
+                && matches_word "$norm_line" "$REPEAT_TURN_STEM"; then
+                log_lifecycle "repeat-turn trigger: '$line'"
+                ack
+                debounced "$REPEAT_TURN_STEM" || do_repeat_turn
+                echo_stem="$REPEAT_TURN_STEM"
             elif [[ "$echo_stem" != "$REPEAT_STEM" ]] \
                 && matches_word "$norm_line" "$REPEAT_STEM"; then
                 log_lifecycle "repeat trigger: '$line'"
@@ -1347,7 +1382,7 @@ while mode_active; do
                 && matches_word "$norm_line" "$REWIND_STEM"; then
                 log_lifecycle "rewind trigger: '$line'"
                 ack
-                debounced "$REWIND_STEM" || do_rewind
+                debounced "$REWIND_STEM" || do_repeat_turn   # alias: echo-safe "repeat"
                 echo_stem="$REWIND_STEM"
             elif ! player_speaking && [[ "$echo_stem" != "$CLEAR_STEM" ]] \
                 && matches_clear "$norm_line"; then

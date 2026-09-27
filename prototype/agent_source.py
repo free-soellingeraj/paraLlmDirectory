@@ -38,7 +38,7 @@ class TextChunk:
     text: str
     ts: str = ""
     source: str = ""
-    kind: str = "text"          # text | thinking
+    kind: str = "text"          # text | thinking | turn
 
 
 class AgentSource(ABC):
@@ -63,8 +63,10 @@ class AgentSource(ABC):
                                  capture_output=True, text=True, errors="replace").stdout
         except Exception:
             return []
+        # Narration only: turn markers are a live-stream signal, meaningless in
+        # a backlog replay.
         return [c for line in raw.splitlines() if line.strip()
-                for c in self._parse(line)]
+                for c in self._parse(line) if c.kind != "turn"]
 
     # System-injected "user" records — task-completion notifications, slash
     # command echoes, hook output — are not things the person typed. A recap
@@ -217,7 +219,26 @@ class ClaudeCodeSource(AgentSource):
         return files[0] if files else None
 
     def extract(self, o: dict) -> Iterator[TextChunk]:
-        if o.get("type") != "assistant":
+        t = o.get("type")
+        if t == "user":
+            # A turn BOUNDARY, not something to speak. The loop needs these to
+            # know where one exchange ends and the next begins, so "repeat" can
+            # replay a whole turn rather than only the last block it narrated.
+            # Filtered through _is_system_user so skill injections and peer
+            # messages do not invent boundaries that never happened.
+            c = (o.get("message") or {}).get("content")
+            if isinstance(c, str):
+                txt = c
+            elif isinstance(c, list):
+                txt = " ".join(i.get("text", "") for i in c
+                               if isinstance(i, dict) and i.get("type") == "text")
+            else:
+                txt = ""
+            txt = " ".join(txt.split())
+            if txt and not self._is_system_user(txt):
+                yield TextChunk(txt, o.get("timestamp", ""), self.name, kind="turn")
+            return
+        if t != "assistant":
             return
         for c in ((o.get("message") or {}).get("content") or []):
             if isinstance(c, dict) and c.get("type") == "text" and (c.get("text") or "").strip():
@@ -300,7 +321,16 @@ class CodexSource(AgentSource):
         if o.get("type") != "response_item":
             return
         p = o.get("payload") or {}
-        if p.get("role") != "assistant":
+        role = p.get("role")
+        if role == "user":
+            txt = " ".join(c.get("text", "") for c in (p.get("content") or [])
+                           if isinstance(c, dict) and c.get("type") == "input_text")
+            txt = " ".join(txt.split())
+            if (txt and not txt.lstrip().startswith("<")
+                    and not self._CODEX_SYS_USER.match(txt)):
+                yield TextChunk(txt, o.get("timestamp", ""), self.name, kind="turn")
+            return
+        if role != "assistant":
             return
         for c in (p.get("content") or []):
             if isinstance(c, dict) and c.get("type") in ("output_text", "text") and (c.get("text") or "").strip():
