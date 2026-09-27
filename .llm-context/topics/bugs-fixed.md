@@ -1014,3 +1014,26 @@ warn-only behaviour.
 untouched and warns when opted out; does nothing at all when already fine.
 
 **File**: `plugins/stt/wake-listener.sh`
+
+## BUG-051: "rewind" replayed the same block forever
+
+Introduced by me one commit earlier: having built turn-level `repeat`, I aliased
+`rewind` to it, which left no way to step back a single block. And the original
+`do_rewind` was not much better — it replayed `last_narr[0]`, one fixed block, so
+saying "rewind" twice did exactly the same thing twice.
+
+Aaron's spec settled the three scopes: `recap` = 5 turns both sides, `repeat` =
+latest agent turn, `rewind` = **minus one block**. The first two already
+behaved that way; `rewind` did not.
+
+`rewind` now walks a 30-block history with a cursor. Each invocation replays the
+block at the cursor and steps further back; the cursor resets to the newest
+whenever fresh narration arrives, since "one block back" is relative to where
+the voice is now rather than to wherever you last rewound to. Bottoming out says
+"already at the oldest of N blocks" instead of silently repeating.
+
+**Verified**: four blocks narrated, then rewind yields B4, B3, B2, B1, then
+"already at the oldest" twice; narrating B5 resets the cursor so the next rewind
+gives B5, then B4.
+
+**File**: `prototype/speak_loop.py`, `plugins/stt/wake-listener.sh`

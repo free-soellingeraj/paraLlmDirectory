@@ -1225,13 +1225,15 @@ do_forward() {
 }
 
 do_rewind() {
-    # New loop: replay the last block's narration verbatim.
+    # "rewind": minus one BLOCK, and it steps — say it twice and you are two
+    # blocks back. Distinct from "repeat" (the whole latest agent turn) and from
+    # "recap" (a briefing across five turns).
     if [[ -n "${SPEAKLOOP_PAUSE_FILE:-}" ]]; then
         if [[ "$PAUSED" == "1" ]]; then     # replay is an explicit audio request
             PAUSED=0; rm -f "$SPOOL/paused"; resume_playback
         fi
         : > "${SPEAKLOOP_REPLAY_FILE:-${SPEAKLOOP_PAUSE_FILE%.pause}.replay}"
-        log_lifecycle "rewind: replay last block (new loop)"
+        log_lifecycle "rewind: step back one block"
         return 0
     fi
     echo "back 2" > "$SPOOL/player.cmd"
@@ -1382,7 +1384,7 @@ while mode_active; do
                 && matches_word "$norm_line" "$REWIND_STEM"; then
                 log_lifecycle "rewind trigger: '$line'"
                 ack
-                debounced "$REWIND_STEM" || do_repeat_turn   # alias: echo-safe "repeat"
+                debounced "$REWIND_STEM" || do_rewind
                 echo_stem="$REWIND_STEM"
             elif ! player_speaking && [[ "$echo_stem" != "$CLEAR_STEM" ]] \
                 && matches_clear "$norm_line"; then
