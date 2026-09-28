@@ -312,6 +312,27 @@ matches_transcribe() {
 REPEAT_STEM="$(stem8 "$STT_WAKE_REPEAT_WORD")"
 CANCEL_STEM="$(stem8 "$STT_WAKE_CANCEL_WORD")"
 REPEAT_TURN_STEM="$(stem8 "$STT_WAKE_REPEAT_TURN_WORD")"
+
+# WHOLE WORD, not a prefix. matches_word matches by word-prefix so that
+# "transcription" still fires "transcribe" — useful there, wrong here:
+# "repeatedly", "repeated" and "repeats" are ordinary narration words, and one
+# of them fired a replay mid-sentence ("adjudicated repeatedly"). Same treatment
+# `send` already gets for the same reason.
+matches_repeat_turn() {
+    local line="$1" count=0 found=1 w
+    for w in $line; do
+        count=$((count + 1))
+        [[ "$w" == "$REPEAT_TURN_STEM" || "$w" == "${REPEAT_TURN_STEM}s" ]] && found=0
+    done
+    [[ "$found" -eq 0 ]] || return 1
+    if player_speaking; then
+        [[ "$count" -eq 1 ]] || return 1
+    else
+        [[ "$count" -le 2 ]] || return 1
+    fi
+    tts_recently_said "$REPEAT_TURN_STEM" && return 1
+    return 0
+}
 SEND_STEM="$(stem8 "$STT_WAKE_SEND_WORD")"
 # Whole-word matches only: "send", its plural "sends", and the common whisper
 # mishearing "sent" (a clipped "send"). NEVER a prefix — "sending", "sender"
@@ -613,7 +634,16 @@ dict_ended=0
 # re-appears in the next segment(s). Until a line WITHOUT that stem arrives,
 # the same command must not fire again — otherwise saying "transcribe" starts
 # dictation and its own echo immediately ends it.
+#
+# It also expires on TIME. Blank lines deliberately do not clear it (a spoken
+# word keeps reappearing in whisper's window for a few seconds), but silence is
+# the normal state, so without an expiry the latch wedged armed and the command
+# could never fire again — four consecutive "transcribe" utterances were
+# observed doing nothing, hours after the last successful trigger. Past
+# whisper's --length 6000 window the latch has no job left.
 echo_stem=""
+STT_WAKE_ECHO_LATCH_SECS="${STT_WAKE_ECHO_LATCH_SECS:-8}"
+echo_stem_at=0
 # Was the PREVIOUS line a lone "send"? A real "send" lingers in whisper's window
 # so it lands on >=2 consecutive reads; an echo of narrated "send" is embedded in
 # a sentence (count>1) and never counts as lone. So "lone send twice in a row"
@@ -1301,6 +1331,21 @@ while mode_active; do
         #
         # Silence carries no evidence that the word has left the window, so it
         # must leave the latch exactly as it was.
+        # ...but the latch MUST also expire on time. Not clearing it on blank
+        # lines was right for the few seconds a spoken word keeps reappearing in
+        # whisper's sliding window; it was wrong forever after. When the only
+        # thing arriving is silence — which is the normal state — the latch
+        # never cleared, and the command could never fire again. Observed: four
+        # consecutive "transcribe" utterances, hours apart from the last
+        # trigger, none of which fired.
+        #
+        # whisper-stream's window is --length 6000 (6s), so a word cannot still
+        # be echoing after that. Past the window the latch has no job left.
+        if [[ -n "$echo_stem" ]] \
+            && (( SECONDS - echo_stem_at >= STT_WAKE_ECHO_LATCH_SECS )); then
+            log_lifecycle "echo latch for '$echo_stem' expired after ${STT_WAKE_ECHO_LATCH_SECS}s"
+            echo_stem=""
+        fi
         if [[ -n "$echo_stem" && -n "$norm_line" ]] \
             && ! line_has_echo "$norm_line" "$echo_stem"; then
             echo_stem=""
@@ -1314,38 +1359,38 @@ while mode_active; do
                 && matches_transcribe "$norm_line"; then
                 log_lifecycle "transcribe trigger: '$line'"
                 begin_dictation
-                echo_stem="$TRANSCRIBE_STEM"
+                echo_stem="$TRANSCRIBE_STEM"; echo_stem_at=$SECONDS
             elif [[ "$echo_stem" != "$REPEAT_TURN_STEM" ]] \
-                && matches_word "$norm_line" "$REPEAT_TURN_STEM"; then
+                && matches_repeat_turn "$norm_line"; then
                 log_lifecycle "repeat-turn trigger: '$line'"
                 ack
                 debounced "$REPEAT_TURN_STEM" || do_repeat_turn
-                echo_stem="$REPEAT_TURN_STEM"
+                echo_stem="$REPEAT_TURN_STEM"; echo_stem_at=$SECONDS
             elif [[ "$echo_stem" != "$REPEAT_STEM" ]] \
                 && matches_word "$norm_line" "$REPEAT_STEM"; then
                 log_lifecycle "repeat trigger: '$line'"
                 ack
                 debounced "$REPEAT_STEM" || do_repeat
-                echo_stem="$REPEAT_STEM"
+                echo_stem="$REPEAT_STEM"; echo_stem_at=$SECONDS
             elif [[ "$echo_stem" != "$DIGEST_STEM" ]] \
                 && matches_word "$norm_line" "$DIGEST_STEM"; then
                 log_lifecycle "digest trigger: '$line'"
                 ack
                 debounced "$DIGEST_STEM" || do_repeat
-                echo_stem="$DIGEST_STEM"
+                echo_stem="$DIGEST_STEM"; echo_stem_at=$SECONDS
             elif [[ "$echo_stem" != "$SEND_STEM" ]] \
                 && { matches_send "$norm_line" || [[ "$SEND_FORCE" == "1" ]]; }; then
                 [[ "$SEND_FORCE" == "1" ]] && _how=" (forced: lone send x2)" || _how=""
                 log_lifecycle "send trigger: '$line'$_how"
                 ack                      # heard you; Hero later means SUBMITTED
                 do_send
-                echo_stem="$SEND_STEM"
+                echo_stem="$SEND_STEM"; echo_stem_at=$SECONDS
             elif [[ "$echo_stem" != "$DIAGNOSTIC_STEM" ]] \
                 && matches_word "$norm_line" "$DIAGNOSTIC_STEM"; then
                 log_lifecycle "diagnostic trigger: '$line'"
                 ack
                 debounced "$DIAGNOSTIC_STEM" || do_diagnostic
-                echo_stem="$DIAGNOSTIC_STEM"
+                echo_stem="$DIAGNOSTIC_STEM"; echo_stem_at=$SECONDS
             elif [[ "$echo_stem" != "$WINDOW_STEM" ]] \
                 && matches_word "$norm_line" "$WINDOW_STEM"; then
                 # "window" works WHILE the agent is talking — it's an interrupt:
@@ -1355,43 +1400,43 @@ while mode_active; do
                 log_lifecycle "window trigger: '$line'"
                 ack
                 debounced "$WINDOW_STEM" || do_window
-                echo_stem="$WINDOW_STEM"
+                echo_stem="$WINDOW_STEM"; echo_stem_at=$SECONDS
             elif [[ "$echo_stem" != "$CANCEL_STEM" ]] \
                 && matches_word "$norm_line" "$CANCEL_STEM"; then
                 log_lifecycle "cancel trigger: '$line'"
                 ack
                 debounced "$CANCEL_STEM" || do_cancel
-                echo_stem="$CANCEL_STEM"
+                echo_stem="$CANCEL_STEM"; echo_stem_at=$SECONDS
             elif [[ "$echo_stem" != "$PAUSE_STEM" ]] \
                 && matches_word "$norm_line" "$PAUSE_STEM"; then
                 log_lifecycle "pause trigger: '$line'"
                 ack
                 do_pause
-                echo_stem="$PAUSE_STEM"
+                echo_stem="$PAUSE_STEM"; echo_stem_at=$SECONDS
             elif ! player_speaking && [[ "$echo_stem" != "$PLAY_STEM" ]] \
                 && matches_word "$norm_line" "$PLAY_STEM"; then
                 log_lifecycle "play trigger: '$line'"
                 ack
                 do_play
-                echo_stem="$PLAY_STEM"
+                echo_stem="$PLAY_STEM"; echo_stem_at=$SECONDS
             elif [[ "$echo_stem" != "$FORWARD_STEM" ]] \
                 && matches_word "$norm_line" "$FORWARD_STEM"; then
                 log_lifecycle "forward trigger: '$line'"
                 ack
                 debounced "$FORWARD_STEM" || do_forward
-                echo_stem="$FORWARD_STEM"
+                echo_stem="$FORWARD_STEM"; echo_stem_at=$SECONDS
             elif [[ "$echo_stem" != "$REWIND_STEM" ]] \
                 && matches_word "$norm_line" "$REWIND_STEM"; then
                 log_lifecycle "rewind trigger: '$line'"
                 ack
                 debounced "$REWIND_STEM" || do_rewind
-                echo_stem="$REWIND_STEM"
+                echo_stem="$REWIND_STEM"; echo_stem_at=$SECONDS
             elif ! player_speaking && [[ "$echo_stem" != "$CLEAR_STEM" ]] \
                 && matches_clear "$norm_line"; then
                 log_lifecycle "clear trigger: '$line'"
                 ack
                 debounced "$CLEAR_STEM" || do_clear
-                echo_stem="$CLEAR_STEM"
+                echo_stem="$CLEAR_STEM"; echo_stem_at=$SECONDS
             fi
         else
             if [[ "$echo_stem" != "$TRANSCRIBE_STEM" ]] \
@@ -1399,7 +1444,7 @@ while mode_active; do
                 log_lifecycle "transcribe-end trigger: '$line'"
                 ack                      # BEFORE transcription, not after it
                 end_dictation
-                echo_stem="$TRANSCRIBE_STEM"
+                echo_stem="$TRANSCRIBE_STEM"; echo_stem_at=$SECONDS
             elif [[ "$echo_stem" != "$SEND_STEM" ]] \
                 && ends_with_send "$norm_line" "$line"; then
                 # "send" closes the take AND submits — no second "transcribe".
@@ -1417,7 +1462,7 @@ while mode_active; do
                 if [[ "$INJECTED" == "1" ]]; then
                     do_send
                 fi
-                echo_stem="$SEND_STEM"
+                echo_stem="$SEND_STEM"; echo_stem_at=$SECONDS
             fi
         fi
     fi

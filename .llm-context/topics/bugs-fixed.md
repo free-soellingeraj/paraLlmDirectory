@@ -1037,3 +1037,47 @@ the voice is now rather than to wherever you last rewound to. Bottoming out says
 gives B5, then B4.
 
 **File**: `prototype/speak_loop.py`, `plugins/stt/wake-listener.sh`
+
+## BUG-052: the echo latch wedged armed, killing every voice command
+
+Symptom, as Aaron put it: "voic commands not working." The mic was fine (75%),
+the workers were up, the owner pane was right. The evidence was in
+`wake.log`: **"transcribe" spoken four consecutive times, no trigger**, and the
+last successful trigger hours earlier at 11:21.
+
+This was my own regression, introduced by the BUG-042 fix. The echo latch exists
+because a spoken command keeps reappearing in whisper's 6s sliding window, so
+after firing `transcribe` the listener refuses to fire it again until a line
+arrives *without* that stem. BUG-042 correctly stopped `[BLANK_AUDIO]` from
+clearing the latch — silence is not evidence the word has left the window.
+
+But silence is also the **normal state**. When nothing but blanks arrive, which
+is what happens whenever you stop talking, the latch never cleared, and that
+command was dead for the rest of the session. The narrow fix for a 6-second race
+became a permanent wedge.
+
+The latch now also expires on time: `STT_WAKE_ECHO_LATCH_SECS` (default 8s,
+comfortably past whisper's `--length 6000` window, where a genuine echo can no
+longer exist). Blank lines still do not clear it; the clock does.
+
+**Verified**: replayed the exact scenario — trigger word, then only blank lines,
+then the same word again. Without the expiry the second utterance is ignored;
+with it, it fires.
+
+## BUG-053: "adjudicated repeatedly" replayed the last turn
+
+Found in the same log sweep: `repeat-turn trigger: 'adjudicated repeatedly.'`
+The new `repeat` keyword went through `matches_word`, which matches by **word
+prefix** so that "transcription" still fires "transcribe". That is right for
+`transcribe` and wrong for `repeat` — "repeatedly", "repeated" and "repeats" are
+ordinary words the agent narrates, and one of them hijacked playback mid-sentence.
+
+`repeat` now gets the whole-word treatment `send` already has (`word_is_send`
+exists for exactly this reason — "sending"/"sentence" must not submit): a new
+`matches_repeat_turn` accepts only `repeat` and `repeats`.
+
+**Verified**: fires on "repeat", "repeats", "please repeat"; ignores
+"adjudicated repeatedly", "it repeated the query", and long sentences containing
+the word.
+
+**File**: `plugins/stt/wake-listener.sh`
