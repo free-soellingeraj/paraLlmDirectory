@@ -1081,3 +1081,61 @@ exists for exactly this reason — "sending"/"sentence" must not submit): a new
 the word.
 
 **File**: `plugins/stt/wake-listener.sh`
+
+## BUG-054: "repeat is not repeating" — it only knew what it had already said
+
+`repeat` replayed `turn_narr`, an in-memory record of blocks **this speak_loop
+process** had narrated. The log said it plainly:
+
+```
+  ⟲ repeat: nothing narrated yet
+```
+
+The loop had started 6 seconds earlier with `--backlog 0`. So the keyword
+worked, the channel file worked, the handler ran — and it had nothing to give,
+because it was reporting our own bookkeeping as the user's reality.
+
+Aaron's spec is `repeat` = **the latest agent turn**. That turn is on disk
+whether or not we have spoken it. And the empty case is not an edge case: it is
+the normal state right after speak mode moves to a pane, after any restart, and
+whenever the loop starts with `--backlog 0` — which is exactly when you most
+want to catch up. "A lot of times I just miss it and want to hear it."
+
+`repeat` now falls back to `latest_turn_text()`: the agent blocks after the last
+user prompt, read from the transcript and pushed through the normal
+`block_narration` rewrite. If a prompt has no answer yet (or the source exposes
+no prompts), it speaks the trailing agent blocks instead of nothing.
+
+`SPEAKLOOP_REPEAT_BUDGET` is 6000, far below the 20000 recap budget, on purpose:
+this text is rewritten block-by-block, sequentially, so every extra 2500 chars
+is another LLM round-trip before you hear anything — and `repeat` exists to get
+you up to speed fast. Budget is spent newest-first, like `turn_context`, since
+the tail is the most recent work.
+
+**Verified**: 8 cases pass (normal turn, unanswered prompt, no prompts, empty,
+prompts only, blank blocks, budget keeps the newest two of four, one oversized
+block never dropped to silence), plus a run against the live transcript, which
+hit the unanswered-prompt path and produced 3653 chars of real agent prose.
+
+**File**: `prototype/speak_loop.py`
+
+## BUG-055: "playing." resumed playback; the prefix rule had spread
+
+From the same log: `play trigger: 'playing.'` at 19:58. `play` and `pause` both
+went through `matches_word`, which matches by word **prefix** so "transcription"
+fires "transcribe". Useful there; wrong for any command whose stem also starts
+an ordinary English word — and "playing", "playback", "player", "paused",
+"pausing" are words this system narrates *about itself*, so it was interrupting
+its own narration.
+
+This is the third instance of one rule: `send` got a bespoke whole-word matcher
+("sending"/"sentence"), then `repeat` got another ("repeatedly"). Rather than a
+third copy, that rule is now `matches_exact_word`, and `repeat`, `play` and
+`pause` all use it. It keeps the repeat-to-force burst escape hatch, but the
+burst must be the command word only.
+
+**Verified**: ignores "playing", "playback paused", "the player stopped",
+"paused", "pausing now"; fires on "play", "uh play", "play play play", "pause";
+repeat's cases still pass.
+
+**File**: `plugins/stt/wake-listener.sh`

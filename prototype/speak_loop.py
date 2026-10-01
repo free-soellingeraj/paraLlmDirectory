@@ -133,6 +133,12 @@ RECAP_TURNS = max(1, int(os.environ.get("SPEAKLOOP_RECAP_TURNS", "5")))
 # because an unbounded transcript is not passable and the newest turn is the one
 # that must never be the part that gets dropped.
 RECAP_BUDGET = int(os.environ.get("SPEAKLOOP_RECAP_BUDGET", "20000"))
+# "repeat" reads the newest turn off the transcript when nothing has been
+# narrated in this process. Much tighter than the recap budget on purpose: this
+# text is rewritten block-by-block, sequentially, so every extra 2500 chars is
+# another LLM round-trip before you hear anything — and "repeat" exists to get
+# you up to speed fast.
+REPEAT_BUDGET = int(os.environ.get("SPEAKLOOP_REPEAT_BUDGET", "6000"))
 _PREAMBLE = re.compile(
     r"\A\s*(?:sure[,!.]?\s*)?(?:here(?:'s| is)?\b[^\n:]{0,40}:|narration:)\s*", re.I)
 _SENT = re.compile(r"(.+?[.!?])(?:\s+|\Z)", re.S)
@@ -784,6 +790,45 @@ def run(args) -> None:
             agent_lines = ["Agent: " + t for t in agent]
         return "\n\n".join(head + agent_lines)
 
+    def latest_turn_text(budget: int = REPEAT_BUDGET) -> str:
+        """The newest agent turn, raw, from the transcript on disk.
+
+        The fallback for "repeat" when this process has narrated nothing. That
+        is not an edge case: it is the normal state right after speak mode moves
+        to a pane, after a restart, and whenever the loop starts with
+        --backlog 0. "repeat" means the latest agent turn, and that turn exists
+        on disk whether or not we happen to have spoken it, so answering
+        "nothing narrated yet" was reporting our own bookkeeping as the user's
+        reality.
+
+        Budget is spent newest-first and then restored to order, for the same
+        reason turn_context does it: the tail is the agent's most recent work,
+        which is exactly the part you asked to hear.
+        """
+        try:
+            events = src.recent_events(800)
+        except Exception:
+            events = []
+        if not events:
+            return ""
+        last_user = max((i for i, (r, _) in enumerate(events) if r == "user"),
+                        default=-1)
+        blocks = [t for r, t in events[last_user + 1:]
+                  if r != "user" and t.strip()]
+        if not blocks:
+            # A prompt with no answer yet (or a source exposing no prompts at
+            # all): speak the trailing agent blocks rather than nothing.
+            blocks = [t for r, t in events if r != "user" and t.strip()]
+        if not blocks:
+            return ""
+        kept, total = [], 0
+        for t in reversed(blocks):
+            if kept and total + len(t) > budget:
+                break
+            kept.append(t)
+            total += len(t)
+        return "\n\n".join(reversed(kept))
+
     def turn_context(max_turns: int = RECAP_TURNS,
                      budget: int = RECAP_BUDGET) -> str:
         """The last `max_turns` request/response turns, formatted 'You:'/'Agent:'
@@ -960,7 +1005,19 @@ def run(args) -> None:
                               file=sys.stderr)
                         enqueue_prio(" ".join(blocks), "⟲")
                     else:
-                        print("  ⟲ repeat: nothing narrated yet", file=sys.stderr)
+                        raw = latest_turn_text()
+                        if raw:
+                            print(f"  ⟲ repeat: latest turn off the transcript "
+                                  f"({len(raw)} chars)", file=sys.stderr)
+                            narr = block_narration(raw)
+                            if narr:
+                                enqueue_prio(narr, "⟲")
+                            else:
+                                print("  ✗ repeat: rewrite failed",
+                                      file=sys.stderr)
+                        else:
+                            print("  ⟲ repeat: no agent turn on the transcript",
+                                  file=sys.stderr)
                 finally:
                     preparing.clear()
             elif replay_file.exists():
