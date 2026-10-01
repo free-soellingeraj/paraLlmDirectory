@@ -314,25 +314,39 @@ CANCEL_STEM="$(stem8 "$STT_WAKE_CANCEL_WORD")"
 REPEAT_TURN_STEM="$(stem8 "$STT_WAKE_REPEAT_TURN_WORD")"
 
 # WHOLE WORD, not a prefix. matches_word matches by word-prefix so that
-# "transcription" still fires "transcribe" — useful there, wrong here:
-# "repeatedly", "repeated" and "repeats" are ordinary narration words, and one
-# of them fired a replay mid-sentence ("adjudicated repeatedly"). Same treatment
-# `send` already gets for the same reason.
-matches_repeat_turn() {
-    local line="$1" count=0 found=1 w
+# "transcription" still fires "transcribe" — useful there, wrong for any command
+# whose stem is also the start of an ordinary English word. Observed in the log:
+# "adjudicated repeatedly" replayed a turn, and "playing." resumed playback.
+# `send` already had a bespoke whole-word matcher for exactly this reason
+# ("sending"/"sentence"); this is that rule, generalised.
+matches_exact_word() {
+    local line="$1" stem="$2" count=0 found=1 burst=1 w
+    [[ -n "$stem" ]] || return 1
     for w in $line; do
         count=$((count + 1))
-        [[ "$w" == "$REPEAT_TURN_STEM" || "$w" == "${REPEAT_TURN_STEM}s" ]] && found=0
+        if [[ "$w" == "$stem" || "$w" == "${stem}s" ]]; then
+            found=0
+        else
+            burst=1$burst          # a non-matching word rules out a burst
+        fi
     done
     [[ "$found" -eq 0 ]] || return 1
+    # Repeat-to-force: a clean burst of nothing but the command word is always
+    # the user, never narration. Same escape hatch matches_word gives.
+    if [[ "$burst" == "1" && "$count" -ge 2 ]]; then
+        return 0
+    fi
     if player_speaking; then
         [[ "$count" -eq 1 ]] || return 1
     else
+        # <=2 tolerates one filler ("uh repeat") but keeps the word from firing
+        # out of the middle of continuous speech.
         [[ "$count" -le 2 ]] || return 1
     fi
-    tts_recently_said "$REPEAT_TURN_STEM" && return 1
+    tts_recently_said "$stem" && return 1
     return 0
 }
+matches_repeat_turn() { matches_exact_word "$1" "$REPEAT_TURN_STEM"; }
 SEND_STEM="$(stem8 "$STT_WAKE_SEND_WORD")"
 # Whole-word matches only: "send", its plural "sends", and the common whisper
 # mishearing "sent" (a clipped "send"). NEVER a prefix — "sending", "sender"
@@ -1408,13 +1422,13 @@ while mode_active; do
                 debounced "$CANCEL_STEM" || do_cancel
                 echo_stem="$CANCEL_STEM"; echo_stem_at=$SECONDS
             elif [[ "$echo_stem" != "$PAUSE_STEM" ]] \
-                && matches_word "$norm_line" "$PAUSE_STEM"; then
+                && matches_exact_word "$norm_line" "$PAUSE_STEM"; then
                 log_lifecycle "pause trigger: '$line'"
                 ack
                 do_pause
                 echo_stem="$PAUSE_STEM"; echo_stem_at=$SECONDS
             elif ! player_speaking && [[ "$echo_stem" != "$PLAY_STEM" ]] \
-                && matches_word "$norm_line" "$PLAY_STEM"; then
+                && matches_exact_word "$norm_line" "$PLAY_STEM"; then
                 log_lifecycle "play trigger: '$line'"
                 ack
                 do_play
