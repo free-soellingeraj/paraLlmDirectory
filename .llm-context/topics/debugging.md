@@ -273,3 +273,44 @@ command-center tile (~15 rows), prose can scroll out within a couple of
 seconds once a tool block renders; a line must survive two consecutive polls
 (2 × `TTS_STREAM_POLL_INTERVAL`, default 0.4s) to be spoken. If speech drops
 words in a busy pane, give the pane more height or lower the poll interval.
+
+## Why didn't my voice command fire?
+
+Every rejection path in the wake listener's dispatch chain used to be silent, so
+the single most common complaint — "I said it and nothing happened" — left no
+trace anywhere. Ten days of `stream.log` held 286 lines and not one record of a
+command that was heard and dropped. Both the user and whoever debugs it were
+guessing.
+
+The listener now logs the reason. Grep for it:
+
+```bash
+grep 'no trigger' /tmp/para-llm-tts/stream.log
+```
+
+Each line names the command heard, the reason, and the raw transcript line:
+
+```
+no trigger ('play' heard): heard 'playing', which only starts with 'play' —
+  'play' must be the whole word  [line: 'playing.']
+no trigger ('send' heard): 'send' was inside a 5-word phrase — say it alone,
+  or with at most one filler  [line: 'please send this over now']
+no trigger ('transcribe' heard): echo latch for 'transcri' still armed —
+  clears on the next line without it, or after 8s  [line: 'transcribe.']
+```
+
+Reasons, and what to do about each:
+
+| Reason | Meaning |
+|---|---|
+| `echo latch … still armed` | The command just fired; its echo is still in whisper's window. Wait for the next non-blank line or `STT_WAKE_ECHO_LATCH_SECS` (8s). |
+| `heard 'X', which only starts with …` | A whole-word command (`repeat`, `send`, `play`, `pause`) matched only as a prefix. Not a bug — it is the guard working. |
+| `suppressed as echo` | The narration itself just said the word; the mic heard the speakers. |
+| `narration is playing, so … must be the only word` | While audio plays, a command must be said alone. |
+| `was inside a N-word phrase` | Commands take at most one filler word ("uh send"). |
+| `within the 3s cooldown after dictation ended` | The dictation's own audio tail is still in the window. |
+| `UNEXPLAINED` | **Bring this line to a bug report.** No guard accounts for it. |
+
+Rate-limited per (command, reason) to `STT_WAKE_NEAR_MISS_QUIET` seconds
+(default 6), because whisper's sliding window repeats each utterance across
+several reads.

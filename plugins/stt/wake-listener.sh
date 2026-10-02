@@ -347,6 +347,87 @@ matches_exact_word() {
     return 0
 }
 matches_repeat_turn() { matches_exact_word "$1" "$REPEAT_TURN_STEM"; }
+
+# Why didn't that fire?
+#
+# Every rejection path in the dispatch chain is silent. Saying a command and
+# having nothing happen therefore left NO trace anywhere — not in the lifecycle
+# log, not on screen — which is precisely the failure that is impossible to
+# debug and the one that actually wastes the day. Ten days of logs held 286
+# lines and not one record of a command that was heard and dropped.
+#
+# So: if a line carried a command word and nothing fired, say why. Rate-limited
+# per (stem, reason) because whisper's sliding window repeats the same utterance
+# across several reads and would otherwise flood the log.
+STT_WAKE_NEAR_MISS_QUIET="${STT_WAKE_NEAR_MISS_QUIET:-6}"
+NEAR_MISS_KEYS=()
+NEAR_MISS_AT=()
+near_miss_quiet() {      # 0 = logged recently, stay quiet
+    local key="$1" i
+    for i in "${!NEAR_MISS_KEYS[@]}"; do
+        if [[ "${NEAR_MISS_KEYS[$i]}" == "$key" ]]; then
+            (( SECONDS - ${NEAR_MISS_AT[$i]} < STT_WAKE_NEAR_MISS_QUIET )) && return 0
+            NEAR_MISS_AT[$i]=$SECONDS
+            return 1
+        fi
+    done
+    NEAR_MISS_KEYS+=("$key")
+    NEAR_MISS_AT+=("$SECONDS")
+    return 1
+}
+log_near_miss() {
+    local norm="$1" raw="$2"
+    [[ -n "$norm" ]] || return 0
+    local count=0 w
+    for w in $norm; do count=$((count + 1)); done
+    (( count )) || return 0
+
+    # stem:label:exact — "exact" commands must be the whole word, the rest match
+    # by word-prefix. Listed in dispatch order.
+    local spec stem label exact hit="" hitword="" whole=1
+    for spec in \
+        "$TRANSCRIBE_STEM:transcribe:0" "$REPEAT_TURN_STEM:repeat:1" \
+        "$REPEAT_STEM:recap:0"         "$DIGEST_STEM:digest:0" \
+        "$SEND_STEM:send:1"            "$DIAGNOSTIC_STEM:diagnostic:0" \
+        "$WINDOW_STEM:window:0"        "$CANCEL_STEM:cancel:0" \
+        "$PAUSE_STEM:pause:1"          "$PLAY_STEM:play:1" \
+        "$FORWARD_STEM:forward:0"      "$REWIND_STEM:rewind:0" \
+        "$CLEAR_STEM:clear:0"
+    do
+        stem="${spec%%:*}"; label="${spec#*:}"; exact="${label#*:}"; label="${label%%:*}"
+        [[ -n "$stem" ]] || continue
+        for w in $norm; do
+            if [[ "$w" == "$stem"* ]]; then
+                hit="$stem"; hitword="$w"
+                [[ "$w" == "$stem" || "$w" == "${stem}s" ]] && whole=0
+                break
+            fi
+        done
+        [[ -n "$hit" ]] && break
+    done
+    [[ -n "$hit" ]] || return 0
+
+    local reason
+    if [[ "$echo_stem" == "$hit" ]]; then
+        reason="echo latch for '$hit' still armed — clears on the next line without it, or after ${STT_WAKE_ECHO_LATCH_SECS}s"
+    elif [[ "$exact" == "1" && "$whole" != "0" ]]; then
+        reason="heard '$hitword', which only starts with '$hit' — '$label' must be the whole word"
+    elif tts_recently_said "$hit"; then
+        reason="suppressed as echo: the narration just said '$hit'"
+    elif player_speaking && (( count > 1 )); then
+        reason="narration is playing, so '$label' must be the only word — heard $count"
+    elif (( count > 2 )); then
+        reason="'$label' was inside a $count-word phrase — say it alone, or with at most one filler"
+    elif [[ "$hit" == "$TRANSCRIBE_STEM" ]] && (( SECONDS - dict_ended < 3 )); then
+        reason="within the 3s cooldown after dictation ended (its own audio tail is still in whisper's window)"
+    else
+        # Nothing above explains it, so say that rather than inventing a cause.
+        # This line is the one to bring to a bug report.
+        reason="UNEXPLAINED — matched no rule and no guard accounts for it"
+    fi
+    near_miss_quiet "$hit:$reason" && return 0
+    log_lifecycle "no trigger ('$label' heard): $reason  [line: '$raw']"
+}
 SEND_STEM="$(stem8 "$STT_WAKE_SEND_WORD")"
 # Whole-word matches only: "send", its plural "sends", and the common whisper
 # mishearing "sent" (a clipped "send"). NEVER a prefix — "sending", "sender"
@@ -1488,6 +1569,8 @@ while mode_active; do
                 ack
                 debounced "$CLEAR_STEM" || do_clear
                 echo_stem="$CLEAR_STEM"; echo_stem_at=$SECONDS
+            else
+                log_near_miss "$norm_line" "$line"
             fi
         else
             if [[ "$echo_stem" != "$TRANSCRIBE_STEM" ]] \
