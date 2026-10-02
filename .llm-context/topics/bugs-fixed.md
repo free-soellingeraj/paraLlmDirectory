@@ -1139,3 +1139,62 @@ burst must be the command word only.
 repeat's cases still pass.
 
 **File**: `plugins/stt/wake-listener.sh`
+
+## BUG-056: "send did not submit" on messages that HAD submitted
+
+Aaron's dictation, as it reached the agent:
+
+```
+17:47:25  (61 ch)  'What work is in flight again? Send. Send. Send. Motherfucker.'
+```
+
+The listener logged `send: Enter pressed but input still non-empty — not
+submitted` at **the same second**. The message was in the agent's transcript. The
+send worked; we buzzed and said it failed.
+
+Cause: `capture_input_region` found the input box as "the content between the
+last two lines containing `──────────`". A rendered **table** border
+(`┌───┬───┐`, `├───┼───┤`, `└───┴───┘`) contains that run too. So whenever a
+table — or any bordered block — rendered BELOW the input box, the "last two
+rules" bracketed table rows, the region came back non-empty, and a good submit
+was reported as a failure. On the live pane, 12 of the 14 matching lines were
+table borders. That is the intermittency: the old note recorded "42 failed
+submits against 37 successful ones", which tracked whatever happened to render
+rather than whether the send worked.
+
+Junction characters are the discriminator — the input box's own rules never
+contain them.
+
+The check was also asking the wrong question. "Is the box empty?" is not "did my
+text submit?" `do_send` now captures the box *before* Enter and polls up to 2.5s
+for **our text to leave it**, so a box that clears on the next render, or is
+replaced by other content, both read as success; only the same text still
+sitting there after 2.5s is a failure. A single 0.3s sample was too eager
+regardless.
+
+**Verified**: with a table below an empty box, the old region returns
+`│ 1 │ homeserver pytest │` (→ false failure) and the new one returns empty
+(→ correct). With text genuinely stranded, the new one returns
+`merge 2003 with the guard`. Unchanged on the live pane. The decision logic
+passes 4 cases: clears on the 3rd render, replaced by other content, genuinely
+stranded, empty immediately.
+
+**File**: `plugins/stt/wake-listener.sh`
+
+## BUG-057: repeated "send" ended up inside the message
+
+Direct consequence of BUG-056. A false failure buzz makes you say "send" again —
+the only sane response — and the repeats are in the recording tail, so they get
+transcribed into the message: *"What work is in flight again? Send. Send. Send."*
+
+The tail strip was a single `re.sub` anchored at `$`, so it removed one trailing
+command word and left the earlier ones in the text. It now applies until the
+text stops changing.
+
+A `send` that is part of the sentence is still kept: "please send the email.
+Send." → "please send the email."
+
+**Verified**: 5 cases, including the real failure above and the content-`send`
+case.
+
+**File**: `plugins/stt/wake-listener.sh`
