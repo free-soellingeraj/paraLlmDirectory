@@ -791,7 +791,16 @@ tail = clipped_core(stop)
 if head:
     text = re.sub(r"(?i)^[\s.,!?]*" + head + r"[\s.,!?]*", " ", text)
 if tail:
-    text = re.sub(r"(?i)\s+" + tail + r"[\s.,!?]*$", "", text)
+    # Strip a RUN of trailing command words, not just one. Saying "send" twice
+    # when the first one seemed not to work is the normal human response, and
+    # the repeats land in the recording tail: "...again? Send. Send. Send."
+    # One substitution left the earlier ones inside the message.
+    pat = r"(?i)\s+" + tail + r"[\s.,!?]*$"
+    while True:
+        stripped = re.sub(pat, "", text)
+        if stripped == text:
+            break
+        text = stripped
 print(text.strip())
 PY
 )"
@@ -891,24 +900,43 @@ do_send() {
     (( _floor > 4000 )) && _floor=4000
     wait_input_ready "$_need" "$_floor" \
         || log_lifecycle "send: input never settled after ${_need}ms; submitting best-effort"
+    # What the box holds now is what we are about to submit — the baseline the
+    # post-Enter check compares against.
+    local _before
+    _before="$(capture_input_region)"
+    _before="${_before#❯}"
+    _before="${_before# }"
     if ! tmux send-keys -t "$PANE_ID" Enter 2>/dev/null; then
         log_lifecycle "send FAILED: send-keys error"
         buzz
         return 0
     fi
-    # capture_input_region reads the RENDERED screen, not Claude's committed
-    # input model, so it can't detect "phantom text" up front — the only honest
-    # "did it submit?" signal is whether the box CLEARED. A real submit empties
-    # it; chime the Hero success tone only then. If text remains (phantom
-    # paste / busy pane), buzz and log instead of a false "sent" (BUG-027).
-    sleep 0.3
-    if [[ -z "$(capture_input_region)" ]]; then
+    # "Did it submit?" is whether OUR TEXT LEFT THE BOX — not whether the box is
+    # empty. Those are different questions, and answering the wrong one buzzed on
+    # messages that had actually been sent: one was in the agent's transcript at
+    # the same second this logged "not submitted". A false failure is worse than
+    # no signal, because the natural response is to say "send" again — and those
+    # repeats get transcribed INTO the next message ("Send. Send. Send.").
+    #
+    # A single 0.3s sample was also too eager: the box clears on the next render,
+    # not instantly. Poll instead, and stop as soon as the text is gone.
+    local _needle="${_before:0:24}"
+    local _after="" _gone=1 _i
+    for (( _i = 0; _i < 25; _i++ )); do
+        sleep 0.1
+        _after="$(capture_input_region)"
+        if [[ -z "$_after" ]] || { [[ -n "$_needle" ]] && [[ "$_after" != *"$_needle"* ]]; }; then
+            _gone=0
+            break
+        fi
+    done
+    if [[ "$_gone" -eq 0 ]]; then
         chime "$STT_WAKE_SEND_SOUND"
-        log_lifecycle "send: Enter sent, input cleared"
+        log_lifecycle "send: submitted (text left the box after $(( (_i + 1) * 100 ))ms)"
         tmux display-message -t "$PANE_ID" "📨 Sent" 2>/dev/null || true
     else
         buzz
-        log_lifecycle "send: Enter pressed but input still non-empty — not submitted"
+        log_lifecycle "send: box still holds the same text after 2.5s — not submitted"
         tmux display-message -t "$PANE_ID" "⚠️ Send did not submit" 2>/dev/null || true
     fi
 }
@@ -919,8 +947,17 @@ do_send() {
 # holds only the bare prompt. Used to confirm an injected dictation has fully
 # landed before Enter is pressed.
 capture_input_region() {
+    # The input box is bracketed by two PLAIN horizontal rules. Box-drawing
+    # borders are not rules: a rendered table's `┌───┬───┐` / `├───┼───┤` lines
+    # all contain "──────────" too, so counting them meant that whenever a table
+    # (or any bordered block) rendered BELOW the input box, "the last two rules"
+    # bracketed table rows instead of the box. The region then came back
+    # non-empty and a perfectly good submit was reported as "not submitted" —
+    # which is why it was intermittent, tracking whatever happened to render
+    # rather than whether the send worked. Junction characters are the
+    # discriminator: the box's own rules never contain them.
     tmux capture-pane -p -t "$PANE_ID" 2>/dev/null | awk '
-        index($0, "──────────") { rules[++n] = NR }
+        index($0, "──────────") && $0 !~ /[┌┬┐├┼┤└┴┘│]/ { rules[++n] = NR }
         { line[NR] = $0 }
         END {
             if (n < 2) exit
