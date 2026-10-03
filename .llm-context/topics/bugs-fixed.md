@@ -1198,3 +1198,91 @@ Send." → "please send the email."
 case.
 
 **File**: `plugins/stt/wake-listener.sh`
+
+## BUG-058: every send wait ran ~5x longer than its budget said
+
+This is most of what "I'm having a lot of trouble with the voice shit" actually
+was. `wait_input_ready` polled `capture_input_region` and counted **100ms per
+iteration**, on the assumption that its own `sleep 0.1` dominated. It does not:
+
+```
+tmux capture-pane alone : 554ms
+awk | sed | tr | sed    : ~930ms
+full old pipeline       : 474-856ms per call (varies with tmux server load)
+```
+
+Every tmux command is a round-trip to a single-threaded server busy with the
+other panes, so one capture cost around half a second. The loop therefore ran
+about 5x its nominal budget:
+
+| budget | real |
+|---|---|
+| 2500ms | ~13s |
+| 6020ms (a 704-char dictation) | ~32s |
+| 12000ms (the cap) | ~64s |
+
+So saying "send" could sit there doing nothing for 13 seconds, or half a minute
+after a long dictation, and then log `input never settled ... submitting
+best-effort` — which reads like a fault and is not one. The post-Enter poll
+added in BUG-056 did 25 of the same captures, up to another 13s.
+
+Three fixes: budgets are measured on the wall clock (`now_ms`, from bash 5's
+`EPOCHREALTIME`) instead of counted iterations; `capture_input_region` is one
+awk instead of a six-process pipeline; and the loop no longer adds a `sleep 0.1`
+on top of a call that already takes half a second.
+
+**Measured after**: bare send on an empty box 1460ms (was ~13000ms), 704-char
+dictation 7893ms (was ~32000ms).
+
+## BUG-059: a bare "send" waited on a budget from the previous dictation
+
+`INJECTED_CHARS` was set when dictation injected text and never reset. A plain
+"send" — with nothing dictated, or after a send that already worked — inherited
+the last dictation's size, so after a 704-char take it computed a 6-second
+budget and spent it all waiting on an empty box. `wait_input_ready` also treated
+an empty box as "not ready" (only non-empty text could be "stable"), so it could
+never finish early.
+
+`do_send` now passes what it actually injected; with nothing pending an empty
+box returns ready immediately. When text *was* injected, an empty box still
+means the paste has not rendered and the wait continues as before.
+`INJECTED_CHARS` is reset at the end of every send.
+
+## BUG-060: pressing Enter on an empty box reported "Sent"
+
+Mine, from BUG-056. The new check asked whether our text had left the box, via a
+needle taken from the box before Enter. On an empty box the needle is empty, so
+the first poll saw "the text is gone" and chimed success for a send that did
+nothing. This is the common case of saying "send" a second time after one that
+already worked.
+
+Empty box with nothing injected is now reported as `nothing to send — the input
+box is empty`, with a buzz and no Enter. Injected-but-unrendered text (the
+BUG-030 phantom paste) still gets its Enter, logged as `UNCONFIRMED` rather than
+as a clean send, because the screen genuinely cannot tell.
+
+**Verified**: 5 scenarios — nothing to send, unconfirmed phantom, box cleared,
+box replaced, genuinely stranded.
+
+## BUG-061: the junction test broke region detection in the C locale
+
+Also mine, from BUG-056. Excluding table borders with the character class
+`/[┌┬┐├┼┤└┴┘│]/` is byte-wise outside a UTF-8 locale, and every box-drawing
+glyph — including `─` itself — starts with byte 0xE2. So in `LC_ALL=C` a plain
+rule matched the junction class, both rules were discarded, and the function
+returned nothing at all: every send would have read as an empty box.
+
+The listener currently inherits `LANG=en_US.UTF-8`, so this was latent rather
+than live, but it is one `LC_ALL=C` away from breaking sends completely.
+
+Tested positively instead: a plain rule is a line containing nothing but `─` and
+whitespace. That holds byte-wise and character-wise alike. The NBSP strip had
+the same flaw — `gsub(/\302\240/...)` removed the lead byte and left `0xA0`
+behind, one orphan byte that made an **empty box test as non-empty** — and now
+uses a literal NBSP.
+
+**Verified**: identical results under `LC_ALL=en_US.UTF-8` and `LC_ALL=C`, for
+text in the box and for an empty box with a table below; empty box returns
+exactly 0 bytes.
+
+**File**: `plugins/stt/wake-listener.sh`

@@ -979,7 +979,8 @@ do_send() {
     # Do not accept "stable" before the paste has plausibly finished arriving.
     local _floor=$(( 300 + (INJECTED_CHARS * 2) ))
     (( _floor > 4000 )) && _floor=4000
-    wait_input_ready "$_need" "$_floor" \
+    local _pending="$INJECTED_CHARS"
+    wait_input_ready "$_need" "$_floor" "$_pending" \
         || log_lifecycle "send: input never settled after ${_need}ms; submitting best-effort"
     # What the box holds now is what we are about to submit — the baseline the
     # post-Enter check compares against.
@@ -987,9 +988,21 @@ do_send() {
     _before="$(capture_input_region)"
     _before="${_before#❯}"
     _before="${_before# }"
+    # Nothing in the box and nothing injected: there is no message to send. Say
+    # so instead of pressing Enter and reporting success — which is what the
+    # previous version did, because an empty `_before` makes the needle empty and
+    # the first poll then sees "text is gone" on a box that was never filled.
+    # This is the common second "send" after one that already worked.
+    if [[ -z "$_before" && "$_pending" -eq 0 ]]; then
+        buzz
+        log_lifecycle "send: nothing to send — the input box is empty"
+        tmux display-message -t "$PANE_ID" "⚠️ Nothing to send" 2>/dev/null || true
+        return 0
+    fi
     if ! tmux send-keys -t "$PANE_ID" Enter 2>/dev/null; then
         log_lifecycle "send FAILED: send-keys error"
         buzz
+        INJECTED_CHARS=0
         return 0
     fi
     # "Did it submit?" is whether OUR TEXT LEFT THE BOX — not whether the box is
@@ -1002,24 +1015,38 @@ do_send() {
     # A single 0.3s sample was also too eager: the box clears on the next render,
     # not instantly. Poll instead, and stop as soon as the text is gone.
     local _needle="${_before:0:24}"
-    local _after="" _gone=1 _i
-    for (( _i = 0; _i < 25; _i++ )); do
-        sleep 0.1
+    local _after="" _gone=1 _el=0 _pstart
+    _pstart="$(now_ms)"
+    while :; do
         _after="$(capture_input_region)"
         if [[ -z "$_after" ]] || { [[ -n "$_needle" ]] && [[ "$_after" != *"$_needle"* ]]; }; then
             _gone=0
             break
         fi
+        _el=$(( $(now_ms) - _pstart ))
+        (( _el >= 2500 )) && break
+        (( _el < 400 )) && sleep 0.1
     done
-    if [[ "$_gone" -eq 0 ]]; then
+    if [[ -z "$_before" ]]; then
+        # Injected text that never rendered (BUG-030's phantom paste). Enter was
+        # the right move, but the screen cannot confirm it either way, so say
+        # that rather than claiming a clean send.
         chime "$STT_WAKE_SEND_SOUND"
-        log_lifecycle "send: submitted (text left the box after $(( (_i + 1) * 100 ))ms)"
+        log_lifecycle "send: injected $_pending chars but the box rendered empty; Enter sent, UNCONFIRMED"
+        tmux display-message -t "$PANE_ID" "📨 Sent (unconfirmed)" 2>/dev/null || true
+    elif [[ "$_gone" -eq 0 ]]; then
+        chime "$STT_WAKE_SEND_SOUND"
+        log_lifecycle "send: submitted (text left the box after ${_el}ms)"
         tmux display-message -t "$PANE_ID" "📨 Sent" 2>/dev/null || true
     else
         buzz
-        log_lifecycle "send: box still holds the same text after 2.5s — not submitted"
+        log_lifecycle "send: box still holds the same text after ${_el}ms — not submitted"
         tmux display-message -t "$PANE_ID" "⚠️ Send did not submit" 2>/dev/null || true
     fi
+    # The size belongs to THIS dictation. Leaving it set meant the next bare
+    # "send" inherited the last dictation's budget: after a 704-char take, a
+    # plain "send" waited 6s against an empty box for no reason.
+    INJECTED_CHARS=0
 }
 
 # Read the current contents of PANE_ID's Claude Code input box: the text
@@ -1032,21 +1059,51 @@ capture_input_region() {
     # borders are not rules: a rendered table's `┌───┬───┐` / `├───┼───┤` lines
     # all contain "──────────" too, so counting them meant that whenever a table
     # (or any bordered block) rendered BELOW the input box, "the last two rules"
-    # bracketed table rows instead of the box. The region then came back
-    # non-empty and a perfectly good submit was reported as "not submitted" —
-    # which is why it was intermittent, tracking whatever happened to render
-    # rather than whether the send worked. Junction characters are the
-    # discriminator: the box's own rules never contain them.
+    # bracketed table rows instead of the box. Junction characters are the
+    # discriminator; the box's own rules never contain them.
+    #
+    # All of the trimming happens inside the single awk. This used to be a
+    # six-process pipeline (awk | sed | tr | sed), and the function is called in
+    # a polling loop, so that overhead was paid dozens of times per send.
     tmux capture-pane -p -t "$PANE_ID" 2>/dev/null | awk '
-        index($0, "──────────") && $0 !~ /[┌┬┐├┼┤└┴┘│]/ { rules[++n] = NR }
-        { line[NR] = $0 }
+        {
+            _t = $0
+            gsub(/─/, "", _t)
+            gsub(/[ \t]/, "", _t)
+            if (_t == "" && index($0, "──────────")) rules[++n] = NR
+            line[NR] = $0
+        }
         END {
             if (n < 2) exit
-            for (i = rules[n-1] + 1; i < rules[n]; i++) print line[i]
-        }' \
-    | sed -e 's/^❯//' -e $'s/\xc2\xa0/ /g' \
-    | tr '\n' ' ' \
-    | sed -e 's/  */ /g' -e 's/^ *//' -e 's/ *$//'
+            out = ""
+            for (i = rules[n-1] + 1; i < rules[n]; i++) {
+                s = line[i]
+                sub(/^❯/, "", s)
+                gsub(/ /, " ", s)           # NBSP padding (literal)
+                out = out " " s
+            }
+            gsub(/[ \t]+/, " ", out)
+            sub(/^ +/, "", out)
+            sub(/ +$/, "", out)
+            printf "%s", out
+        }'
+}
+
+# Milliseconds on the wall clock. The polling loops below used to count 100ms
+# per iteration on the assumption that the sleep dominated. It does not: one
+# capture_input_region costs ~525ms here, because every tmux command is a
+# round-trip to a single-threaded server that is busy with the other panes. So
+# every budget ran about 5x longer than it said — a "2.5s" wait really took 13
+# seconds, and a long dictation's 6s wait took over 30. That is most of what
+# "voice commands are broken" actually felt like.
+now_ms() {
+    local t="${EPOCHREALTIME:-}"
+    if [[ -n "$t" ]]; then
+        t="${t/,/.}"
+        printf '%s' "$(( ${t%%.*} * 1000 + 10#${t#*.} / 1000 ))"
+    else
+        printf '%s' "$(( $(date +%s) * 1000 ))"
+    fi
 }
 
 # Block until the injected dictation is visible AND stable in the input box
@@ -1074,12 +1131,24 @@ wait_input_ready() {
     # floor is a minimum, `max` is the ceiling, and the length check is
     # deliberately not used as the signal: the rendered box wraps and truncates,
     # so its character count is not comparable to what was injected.
-    local prev="" cur stable=0 waited=0
+    local prev="" cur stable=0 waited=0 _start
     local max="${1:-2500}"
     local floor="${2:-0}"
+    # How many characters we injected this cycle. With nothing pending there is
+    # nothing to wait FOR: an empty box was treated as "not ready", so a bare
+    # "send" sat here for the whole budget — up to 12s of apparent deadness —
+    # and then logged "input never settled", which reads like a fault and is
+    # not one. When we DID inject, an empty box still means the paste has not
+    # rendered yet, so that case keeps waiting exactly as before.
+    local expect="${3:-0}"
     (( floor > max )) && floor=$max
-    while (( waited < max )); do
+    _start="$(now_ms)"
+    while :; do
         cur="$(capture_input_region)"
+        waited=$(( $(now_ms) - _start ))
+        if [[ -z "$cur" && "$expect" -eq 0 ]]; then
+            return 0
+        fi
         if [[ -n "$cur" ]]; then
             if [[ "$cur" == "$prev" ]]; then
                 stable=$((stable + 1))
@@ -1089,10 +1158,11 @@ wait_input_ready() {
             fi
         fi
         prev="$cur"
-        sleep 0.1
-        waited=$((waited + 100))
+        (( waited >= max )) && return 1
+        # The capture itself is the sampling interval; only pad it when it came
+        # back unusually fast.
+        (( waited < 400 )) && sleep 0.1
     done
-    return 1
 }
 
 # "diagnostic": speak a pipeline health report through a DIRECT local path
