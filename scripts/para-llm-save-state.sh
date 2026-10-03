@@ -35,6 +35,11 @@ fi
 
 STATE_FILE="$PARA_LLM_ROOT/recovery/session-state"
 TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%S")
+# The string above is UTC. The recovery prompt needs to do arithmetic on it, and
+# parsing it back without saying so got the timezone wrong — a save seventeen
+# seconds old displayed as "-239m ago". Record the epoch too, so the age never
+# depends on anyone agreeing about timezones.
+TIMESTAMP_EPOCH=$(date +%s)
 
 # Collect pane information
 # Format: session_name|window_name|pane_id|pane_current_path|pane_pid
@@ -51,6 +56,7 @@ SESSION_NAME=$(echo "$PANE_DATA" | head -1 | cut -d'|' -f1)
 {
     echo "# para-llm recovery state"
     echo "# saved: $TIMESTAMP"
+    echo "# saved_epoch: $TIMESTAMP_EPOCH"
     echo "# session: $SESSION_NAME"
     echo "window_name|pane_path|project|branch|had_claude|git_remote"
 

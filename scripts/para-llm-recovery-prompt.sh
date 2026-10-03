@@ -54,7 +54,15 @@ fi
 # Calculate age of recovery state
 if [[ -n "$TIMESTAMP" ]]; then
     # Try to parse the timestamp for display
-    SAVED_EPOCH=$(date -j -f "%Y-%m-%dT%H:%M:%S" "$TIMESTAMP" +%s 2>/dev/null || echo "0")
+    # Prefer the recorded epoch. Falling back to the string requires -u: it is
+    # written with `date -u`, and parsing UTC as local time made every fresh save
+    # look like it came from the future — the menu read "-239m ago", and the
+    # ">48h old" staleness warning was understated by the whole UTC offset, so a
+    # genuinely two-day-old state could present itself as safe.
+    SAVED_EPOCH=$(grep "^# saved_epoch:" "$STATE_FILE" 2>/dev/null | sed 's/^# saved_epoch: //')
+    if [[ -z "${SAVED_EPOCH:-}" ]]; then
+        SAVED_EPOCH=$(date -j -u -f "%Y-%m-%dT%H:%M:%S" "$TIMESTAMP" +%s 2>/dev/null || echo "0")
+    fi
     NOW_EPOCH=$(date +%s)
     if [[ "$SAVED_EPOCH" -gt 0 ]]; then
         AGE_SECONDS=$((NOW_EPOCH - SAVED_EPOCH))
