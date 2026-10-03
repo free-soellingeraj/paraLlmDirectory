@@ -1286,3 +1286,48 @@ text in the box and for an empty box with a table below; empty box returns
 exactly 0 bytes.
 
 **File**: `plugins/stt/wake-listener.sh`
+
+## BUG-062: the recovery prompt reported a fresh save as "-239m ago"
+
+`para-llm-save-state.sh` writes `# saved:` with `date -u` (UTC).
+`para-llm-recovery-prompt.sh` parsed it back with `date -j -f` — **as local
+time**. On UTC-0400 that put every save four hours in the future, so the
+restore menu read:
+
+```
+Para-LLM Recovery: 9 session(s) from -239m ago
+```
+
+...seventeen seconds after the save.
+
+Worse than cosmetic: the staleness guard is `AGE_HOURS -gt 48`, and the age was
+understated by the whole UTC offset, so a state that was genuinely two days old
+presented itself as 44h and skipped the `WARNING: ...h old` banner. The one
+safeguard against restoring a stale layout was disarmed by a timezone.
+
+The save now also records `# saved_epoch:`, and the prompt prefers it, so the
+age never depends on anyone agreeing about timezones. The string fallback
+remains for state files written before this, parsed with `-u` as it always
+should have been. Both `para-llm-restore.sh` and `para-llm-do-restore.sh` skip
+`^#` lines, so the extra field is inert for them.
+
+**Verified**: fresh/3h/50h with the epoch, and fresh/50h on a legacy
+epoch-less file — `0m ago`, `3h ago`, `WARNING: 50h old` in both paths.
+
+## BUG-063: the resurrect prune was fixed in the repo and never installed
+
+`install.sh` **copies** scripts into `$PARA_LLM_ROOT/scripts/`, so a repo commit
+does not reach the running system until install.sh runs again. The pruning added
+to `para-llm-save-state.sh` in September was therefore never live: the installed
+copy was still **Jul 16**, and the save directory had regrown to **1771 files /
+7.2 MB** after being cleaned to ~54 by hand.
+
+Deploying the current script and triggering one save brought it to **49 files /
+456 KB**, and growth is now bounded because the prune is the post-save hook.
+
+This is the same shape as the wake-listener staleness: a fix that exists on disk
+in one place while the system runs another copy. Checked the rest of the
+installed tree at the same time — only `para-llm-save-state.sh` and
+`plugins/claude-state-monitor/state-detector.sh` had drifted.
+
+**File**: `scripts/para-llm-save-state.sh`, `scripts/para-llm-recovery-prompt.sh`
