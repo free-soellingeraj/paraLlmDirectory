@@ -1331,3 +1331,84 @@ installed tree at the same time — only `para-llm-save-state.sh` and
 `plugins/claude-state-monitor/state-detector.sh` had drifted.
 
 **File**: `scripts/para-llm-save-state.sh`, `scripts/para-llm-recovery-prompt.sh`
+
+## BUG-064: a long dictation silently stopped recording at the cap
+
+Aaron: *"when I speak for a long time, the transcription just turns off
+randomly... I don't realize that it's turned off and I keep talking."*
+
+`STT_WAKE_MAX_DICTATION` (120s) called `end_dictation`. The take ended, whatever
+had been said was injected, and **everything spoken after that went nowhere** —
+with nothing but the ordinary inject chime to mark it, which is
+indistinguishable from the chime you get on purpose. Confirmed in the log:
+
+```
+08:10:52  dictation started
+08:12:53  dictation timeout after 120s
+08:12:55  dictation injected: 922 chars
+```
+
+...and then silence, because he was still talking.
+
+The cap now **rolls** the take instead of ending it: `roll_dictation` closes the
+current segment, starts a fresh recorder, injects the segment's text, and stays
+in dictating state. A long take is a sequence of segments rather than a cliff,
+and `send` still ends it.
+
+Order matters — the new recorder starts **before** the old segment is
+transcribed. whisper-cli on a two-minute take is seconds of work, and anything
+spoken during it would be exactly the speech this is meant to stop losing.
+
+`wav_speech_text` and `strip_edges` were factored out of `end_dictation` so both
+paths share one implementation, including the silence guard. `INJECTED_CHARS`
+now accumulates across a take (reset in `begin_dictation`) so the send wait
+budget reflects everything injected, not just the final segment.
+
+**Verified** end to end with real audio: 5.6s of synthesized speech, rolled at
+3s. Segment 1 injected as "first part of this ... before the roll boundary.",
+recorder restarted, `.part` cleaned up, and the remaining audio still
+transcribed to "and the second part comes after the roll boundary." Nothing lost
+across the boundary.
+
+## BUG-065: a dead recorder mid-dictation was completely invisible
+
+Nothing watched the `rec` pid. If the recorder died — mic contention, a device
+change — `state` stayed `dictating`, the chip still said so, and the microphone
+went nowhere until the take ended. The main loop already restarted
+`whisper-stream` on death; the dictation recorder had no such guard.
+
+It now rolls to a fresh recorder on death, keeping whatever was captured, and
+**says so out loud** ("recording restarted, please repeat the last sentence")
+plus a buzz. A dictation that stops recording silently is the worst failure in
+this system, because you only discover it after the fact.
+
+## BUG-066: whether "send" worked depended on whisper's punctuation
+
+Aaron: *"the send button isn't working. I have to say send 10 fucking times."*
+
+`ends_with_send`'s third rule required punctuation immediately before the word:
+`[.!?,;:][[:space:]]*[Ss][Ee][Nn][DdTt]`. The theory was that a real command
+trails a finished sentence. But whisper's punctuation is arbitrary, so identical
+intent worked or didn't depending on whether a comma happened to appear:
+
+```
+FIRE    "can you work on those things? Send."
+ignore  "can you work on those things send"
+ignore  "lets do that send."
+ignore  "ok thats the plan send"
+```
+
+Every repeat was a coin flip. The 12-word cap also rejected a clear "... Send."
+on a longer line, which whisper's 6s window produces constantly during
+continuous speech.
+
+Now: the last word being the send word closes the take, within
+`STT_WAKE_SEND_END_MAX_WORDS` (20), minus the readings where "send" is a verb
+rather than a command — `SEND_VERB_BEFORE` rejects "...want you to send", "...I
+think you should send", "...see if the agent will send".
+
+**Verified**: 16 cases — the four that used to fail now fire, the five that
+worked still do, and four verb readings plus three non-command lines stay
+ignored.
+
+**File**: `plugins/stt/wake-listener.sh`

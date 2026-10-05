@@ -80,6 +80,10 @@ STT_WAKE_MODEL="${STT_WAKE_MODEL:-ggml-tiny.en.bin}"
 # sluggish; 700 roughly halves the detection latency.
 STT_WAKE_STEP_MS="${STT_WAKE_STEP_MS:-700}"
 STT_WAKE_MAX_DICTATION="${STT_WAKE_MAX_DICTATION:-120}"
+# How many words a line may hold and still have a trailing "send" close the
+# take. Whisper's sliding window runs long during continuous speech, and the old
+# cap of 12 silently rejected a perfectly clear "... Send." on a longer line.
+STT_WAKE_SEND_END_MAX_WORDS="${STT_WAKE_SEND_END_MAX_WORDS:-20}"
 
 WAKE_LOG="$SPOOL/wake.log"
 STATE_FILE="$SPOOL/wake.state"
@@ -793,53 +797,11 @@ line_has_echo() {
     fi
 }
 
-begin_dictation() {
-    state="dictating"
-    echo "dictating" > "$STATE_FILE"
-    dict_started=$SECONDS
-    pause_playback
-    chime "$STT_WAKE_START_SOUND"
-    rm -f "$DICT_WAV"
-    rec -b 16 -c 1 -r 16000 "$DICT_WAV" 2>"$SPOOL/dictation-rec.log" &
-    echo "$!" > "$REC_PID_FILE"
-    tmux display-message -t "$PANE_ID" "🎤 Dictating… say '$STT_WAKE_TRANSCRIBE_WORD' to finish" 2>/dev/null || true
-    tmux refresh-client -S 2>/dev/null || true
-    log_lifecycle "dictation started"
-}
-
-end_dictation() {
-    local stop_word="${1:-$STT_WAKE_TRANSCRIBE_WORD}"
-    INJECTED=0
-    state="listening"
-    dict_ended=$SECONDS
-    echo "listening" > "$STATE_FILE"
-    local rec_pid
-    rec_pid="$(cat "$REC_PID_FILE" 2>/dev/null)"
-    [[ -n "$rec_pid" ]] && kill_recorder "$rec_pid"
-    rm -f "$REC_PID_FILE"
-
-    local text=""
-    local size
-    size="$(stat -f%z "$DICT_WAV" 2>/dev/null || stat -c%s "$DICT_WAV" 2>/dev/null || echo 0)"
-    if [[ "$size" -gt 1000 ]]; then
-        # Silence guard (see toggle-stt.sh): whisper hallucinates on silence.
-        local rms ok=1
-        if command -v sox >/dev/null 2>&1; then
-            rms="$(sox "$DICT_WAV" -n stat 2>&1 | awk '/RMS[[:space:]]+amplitude/ {print $NF; exit}')"
-            if [[ -n "$rms" ]] && awk -v r="$rms" 'BEGIN { exit !(r+0 < 0.003) }'; then
-                ok=0
-            fi
-        fi
-        if [[ "$ok" == "1" ]]; then
-            text="$("$SCRIPT_DIR/transcribe.sh" "$DICT_WAV" 2>/dev/null || true)"
-        fi
-    fi
-    rm -f "$DICT_WAV"
-
-    if [[ -n "$text" ]]; then
-        # The stop phrase lands in the recording tail (and the start phrase
-        # occasionally in the head) — strip them from the edges.
-        text="$(python3 - "$text" "$STT_WAKE_TRANSCRIBE_WORD" "$stop_word" <<'PY'
+# Strip the toggle words from a transcript's edges. Shared by the normal
+# end-of-take path and by roll_dictation, which passes an empty stop word
+# because a mid-take segment has no stop phrase yet.
+strip_edges() {
+    python3 - "$1" "$2" "$3" <<'PY'
 import re, sys
 text, start, stop = sys.argv[1], sys.argv[2], sys.argv[3]
 
@@ -884,7 +846,100 @@ if tail:
         text = stripped
 print(text.strip())
 PY
-)"
+}
+
+# Transcribe one dictation take. Shared by the normal end-of-take path and by
+# roll_dictation, which flushes a segment mid-take. Includes the silence guard:
+# whisper invents words out of near-silence, so a quiet file transcribes to
+# nothing rather than to a hallucination.
+wav_speech_text() {
+    local wav="$1" size rms
+    size="$(stat -f%z "$wav" 2>/dev/null || stat -c%s "$wav" 2>/dev/null || echo 0)"
+    (( size > 1000 )) || return 0
+    if command -v sox >/dev/null 2>&1; then
+        rms="$(sox "$wav" -n stat 2>&1 | awk '/RMS[[:space:]]+amplitude/ {print $NF; exit}')"
+        if [[ -n "$rms" ]] && awk -v r="$rms" 'BEGIN { exit !(r+0 < 0.003) }'; then
+            return 0
+        fi
+    fi
+    "$SCRIPT_DIR/transcribe.sh" "$wav" 2>/dev/null || true
+}
+
+# Close the current segment and immediately open the next one, without leaving
+# dictating state.
+#
+# The cap used to call end_dictation: the take simply stopped, and everything
+# said afterwards went nowhere. "When I speak for a long time the transcription
+# just turns off randomly... I don't realize it's turned off and I keep talking."
+# Nothing is dropped now — the text so far lands in the input box and recording
+# continues, so a long take is a sequence of segments rather than a cliff.
+#
+# Order matters: the new recorder starts BEFORE the old segment is transcribed.
+# whisper-cli on a two-minute take is seconds of work, and anything spoken
+# during it would be exactly the speech this is meant to stop losing.
+roll_dictation() {
+    local old_pid part text
+    old_pid="$(cat "$REC_PID_FILE" 2>/dev/null)"
+    part="$DICT_WAV.part"
+    rm -f "$part"
+    [[ -n "$old_pid" ]] && kill_recorder "$old_pid"
+    mv -f "$DICT_WAV" "$part" 2>/dev/null
+    rec -b 16 -c 1 -r 16000 "$DICT_WAV" 2>"$SPOOL/dictation-rec.log" &
+    echo "$!" > "$REC_PID_FILE"
+    dict_started=$SECONDS
+    log_lifecycle "dictation rolled at ${STT_WAKE_MAX_DICTATION}s — segment flushed, still recording"
+    text="$(wav_speech_text "$part")"
+    rm -f "$part"
+    [[ -n "$text" ]] || return 0
+    # Only the head word can appear in a mid-take segment; there is no stop word
+    # yet, so pass an empty one.
+    text="$(strip_edges "$text" "$STT_WAKE_TRANSCRIBE_WORD" "")"
+    [[ -n "$text" ]] || return 0
+    text="${text//$'\r'/ }"
+    text="${text//$'\n'/ }"
+    mode_active || return 0
+    # Trailing space so the next segment does not run into this one.
+    tmux send-keys -t "$PANE_ID" -l "$text " 2>/dev/null || return 0
+    INJECTED=1
+    INJECTED_CHARS=$(( INJECTED_CHARS + ${#text} + 1 ))
+    chime "$STT_WAKE_STOP_SOUND"
+    log_lifecycle "dictation segment injected: ${#text} chars (take continues)"
+}
+
+begin_dictation() {
+    state="dictating"
+    INJECTED_CHARS=0          # counts the whole take, across any rolled segments
+    echo "dictating" > "$STATE_FILE"
+    dict_started=$SECONDS
+    pause_playback
+    chime "$STT_WAKE_START_SOUND"
+    rm -f "$DICT_WAV"
+    rec -b 16 -c 1 -r 16000 "$DICT_WAV" 2>"$SPOOL/dictation-rec.log" &
+    echo "$!" > "$REC_PID_FILE"
+    tmux display-message -t "$PANE_ID" "🎤 Dictating… say '$STT_WAKE_TRANSCRIBE_WORD' to finish" 2>/dev/null || true
+    tmux refresh-client -S 2>/dev/null || true
+    log_lifecycle "dictation started"
+}
+
+end_dictation() {
+    local stop_word="${1:-$STT_WAKE_TRANSCRIBE_WORD}"
+    INJECTED=0
+    state="listening"
+    dict_ended=$SECONDS
+    echo "listening" > "$STATE_FILE"
+    local rec_pid
+    rec_pid="$(cat "$REC_PID_FILE" 2>/dev/null)"
+    [[ -n "$rec_pid" ]] && kill_recorder "$rec_pid"
+    rm -f "$REC_PID_FILE"
+
+    local text=""
+    text="$(wav_speech_text "$DICT_WAV")"
+    rm -f "$DICT_WAV"
+
+    if [[ -n "$text" ]]; then
+        # The stop phrase lands in the recording tail (and the start phrase
+        # occasionally in the head) — strip them from the edges.
+        text="$(strip_edges "$text" "$STT_WAKE_TRANSCRIBE_WORD" "$stop_word")"
     fi
 
     # Respect an explicit user pause: dictation ending must not unpause.
@@ -913,7 +968,7 @@ PY
         log_lifecycle "dictation dropped: mode no longer active on this pane"
         return 0
     fi
-    INJECTED_CHARS=${#text}
+    INJECTED_CHARS=$(( INJECTED_CHARS + ${#text} ))
     tmux send-keys -t "$PANE_ID" -l "$text" 2>/dev/null && INJECTED=1
     if [[ "$INJECTED" == "1" ]]; then chime "$STT_WAKE_STOP_SOUND"; else buzz; fi
     local preview="$text"
@@ -1354,17 +1409,37 @@ INJECTED_CHARS=0
 #       (whisper punctuates the command apart from the prose; plain prose
 #       that happens to end "...was sent." lacks the preceding boundary),
 #       capped at 12 words so long prose merely mentioning it stays content.
+# Words that make a trailing "send" a VERB rather than the command: "...want you
+# to send", "...I will send", "...can you send". Those must not submit.
+# Everything else ending on "send" is the command.
+SEND_VERB_BEFORE=" to will would can could should shall must may might please cant wont dont doesnt didnt "
+
 ends_with_send() {
-    local norm="$1" raw="$2" count=0 last="" w
+    local norm="$1" raw="$2" count=0 last="" prev="" w
     [[ -n "$SEND_STEM" ]] || return 1
     for w in $norm; do
         count=$((count + 1))
+        prev="$last"
         last="$w"
     done
     if word_is_send "$last" && (( count <= 2 )); then return 0; fi
     all_words_send "$norm" && return 0
-    local re='[.!?,;:][[:space:]]*[Ss][Ee][Nn][DdTt][.!]*[[:space:]]*$'
-    [[ "$raw" =~ $re ]] && (( count <= 12 ))
+    # A line that ENDS on the send word closes the take. This used to also
+    # require punctuation immediately before it —
+    # `[.!?,;:][[:space:]]*[Ss][Ee][Nn][DdTt]` — on the theory that a real
+    # command trails a finished sentence. But whisper's punctuation is
+    # arbitrary, so identical intent worked or didn't depending on whether it
+    # happened to emit a comma: "can you work on those things? Send." fired
+    # while "can you work on those things send" did not, and "lets do that
+    # send." did not either. That is the whole of "I have to say send ten
+    # times" — each repeat was a coin flip on punctuation.
+    #
+    # So: last word is the send word, within a generous cap (whisper's 6s window
+    # runs long during continuous speech), minus the verb readings above.
+    word_is_send "$last" || return 1
+    (( count <= STT_WAKE_SEND_END_MAX_WORDS )) || return 1
+    [[ "$SEND_VERB_BEFORE" == *" $prev "* ]] && return 1
+    return 0
 }
 
 kill_inflight_afplay() {
@@ -1670,10 +1745,26 @@ while mode_active; do
             fi
         fi
     fi
+    # The cap rolls the take instead of ending it. It used to call
+    # end_dictation: recording simply stopped, and every word after that went
+    # nowhere. Nothing announced it either, so you find out long afterwards —
+    # "the transcription just turns off randomly and I keep talking".
     if [[ "$state" == "dictating" && "$STT_WAKE_MAX_DICTATION" != "0" ]] \
         && (( SECONDS - dict_started > STT_WAKE_MAX_DICTATION )); then
-        log_lifecycle "dictation timeout after ${STT_WAKE_MAX_DICTATION}s"
-        end_dictation
+        roll_dictation
+    fi
+    # A recorder that dies mid-take was completely invisible: state stayed
+    # "dictating", the chip still said so, and the microphone was going nowhere.
+    # Roll it — that keeps whatever was captured, starts a fresh recorder, and
+    # the spoken notice means you learn about it now rather than at the end.
+    if [[ "$state" == "dictating" ]]; then
+        _rp="$(cat "$REC_PID_FILE" 2>/dev/null)"
+        if [[ -n "$_rp" ]] && ! kill -0 "$_rp" 2>/dev/null; then
+            log_lifecycle "WARNING: dictation recorder died mid-take; rolling to a fresh one"
+            buzz
+            announce "recording restarted, please repeat the last sentence"
+            roll_dictation
+        fi
     fi
     # If whisper-stream died (mic conflict, crash), restart it once per tick.
     spid="$(cat "$STREAM_PID_FILE" 2>/dev/null)"
