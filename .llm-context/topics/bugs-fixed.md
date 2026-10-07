@@ -1412,3 +1412,55 @@ worked still do, and four verb readings plus three non-command lines stay
 ignored.
 
 **File**: `plugins/stt/wake-listener.sh`
+
+## BUG-067: commands were unsatisfiable while the agent was talking
+
+Aaron: *"transcribed doesn't work while the agent is talking."* The near-miss log
+named it outright:
+
+```
+no trigger ('transcribe' heard): narration is playing, so 'transcribe' must be
+  the only word — heard 9
+  [line: '- Transcribe. - Nothing new to report. My question still stands.']
+no trigger ('send' heard): narration is playing, so 'send' must be the only word
+  — heard 14  [line: '...from the last day. So, okay, send it.']
+```
+
+`matches_word` and `matches_exact_word` required `count == 1` while
+`player_speaking`. But the microphone hears **both** parties, so whisper's 6s
+window is never a single word while narration is playing — the rule was
+unsatisfiable in exactly the situation it governed. One day's log: **5 sends
+fired, 39 rejected**, a 11% hit rate, which is "I have to say send 10 times".
+
+Length was never the discriminator. **Position** is: you just spoke, so your
+word bounds the window, while the narration's own words sit mid-sentence (`the
+gate sends any`, `files and sending. No`). The rule is now "first word, or
+within the last two", and `tts_recently_said` — which reads the real TTS text
+rather than guessing from the shape of the line — still vetoes anything the
+narration actually said.
+
+**Verified** against the real log lines: all five previously-blocked commands
+fire, all three narration mid-sentence lines stay rejected, the echo guard still
+vetoes a command the narration genuinely spoke, and the same word fires when it
+did not.
+
+## BUG-068: the dictating state reported no near-misses at all
+
+`log_near_miss` only ran in the listening branch. A "send" that failed to close
+a take left no trace, so the log showed only the attempt that finally worked —
+`send-end trigger: 'Send send send send.'` — with the three rejections before it
+invisible. Exactly the half of "send is not working" that could not be seen.
+
+`log_near_miss_dictating` now reports why a take did not close: the echo latch,
+`'send' was not the last word (heard 'thing' last)`, the word cap, or
+`'to send' reads as a verb, not the command`.
+
+**Note on the root cause underneath both.** Output was `MacBook Pro Speakers`
+while input was `MacBook Pro Microphone` — the narration playing into the mic
+from inches away. This machine has exactly one real microphone (the other input
+is a virtual Teams device), so the two uses cannot be split across devices.
+Routing narration to headphones removes this whole class of bug at the source
+instead of filtering it downstream; `whisper-stream -c ID` and sox's `AUDIODEV`
+would allow per-device pinning if a second real mic were ever present.
+
+**File**: `plugins/stt/wake-listener.sh`

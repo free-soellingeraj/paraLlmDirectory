@@ -324,12 +324,14 @@ REPEAT_TURN_STEM="$(stem8 "$STT_WAKE_REPEAT_TURN_WORD")"
 # `send` already had a bespoke whole-word matcher for exactly this reason
 # ("sending"/"sentence"); this is that rule, generalised.
 matches_exact_word() {
-    local line="$1" stem="$2" count=0 found=1 burst=1 w
+    local line="$1" stem="$2" count=0 found=1 burst=1 w pos_first=0 pos_last=0
     [[ -n "$stem" ]] || return 1
     for w in $line; do
         count=$((count + 1))
         if [[ "$w" == "$stem" || "$w" == "${stem}s" ]]; then
             found=0
+            (( pos_first == 0 )) && pos_first=$count
+            pos_last=$count
         else
             burst=1$burst          # a non-matching word rules out a burst
         fi
@@ -341,7 +343,22 @@ matches_exact_word() {
         return 0
     fi
     if player_speaking; then
-        [[ "$count" -eq 1 ]] || return 1
+        # While narration plays the microphone hears BOTH of you, so whisper's
+        # 6s window is never a single word. Requiring count==1 here made the
+        # rule unsatisfiable in exactly the situation it governs — "transcribe
+        # doesn't work while the agent is talking" WAS this rule, and it
+        # rejected 39 of 44 "send"s in one day:
+        #   no trigger ('transcribe' heard): narration is playing, so
+        #     'transcribe' must be the only word — heard 9
+        #     [line: '- Transcribe. - Nothing new to report. My question still stands.']
+        #
+        # Length is not what tells you apart from the narration. POSITION is:
+        # you just spoke, so your word bounds the window, while the narration's
+        # own words sit mid-sentence ('the gate sends any', 'files and
+        # sending. No'). tts_recently_said still vetoes anything the narration
+        # actually said, and that guard reads the real TTS text rather than
+        # guessing from the shape of the line.
+        (( pos_first == 1 || pos_last >= count - 1 )) || return 1
     else
         # <=2 tolerates one filler ("uh repeat") but keeps the word from firing
         # out of the middle of continuous speech.
@@ -379,6 +396,53 @@ near_miss_quiet() {      # 0 = logged recently, stay quiet
     NEAR_MISS_AT+=("$SECONDS")
     return 1
 }
+# The same question, for the DICTATING state. That branch had no reporting at
+# all, so a "send" that failed to close the take left no trace: the log showed
+# only the attempt that finally worked — `send-end trigger: 'Send send send
+# send.'` — with the three rejections before it invisible.
+log_near_miss_dictating() {
+    local norm="$1" raw="$2"
+    [[ -n "$norm" ]] || return 0
+    local count=0 last="" prev="" w
+    for w in $norm; do
+        count=$((count + 1))
+        prev="$last"
+        last="$w"
+    done
+    (( count )) || return 0
+
+    local reason="" label=""
+    if line_has_send "$norm"; then
+        label="send"
+        if [[ "$echo_stem" == "$SEND_STEM" ]]; then
+            reason="echo latch for 'send' still armed — clears on the next line without it, or after ${STT_WAKE_ECHO_LATCH_SECS}s"
+        elif ! word_is_send "$last"; then
+            reason="'send' was not the last word (heard '$last' last) — a take closes on a trailing 'send'"
+        elif (( count > STT_WAKE_SEND_END_MAX_WORDS )); then
+            reason="$count words, over the ${STT_WAKE_SEND_END_MAX_WORDS}-word cap for closing a take"
+        elif [[ "$SEND_VERB_BEFORE" == *" $prev "* ]]; then
+            reason="'$prev send' reads as a verb, not the command"
+        else
+            reason="UNEXPLAINED — matched no rule and no guard accounts for it"
+        fi
+    elif line_has_stem "$norm" "$TRANSCRIBE_STEM" || line_has_stem "$norm" "$TRANSCRIBE_ALT_STEM"; then
+        label="transcribe"
+        if [[ "$echo_stem" == "$TRANSCRIBE_STEM" ]]; then
+            reason="echo latch for 'transcribe' still armed — clears on the next line without it, or after ${STT_WAKE_ECHO_LATCH_SECS}s"
+        elif [[ "$last" != "$TRANSCRIBE_STEM"* && "$last" != "$TRANSCRIBE_ALT_STEM"* ]]; then
+            reason="'transcribe' was not the last word (heard '$last' last) — a take closes on a trailing 'transcribe'"
+        elif (( count > 6 )); then
+            reason="$count words, over the 6-word cap for closing a take"
+        else
+            reason="UNEXPLAINED — matched no rule and no guard accounts for it"
+        fi
+    else
+        return 0
+    fi
+    near_miss_quiet "dict:$label:$reason" && return 0
+    log_lifecycle "no trigger while dictating ('$label' heard): $reason  [line: '$raw']"
+}
+
 log_near_miss() {
     local norm="$1" raw="$2"
     [[ -n "$norm" ]] || return 0
@@ -642,17 +706,38 @@ matches_word() {
     [[ -n "$stem" && ${#stem} -ge 3 ]] || return 1
     # Repeat-to-force: a clean burst of the command word is always the user.
     is_burst "$line" "$stem" && return 0
-    local count=0 found=1 w last=""
+    local count=0 found=1 w last="" pos_first=0 pos_last=0
     for w in $line; do
         count=$((count + 1))
         last="$w"
-        [[ "$w" == "$stem"* ]] && found=0
+        if [[ "$w" == "$stem"* ]]; then
+            found=0
+            (( pos_first == 0 )) && pos_first=$count
+            pos_last=$count
+        fi
     done
     local ok=1
     if [[ "$mode" == "end" ]]; then
         [[ "$last" == "$stem"* && "$count" -le 6 ]] && ok=0
     elif player_speaking; then
-        [[ "$found" -eq 0 && "$count" -eq 1 ]] && ok=0
+        # While narration plays the microphone hears BOTH of you, so whisper's
+        # 6s window is never a single word. Requiring count==1 here made the
+        # rule unsatisfiable in exactly the situation it governs — "transcribe
+        # doesn't work while the agent is talking" WAS this rule, and it
+        # rejected 39 of 44 "send"s in one day:
+        #   no trigger ('transcribe' heard): narration is playing, so
+        #     'transcribe' must be the only word — heard 9
+        #     [line: '- Transcribe. - Nothing new to report. My question still stands.']
+        #
+        # Length is not what tells you apart from the narration. POSITION is:
+        # you just spoke, so your word bounds the window, while the narration's
+        # own words sit mid-sentence ('the gate sends any', 'files and
+        # sending. No'). tts_recently_said still vetoes anything the narration
+        # actually said, and that guard reads the real TTS text rather than
+        # guessing from the shape of the line.
+        if (( found == 0 )) && { (( pos_first == 1 )) || (( pos_last >= count - 1 )); }; then
+            ok=0
+        fi
     else
         # Commands are spoken as lone words; <=2 tolerates a filler ("uh
         # send") but keeps fragments of continuous speech from triggering.
@@ -1742,6 +1827,8 @@ while mode_active; do
                     do_send
                 fi
                 echo_stem="$SEND_STEM"; echo_stem_at=$SECONDS
+            else
+                log_near_miss_dictating "$norm_line" "$line"
             fi
         fi
     fi
