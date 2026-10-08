@@ -1544,3 +1544,40 @@ would allow it if a second real mic appeared.
 
 **File**: `plugins/stt/wake-listener.sh`, `tests/test-command-matching.sh`,
 `.github/workflows/tests.yml`
+
+## BUG-070: `matches_send` was missed in the collapse — and the first tests for it proved nothing
+
+Two mistakes of mine, caught immediately after BUG-069 shipped.
+
+**The matcher I missed.** There are *three* command matchers, not two.
+`matches_word` and `matches_exact_word` were collapsed to one rule; the
+listening-state `send` goes through a third, `matches_send`, which still had the
+unsatisfiable `count == 1` while speaking **and** the `tts_recently_said` veto
+after both were removed everywhere else. So the single most used command kept
+the exact bug that had just been fixed around it. There are now zero live
+`tts_recently_said` calls; the near-miss reporter's "suppressed as echo" reason
+is replaced by one that can actually happen ("every word on this line was the
+agent's own narration").
+
+**The tests that proved nothing.** The first `matches_send` cases I added passed
+*with the bug reintroduced*. Every while-narrating case left a **single-word**
+residue, and `count == 1` satisfies that just as well as `count <= 2` — so none
+of them could tell the rules apart. The discriminating case is a **two-word**
+residue while the agent talks, which is also how people actually speak (nobody
+says a bare "send"):
+
+```
+narration : the message to three is ready
+heard     : uh send the message to three is ready
+residue   : [uh send]
+  old rule (count==1 while speaking) -> ignore   FAIL
+  new rule (count<=2)                -> FIRE
+```
+
+Lesson worth keeping: a regression test is only worth the bug it can reproduce.
+Each of the three matchers now has a case that fails when its rule is reverted,
+verified by reverting it.
+
+60 cases total.
+
+**File**: `plugins/stt/wake-listener.sh`, `tests/test-command-matching.sh`
