@@ -1464,3 +1464,83 @@ instead of filtering it downstream; `whisper-stream -c ID` and sox's `AUDIODEV`
 would allow per-device pinning if a second real mic were ever present.
 
 **File**: `plugins/stt/wake-listener.sh`
+
+## BUG-069: stop guessing which voice is which — subtract the agent's own words
+
+Aaron: *"commands are fucked again can you fix this like for good... so that I
+don't have to keep coming back to you every five seconds."*
+
+He was right that the pattern was the problem, not any single bug. My previous
+fix had made things worse in a new direction — the agent's own narration started
+firing commands:
+
+```
+17:26:08  forward trigger: 'The planter has finished. The plan is on forward request, 22.58.'
+11:50:17  send trigger: 'Send transcribed.'
+11:50:18  transcribe trigger: 'Send transcribed.'
+```
+
+### Why every fix traded one failure for another
+
+One microphone hears both parties, so a line can be any mixture of the two. The
+listener had been **guessing** which words were whose from the shape of the
+line, and each guess fixed one case while breaking another:
+
+| guess | fixed | broke |
+|---|---|---|
+| `count == 1` while speaking | narration firing commands | unsatisfiable — blocked 39 of 44 sends |
+| first word or within last two | commands during narration | `on forward request` fired `forward` |
+| `tts_recently_said` veto | the agent's echo | **your** word, whenever the agent used it too |
+
+None of that guessing was ever necessary. `speak_loop` writes the exact text of
+each chunk to `tts.speaking` as it plays it — **the system knows precisely what
+it is saying**. So subtract it, and what remains is the user.
+
+### The fix
+
+`narration_update` keeps a rolling record of what the agent has said in the last
+`STT_WAKE_NARRATION_WINDOW` seconds (12 by default; whisper's `--length 6000`
+window can straddle a chunk boundary, so one chunk is not enough history).
+`subtract_narration` removes those words from each line before anything looks at
+it.
+
+Subtraction is by **count, not set membership**: if the narration said "send"
+once and the microphone heard it twice, one survives — and that one is the user.
+Set membership threw away both, which is exactly what `tts_recently_said` did.
+
+Everything downstream then works on the user's words alone, so the matchers no
+longer need to know whether narration is playing. `matches_word` and
+`matches_exact_word` collapse to **one rule** — a command is a lone word, with
+at most one filler — and the `tts_recently_said` veto is gone, superseded.
+
+### Why this one should hold
+
+`tests/test-command-matching.sh`: 49 cases, each a bug that actually happened,
+using the line whisper really produced. Wired into CI
+(`.github/workflows/tests.yml`), which previously only echoed "Branch is up to
+date" — nothing had ever checked this code.
+
+Proven to catch regressions, not just pass. Reintroducing three earlier bugs:
+
+```
+prefix-matching 'play' again          -> 4 failures
+removing narration subtraction        -> 5 failures
+restoring the send punctuation rule   -> 4 failures
+```
+
+### The acoustic root cause, named
+
+Output was `MacBook Pro Speakers` with input `MacBook Pro Microphone` — the
+narration playing into the microphone from inches away. Subtraction handles what
+we *said*, but whisper mangles what it *hears* ("playing" → "you're", "rule
+sends" → "Fending sends"), and a mangled word cannot be subtracted because it is
+not what we said. Headphones remove the class instead of filtering it.
+
+`warn_if_echoing_setup` now says this once at startup, spoken and logged, when
+input is the built-in mic and output the built-in speakers. This machine has one
+real microphone (the other input is a virtual Teams device), so the two uses
+cannot be split across devices; `whisper-stream -c ID` and sox's `AUDIODEV`
+would allow it if a second real mic appeared.
+
+**File**: `plugins/stt/wake-listener.sh`, `tests/test-command-matching.sh`,
+`.github/workflows/tests.yml`

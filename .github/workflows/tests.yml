@@ -1,0 +1,24 @@
+name: Tests
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  command-matching:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The wake listener's command matching was rewritten six times in two
+      # weeks, and twice a fix silently undid an earlier one because nothing
+      # checked. This suite is every one of those bugs, with the line whisper
+      # really produced.
+      - name: Command matching regression suite
+        run: bash tests/test-command-matching.sh
+      - name: Shell syntax
+        run: |
+          for f in plugins/stt/*.sh prototype/*.sh scripts/*.sh; do
+            [ -f "$f" ] && bash -n "$f"
+          done
