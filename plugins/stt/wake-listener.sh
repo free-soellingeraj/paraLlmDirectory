@@ -214,6 +214,32 @@ input_volume() {
 # because AirPods carries its own stored 27. Reporting a bare number sent three
 # debugging sessions looking for something that was "resetting" a setting that
 # was never reset — a different device was simply selected.
+output_device() {
+    command -v system_profiler >/dev/null 2>&1 || return 1
+    system_profiler SPAudioDataType 2>/dev/null | awk '
+        /^        [A-Za-z].*:$/ { dev = $0; sub(/^ +/, "", dev); sub(/:$/, "", dev) }
+        /Default Output Device: Yes/ { print dev; exit }'
+}
+
+# Built-in speakers plus the built-in microphone is the one configuration that
+# GUARANTEES the agent is heard by the microphone: they sit inches apart, so
+# every narrated word arrives back as a command candidate. Subtracting the known
+# narration text handles most of it, but whisper mangles what it hears
+# ("playing" -> "you're", "rule sends" -> "Fending sends"), and a mangled word
+# cannot be subtracted because it is not what we said. Headphones remove the
+# whole class rather than filtering it, so say so once at startup instead of
+# leaving it to be rediscovered.
+warn_if_echoing_setup() {
+    local in out
+    in="$(input_device)" || return 0
+    out="$(output_device)" || return 0
+    [[ -n "$in" && -n "$out" ]] || return 0
+    case "$in" in *[Mm]icrophone*) ;; *) return 0 ;; esac
+    case "$out" in *[Ss]peaker*) ;; *) return 0 ;; esac
+    log_lifecycle "NOTE: input is '$in' and output is '$out' - the narration plays into the microphone, so the agent's own words compete with yours. Headphones remove this."
+    announce "heads up, output is the built in speakers and input is the built in microphone, so I will hear myself. Use headphones for reliable commands."
+}
+
 input_device() {
     command -v system_profiler >/dev/null 2>&1 || return 1
     system_profiler SPAudioDataType 2>/dev/null | awk '
@@ -342,29 +368,9 @@ matches_exact_word() {
     if [[ "$burst" == "1" && "$count" -ge 2 ]]; then
         return 0
     fi
-    if player_speaking; then
-        # While narration plays the microphone hears BOTH of you, so whisper's
-        # 6s window is never a single word. Requiring count==1 here made the
-        # rule unsatisfiable in exactly the situation it governs — "transcribe
-        # doesn't work while the agent is talking" WAS this rule, and it
-        # rejected 39 of 44 "send"s in one day:
-        #   no trigger ('transcribe' heard): narration is playing, so
-        #     'transcribe' must be the only word — heard 9
-        #     [line: '- Transcribe. - Nothing new to report. My question still stands.']
-        #
-        # Length is not what tells you apart from the narration. POSITION is:
-        # you just spoke, so your word bounds the window, while the narration's
-        # own words sit mid-sentence ('the gate sends any', 'files and
-        # sending. No'). tts_recently_said still vetoes anything the narration
-        # actually said, and that guard reads the real TTS text rather than
-        # guessing from the shape of the line.
-        (( pos_first == 1 || pos_last >= count - 1 )) || return 1
-    else
-        # <=2 tolerates one filler ("uh repeat") but keeps the word from firing
-        # out of the middle of continuous speech.
-        [[ "$count" -le 2 ]] || return 1
-    fi
-    tts_recently_said "$stem" && return 1
+    # Same single rule as matches_word, for the same reason: the narration has
+    # already been subtracted from this line.
+    (( count <= 2 )) || return 1
     return 0
 }
 matches_repeat_turn() { matches_exact_word "$1" "$REPEAT_TURN_STEM"; }
@@ -439,8 +445,10 @@ log_near_miss_dictating() {
     else
         return 0
     fi
+    local _sub=""
+    [[ "$norm" != "$(normalize "$raw")" ]] && _sub=1
     near_miss_quiet "dict:$label:$reason" && return 0
-    log_lifecycle "no trigger while dictating ('$label' heard): $reason  [line: '$raw']"
+    log_lifecycle "no trigger while dictating ('$label' heard): $reason  [heard: '$raw']${_sub:+  [yours after removing the agent: '$norm']}"
 }
 
 log_near_miss() {
@@ -493,8 +501,10 @@ log_near_miss() {
         # This line is the one to bring to a bug report.
         reason="UNEXPLAINED — matched no rule and no guard accounts for it"
     fi
+    local _sub=""
+    [[ "$norm" != "$(normalize "$raw")" ]] && _sub=1
     near_miss_quiet "$hit:$reason" && return 0
-    log_lifecycle "no trigger ('$label' heard): $reason  [line: '$raw']"
+    log_lifecycle "no trigger ('$label' heard): $reason  [heard: '$raw']${_sub:+  [yours after removing the agent: '$norm']}"
 }
 SEND_STEM="$(stem8 "$STT_WAKE_SEND_WORD")"
 # Whole-word matches only: "send", its plural "sends", and the common whisper
@@ -641,7 +651,70 @@ buzz() { chime "$STT_WAKE_FAIL_SOUND" "$STT_WAKE_ACK_VOLUME"; }
 # couple chunks, refreshed while afplay runs). We use it two ways: to know TTS is
 # live at all, and to drop a matched command word the narration is speaking.
 TTS_SPEAKING_FILE="$SPOOL/tts.speaking"
-TTS_ECHO_COOLDOWN="${STT_WAKE_ECHO_COOLDOWN:-2}"   # secs a spoken word stays "in the air"
+TTS_ECHO_COOLDOWN="${STT_WAKE_ECHO_COOLDOWN:-2}"
+
+# --- Subtracting the agent's own voice ----------------------------------------
+#
+# One microphone hears both parties, so every line can be a mix of what you said
+# and what the agent is saying through the speakers. Up to now the listener
+# GUESSED which was which from the shape of the line — word counts, whether the
+# command was the only word, where it sat in the sentence. Each guess fixed one
+# case and broke another, and that is the whole history of this file:
+#
+#   count==1 while speaking  -> unsatisfiable, blocked 39 of 44 sends
+#   first-or-last-two        -> let 'on forward request' fire forward
+#   tts_recently_said        -> vetoed YOUR word whenever the agent used it too
+#
+# None of that guessing is necessary, because the system knows exactly what it is
+# saying: speak_loop writes each chunk's text to tts.speaking as it plays it.
+# So subtract it. What remains is yours, and the ordinary rules apply to it.
+#
+# Subtraction is by COUNT, not set membership: if the narration said "send" once
+# and the mic heard it twice, one survives — and that one is you. Set membership
+# would have thrown away both, which is precisely what tts_recently_said did.
+STT_WAKE_NARRATION_WINDOW="${STT_WAKE_NARRATION_WINDOW:-12}"
+NARR_TEXT=()
+NARR_AT=()
+NARR_LAST=""
+
+# Keep a rolling record of what the agent has said recently. whisper's window is
+# --length 6000, so a line can straddle a chunk boundary; one chunk is not
+# enough history.
+narration_update() {
+    local cur
+    cur="$(cat "$TTS_SPEAKING_FILE" 2>/dev/null)"
+    if [[ -n "$cur" && "$cur" != "$NARR_LAST" ]]; then
+        NARR_TEXT+=("$cur")
+        NARR_AT+=("$SECONDS")
+        NARR_LAST="$cur"
+    fi
+    # Drop anything older than the window.
+    while (( ${#NARR_AT[@]} > 0 ))         && (( SECONDS - ${NARR_AT[0]} > STT_WAKE_NARRATION_WINDOW )); do
+        NARR_TEXT=("${NARR_TEXT[@]:1}")
+        NARR_AT=("${NARR_AT[@]:1}")
+    done
+}
+
+subtract_narration() {
+    local line="$1" w i
+    (( ${#NARR_TEXT[@]} )) || { printf '%s' "$line"; return 0; }
+    local -a pool=()
+    for w in ${NARR_TEXT[@]+"${NARR_TEXT[@]}"}; do pool+=($w); done
+    local out="" hit
+    for w in $line; do
+        hit=-1
+        for i in "${!pool[@]}"; do
+            if [[ "${pool[$i]}" == "$w" ]]; then hit=$i; break; fi
+        done
+        if (( hit >= 0 )); then
+            unset 'pool[hit]'
+        else
+            out+="${out:+ }$w"
+        fi
+    done
+    printf '%s' "$out"
+}
+   # secs a spoken word stays "in the air"
                                                    # (short: the guard now reads only the
                                                    # CURRENT chunk, so it need only cover
                                                    # whisper's lag, not narration history)
@@ -719,33 +792,15 @@ matches_word() {
     local ok=1
     if [[ "$mode" == "end" ]]; then
         [[ "$last" == "$stem"* && "$count" -le 6 ]] && ok=0
-    elif player_speaking; then
-        # While narration plays the microphone hears BOTH of you, so whisper's
-        # 6s window is never a single word. Requiring count==1 here made the
-        # rule unsatisfiable in exactly the situation it governs — "transcribe
-        # doesn't work while the agent is talking" WAS this rule, and it
-        # rejected 39 of 44 "send"s in one day:
-        #   no trigger ('transcribe' heard): narration is playing, so
-        #     'transcribe' must be the only word — heard 9
-        #     [line: '- Transcribe. - Nothing new to report. My question still stands.']
-        #
-        # Length is not what tells you apart from the narration. POSITION is:
-        # you just spoke, so your word bounds the window, while the narration's
-        # own words sit mid-sentence ('the gate sends any', 'files and
-        # sending. No'). tts_recently_said still vetoes anything the narration
-        # actually said, and that guard reads the real TTS text rather than
-        # guessing from the shape of the line.
-        if (( found == 0 )) && { (( pos_first == 1 )) || (( pos_last >= count - 1 )); }; then
-            ok=0
-        fi
     else
-        # Commands are spoken as lone words; <=2 tolerates a filler ("uh
-        # send") but keeps fragments of continuous speech from triggering.
+        # ONE rule, whether or not the agent is talking. The line reaching us has
+        # already had the narration's own words subtracted, so "while speaking"
+        # is no longer a special case — and every bug in this matcher came from
+        # treating it as one. Commands are spoken as lone words; <=2 tolerates a
+        # filler ("uh send") but keeps fragments of continuous speech out.
         [[ "$found" -eq 0 && "$count" -le 2 ]] && ok=0
     fi
     [[ "$ok" -eq 0 ]] || return 1
-    # Would match — but drop it if it's the agent's own narration via the mic.
-    tts_recently_said "$stem" && return 1
     return 0
 }
 
@@ -755,6 +810,7 @@ whisper-stream -m "$MODEL_PATH" -t 4 --step "$STT_WAKE_STEP_MS" --length 6000 \
 echo "$!" > "$STREAM_PID_FILE"
 echo "listening" > "$STATE_FILE"
 log_lifecycle "listening for '$STT_WAKE_TRANSCRIBE_WORD' / '$STT_WAKE_REPEAT_WORD' / '$STT_WAKE_SEND_WORD'"
+warn_if_echoing_setup
 
 # Say something the moment the mic is too quiet to work, rather than waiting for
 # someone to notice that no command has landed for twenty minutes and think to
@@ -1660,7 +1716,13 @@ exec 3< <(tail -n 0 -F "$WAKE_LOG" 2>/dev/null)
 
 while mode_active; do
     if read -t 1 -u 3 -r line; then
-        norm_line="$(normalize "$line")"
+        heard_line="$(normalize "$line")"
+        # Take the agent's own words out before anything looks at this line.
+        # Everything downstream — the matchers, the latch, the near-miss
+        # reporter — then works on YOUR words only, which is why none of them
+        # need to know whether narration is playing.
+        narration_update
+        norm_line="$(subtract_narration "$heard_line")"
         # Voice-activity signal for the working heartbeat: any real word content
         # (normalize strips whisper's noise annotations like "(crowd cheering)"
         # to empty, so the sticks' own feedback does NOT count) means someone is
