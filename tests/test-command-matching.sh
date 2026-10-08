@@ -16,7 +16,7 @@ fn() { sed -n "/^$1() {/,/^}$/p" "$SRC"; }
 load() { local f; for f in "$@"; do eval "$(fn "$f")" || { echo "could not load $f"; exit 1; }; done; }
 
 # --- the real implementations under test ---
-load normalize matches_word matches_exact_word ends_with_send \
+load normalize matches_word matches_exact_word matches_send ends_with_send \
      subtract_narration narration_update line_has_send line_has_stem \
      word_is_send all_words_send is_burst
 
@@ -47,6 +47,7 @@ expect() {                         # expect FIRE|ignore <matcher> <stem> <heard 
         exact) matches_exact_word  "$res" "$stem" && got=FIRE || got=ignore ;;
         end)   matches_word       "$res" "$stem" end && got=FIRE || got=ignore ;;
         send)  ends_with_send     "$res" "$heard" && got=FIRE || got=ignore ;;
+        lone)  matches_send       "$res" && got=FIRE || got=ignore ;;
         *) echo "unknown matcher $kind"; exit 2 ;;
     esac
     if [[ "$got" == "$want" ]]; then
@@ -128,6 +129,23 @@ reset_narration
 narrating "the transcribed output is ready"
 expect FIRE   word  transcri "transcribe the transcribed output is ready"
 
+section "matches_send: the listening-state 'send' (missed in the first pass)"
+reset_narration
+expect FIRE   lone send "send"
+expect FIRE   lone send "uh send"
+expect FIRE   lone send "send send send"                       # repeat-to-force
+expect ignore lone send "the send button is broken"
+expect ignore lone send "I want to send the email tomorrow"
+# ...and it must work while the agent is talking, which is the whole point
+narrating "the Nick Coffee message to three"
+expect FIRE   lone send "Send the Nick Coffee message to three"
+reset_narration
+narrating "anything is set after court and before the gate sends any request"
+expect ignore lone send "anything is set. After court and before the gate sends any"
+reset_narration
+narrating "i will send the message now"
+expect FIRE   lone send "i will send the message now send"
+
 section "normalize: whisper's noise annotations are not speech"
 reset_narration
 expect ignore exact play     "[MUSIC PLAYING]"
@@ -143,6 +161,21 @@ for s in transcri send repeat play pause forward window cancel recap; do
         *)            expect ignore word  "$s" "lets talk about the weather today" ;;
     esac
 done
+
+section "the discriminating case: a 2-word residue WHILE the agent talks"
+# Every other while-narrating case leaves a SINGLE word, which satisfies even
+# the old `count == 1` rule — so none of them can tell the rules apart. A
+# filler beside the command is what separates them, and it is how people
+# actually talk: nobody says a bare "send".
+reset_narration
+narrating "the message to three is ready"
+expect FIRE   lone  send     "uh send the message to three is ready"
+reset_narration
+narrating "nothing new to report"
+expect FIRE   word  transcri "okay transcribe nothing new to report"
+reset_narration
+narrating "the last block again"
+expect FIRE   exact repeat   "uh repeat the last block again"
 
 printf '\n%s\n' "-----------------------------------------"
 printf 'passed %d   failed %d\n' "$PASS" "$FAIL"

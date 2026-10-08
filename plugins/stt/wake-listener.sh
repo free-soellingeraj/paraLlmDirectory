@@ -488,8 +488,8 @@ log_near_miss() {
         reason="echo latch for '$hit' still armed — clears on the next line without it, or after ${STT_WAKE_ECHO_LATCH_SECS}s"
     elif [[ "$exact" == "1" && "$whole" != "0" ]]; then
         reason="heard '$hitword', which only starts with '$hit' — '$label' must be the whole word"
-    elif tts_recently_said "$hit"; then
-        reason="suppressed as echo: the narration just said '$hit'"
+    elif [[ -z "$norm" ]]; then
+        reason="every word on this line was the agent's own narration, so nothing of yours remained"
     elif player_speaking && (( count > 1 )); then
         reason="narration is playing, so '$label' must be the only word — heard $count"
     elif (( count > 2 )); then
@@ -538,15 +538,13 @@ matches_send() {
     if all_words_send "$line" && [[ "$count" -ge 2 ]]; then
         return 0
     fi
-    local ok=1
-    if player_speaking; then
-        [[ "$count" -eq 1 ]] && ok=0
-    else
-        [[ "$count" -le 2 ]] && ok=0
-    fi
-    [[ "$ok" -eq 0 ]] || return 1
-    # A lone/near-lone "send" the agent is currently narrating is mic echo.
-    tts_recently_said "$SEND_STEM" && return 1
+    # ONE rule, narrating or not — the same collapse as matches_word and
+    # matches_exact_word, and for the same reason. This matcher was missed in
+    # that pass, so the listening-state "send" (the most used command of all)
+    # kept the unsatisfiable count==1 rule and the tts_recently_said veto after
+    # both had been removed everywhere else. The narration has already been
+    # subtracted from this line, so neither has a job left.
+    (( count <= 2 )) || return 1
     return 0
 }
 WINDOW_STEM="$(stem8 "$STT_WAKE_WINDOW_WORD")"
