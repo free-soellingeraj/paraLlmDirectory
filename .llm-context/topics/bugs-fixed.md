@@ -1581,3 +1581,64 @@ verified by reverting it.
 60 cases total.
 
 **File**: `plugins/stt/wake-listener.sh`, `tests/test-command-matching.sh`
+
+## BUG-071: the voice was the plain macOS default because edge-tts is 403ing
+
+Aaron: *"The voice is the max default text to speech. Can you figure out why?"*
+
+`edge-tts rc=1`, every call. The real error, which the `rc=1` hid:
+
+```
+aiohttp.client_exceptions.WSServerHandshakeError: 403, message='Invalid response status'
+  wss://speech.platform.bing.com/.../edge/v1?...&Sec-MS-GEC-Version=1-143.0.3650.75
+```
+
+Ruled out, each by measurement rather than assumption:
+
+- **Not the edge-tts version** — 7.2.8 installed, and 7.2.8 is the newest on PyPI.
+- **Not clock skew** (the usual cause; the `Sec-MS-GEC` token is time-derived) —
+  measured **+0.8s** against Microsoft's own `Date` header.
+- **Not the token** — `--list-voices` sends the same `Sec-MS-GEC` and succeeds.
+- **Not the client version string** — probed `1-144`, `1-145`, `1-146` and
+  `1-130`: all 403.
+- **Not the voice or the rate flag** — every voice, with and without `--rate`.
+- **Not the network** — the voices endpoint over plain HTTPS works.
+
+So Microsoft is refusing the synthesis WebSocket for this client, full stop.
+Nothing to fix locally. That is the standing risk in depending on an
+unauthenticated reverse-engineered endpoint, and it came due.
+
+Which left `say` — and **no Premium or Enhanced voice is installed** on this
+machine (`say -v '?' | grep -ci 'premium|enhanced'` → 0), so the only
+non-novelty voice present is Samantha. Hence "the max default text to speech".
+
+### Two fixes
+
+**The fallback voice is now chosen, not hardcoded.** `_best_say_voice()` ranks
+what is actually installed — Premium, then Enhanced, then the decent compacts —
+so downloading a voice in System Settings is the whole fix, with no code change.
+Verified: picks `Samantha` today, honours `SPEAKLOOP_SAY_VOICE`, and would pick
+`Ava (Premium)` the moment it exists.
+
+**A circuit breaker, because retrying a hard 403 is pure waste.** Every chunk
+was paying three failed attempts forever. Measured steady state over 12 chunks:
+
+```
+always 3 edge attempts (before)      3.63s per chunk
+circuit breaker (after)              1.02s per chunk
+  -> 2.61s saved per chunk (3.6x), ~26s less dead air on a 10-chunk turn
+```
+
+After `EDGE_FAIL_LIMIT` consecutive failures it stops asking for
+`EDGE_COOLDOWN` (10 min), then re-probes with a *single* attempt and resets on
+success ("edge-tts is back"). Verified both the trip and the recovery.
+
+It also now explains itself once instead of silently degrading the voice and
+leaving it to be discovered: that this is Microsoft refusing rather than a local
+fault, and where to install a better local voice.
+
+**Correction to an earlier figure in this file**: a first measurement of "21.9s
+for 3 failed attempts" did not reproduce — it included interpreter and DNS
+warm-up. The repeatable cost is ~2.6s of waste per chunk.
+
+**File**: `prototype/speak_loop.py`
