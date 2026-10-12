@@ -254,7 +254,59 @@ MIN_AUDIO_BYTES = 1024
 # Concurrent edge-tts calls. Playback stays strictly ordered; this only hides
 # the per-call jitter that no chunk size can remove.
 SYNTH_WORKERS = max(1, int(os.environ.get("SPEAKLOOP_SYNTH_WORKERS", "3")))
-SAY_VOICE = os.environ.get("SPEAKLOOP_SAY_VOICE", "Samantha")
+# Local voice for the fallback. macOS ships only the compact voices; the
+# Premium and Enhanced ones are opt-in downloads and sound far better than
+# anything installed by default. Pick the best one PRESENT rather than naming a
+# single voice, so downloading one in System Settings > Accessibility > Spoken
+# Content > System Voice > Manage Voices is the only step needed to improve it —
+# no code change, no restart argument.
+_SAY_PREFERRED = ("Ava", "Evan", "Zoe", "Nathan", "Joelle", "Noelle",
+                  "Allison", "Samantha", "Alex", "Tom", "Daniel")
+
+
+def _best_say_voice() -> str:
+    override = os.environ.get("SPEAKLOOP_SAY_VOICE")
+    if override:
+        return override
+    try:
+        out = subprocess.run(["say", "-v", "?"], capture_output=True,
+                             text=True, timeout=10).stdout
+    except Exception:
+        return "Samantha"
+    best, best_key = None, (9, 99)
+    for line in out.splitlines():
+        if " en_US" not in line and " en_GB" not in line:
+            continue
+        name = line.split("  ")[0].strip()
+        if not name:
+            continue
+        base = name.split(" (")[0]
+        if base not in _SAY_PREFERRED:
+            continue
+        tier = 0 if "(Premium)" in name else 1 if "(Enhanced)" in name else 2
+        key = (tier, _SAY_PREFERRED.index(base))
+        if key < best_key:
+            best, best_key = name, key
+    return best or "Samantha"
+
+
+SAY_VOICE = _best_say_voice()
+
+# edge-tts is an unauthenticated, reverse-engineered Microsoft endpoint, so it
+# can stop working at any time with nothing wrong on this machine — and on
+# 2026-10-12 it did: a flat 403 on the synthesis WebSocket handshake for every
+# voice and every client-version string, while the clock was correct, the GEC
+# token was still accepted by the voices endpoint, and edge-tts was at the
+# latest release. Nothing to fix locally.
+#
+# Retrying through that cost THREE failed attempts per chunk — measured at
+# 21.9 SECONDS of dead time on every chunk, forever, since the 403 comes back
+# fast and the retries are pure waste. So stop asking for a while once it is
+# clearly down, and say why, once, instead of silently degrading the voice and
+# leaving it to be discovered.
+EDGE_FAIL_LIMIT = int(os.environ.get("SPEAKLOOP_EDGE_FAIL_LIMIT", "3"))
+EDGE_COOLDOWN = int(os.environ.get("SPEAKLOOP_EDGE_COOLDOWN", "600"))
+_edge = {"fails": 0, "until": 0.0, "told": False}
 # The opening chunk is deliberately small so audio starts in ~2s instead of ~9s.
 # 0 disables the ramp and every chunk is SYNTH_CHARS.
 FIRST_CHARS = int(os.environ.get("SPEAKLOOP_FIRST_CHUNK_CHARS", "240"))
@@ -366,22 +418,46 @@ def synth(text: str, engine: str) -> str | None:
         # concurrency is implicated: three CONCURRENT 380-char calls finished in
         # 2.1s wall. Falling straight back to `say` swapped the voice mid-
         # narration for what a second attempt fixes.
-        for attempt in (1, 2, 3):
-            try:
-                r = subprocess.run(cmd, capture_output=True, timeout=EDGE_TIMEOUT)
-                if r.returncode == 0 and os.path.getsize(path) > MIN_AUDIO_BYTES:
-                    if attempt == 2:
-                        print(f"  · edge-tts recovered on retry "
-                              f"({len(text)} chars)", file=sys.stderr)
-                    return path
-                why = f"rc={r.returncode}"
-            except Exception as e:
-                why = type(e).__name__
-            if attempt < 3:
-                print(f"  · edge-tts {why} on {len(text)} chars "
-                      f"— retry {attempt}", file=sys.stderr)
+        now = time.time()
+        if now < _edge["until"]:
+            # Known down. Skip straight to the local voice: a probe costs ~7s
+            # and we have already paid it.
+            pass
+        else:
+            # One probe when we are in the dark about edge's state, the full
+            # retry when it has been working — a cold WebSocket genuinely does
+            # fail once and succeed on the second call (measured 15.3s, 1.7s,
+            # 1.2s serially), which is worth retrying for. A hard 403 is not.
+            tries = 1 if _edge["fails"] >= EDGE_FAIL_LIMIT else 3
+            for attempt in range(1, tries + 1):
+                try:
+                    r = subprocess.run(cmd, capture_output=True,
+                                       timeout=EDGE_TIMEOUT)
+                    if r.returncode == 0 and os.path.getsize(path) > MIN_AUDIO_BYTES:
+                        if _edge["fails"] or _edge["told"]:
+                            print("  · edge-tts is back", file=sys.stderr)
+                        _edge.update(fails=0, until=0.0, told=False)
+                        return path
+                    why = f"rc={r.returncode}"
+                except Exception as e:
+                    why = type(e).__name__
+                if attempt < tries:
+                    print(f"  · edge-tts {why} on {len(text)} chars "
+                          f"— retry {attempt}", file=sys.stderr)
+            _edge["fails"] += 1
+            if _edge["fails"] >= EDGE_FAIL_LIMIT:
+                _edge["until"] = time.time() + EDGE_COOLDOWN
+                if not _edge["told"]:
+                    _edge["told"] = True
+                    print(f"  ! edge-tts unavailable ({why}) — using the local "
+                          f"voice '{SAY_VOICE}' and re-checking in "
+                          f"{EDGE_COOLDOWN // 60} min. This is Microsoft's "
+                          f"endpoint refusing, not a fault here; a better local "
+                          f"voice can be installed from System Settings > "
+                          f"Accessibility > Spoken Content > Manage Voices.",
+                          file=sys.stderr)
             else:
-                print(f"  ! edge-tts {why} on {len(text)} chars after 3 tries "
+                print(f"  ! edge-tts {why} on {len(text)} chars "
                       f"— falling back to local say", file=sys.stderr)
     # `say` must write to its OWN .aiff path. Handed the edge path (a .mp3), it
     # produces a 16-BYTE file rather than failing — which sails past a
@@ -391,9 +467,10 @@ def synth(text: str, engine: str) -> str | None:
     try:
         fd2, aiff = tempfile.mkstemp(suffix=".aiff", prefix="speakloop-")
         os.close(fd2)
-        # Of the 37 local voices, all but Samantha are novelty ("Bells",
-        # "Bubbles", "Bad News"). Name it rather than inherit whatever the
-        # system default happens to be.
+        # SAY_VOICE is the best voice actually installed (see _best_say_voice),
+        # not a hardcoded name: with no Premium/Enhanced voice downloaded this
+        # is Samantha, and the rest of the built-ins are novelty ("Bells",
+        # "Bubbles", "Bad News").
         say_cmd = ["say", "-o", aiff, "-v", SAY_VOICE]
         wpm = _say_wpm(SPEAK_RATE)
         if wpm:
