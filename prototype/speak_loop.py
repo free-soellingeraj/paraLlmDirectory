@@ -24,7 +24,7 @@ before its next tool call), so there is no heuristic boundary detection.
 
 Usage:
     python3 speak_loop.py <pane|cwd> [--backlog N] [--no-follow]
-                          [--model haiku|sonnet] [--engine edge|say] [--dry]
+                          [--model haiku|sonnet] [--engine kokoro|edge|say] [--dry]
 
     # hear the last 2 things the agent said, then follow live:
     python3 speak_loop.py %46 --backlog 2
@@ -34,6 +34,8 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import urllib.request
+import json
 import os
 import queue
 import re
@@ -307,6 +309,66 @@ SAY_VOICE = _best_say_voice()
 EDGE_FAIL_LIMIT = int(os.environ.get("SPEAKLOOP_EDGE_FAIL_LIMIT", "3"))
 EDGE_COOLDOWN = int(os.environ.get("SPEAKLOOP_EDGE_COOLDOWN", "600"))
 _edge = {"fails": 0, "until": 0.0, "told": False}
+
+# Kokoro: a local neural voice, served by one daemon for the whole workspace
+# (plugins/tts/kokoro-daemon.py). This is the default engine now, because
+# edge-tts turned out to be a reverse-engineered Microsoft endpoint that can be
+# — and on 2026-10-12 was — refused outright with no recourse, no account to
+# attach and no deprecation notice, since it was never a published API.
+#
+# Kokoro is slower than what it replaces (1.66x realtime aggregate across three
+# workers, against roughly 1.6x for a single `say` call) and costs about five
+# seconds to the first word. It is also entirely local, so it cannot be taken
+# away, and Aaron picked am_michael by ear over the alternatives.
+KOKORO_URL = os.environ.get("SPEAKLOOP_KOKORO_URL", "http://127.0.0.1:8788")
+KOKORO_VOICE = os.environ.get("SPEAKLOOP_KOKORO_VOICE", "am_michael")
+KOKORO_TIMEOUT = int(os.environ.get("SPEAKLOOP_KOKORO_TIMEOUT", "120"))
+_kokoro = {"up": None}          # None = unknown, True/False = last probe
+
+
+def kokoro_ready() -> bool:
+    """Is the shared daemon answering? Cached, because the answer only changes
+    when the daemon starts or dies, and the synth path is hot."""
+    if _kokoro["up"] is not None:
+        return _kokoro["up"]
+    try:
+        with urllib.request.urlopen(f"{KOKORO_URL}/health", timeout=5) as r:
+            _kokoro["up"] = bool(json.loads(r.read()).get("ok"))
+    except Exception:
+        _kokoro["up"] = False
+    return _kokoro["up"]
+
+
+def kokoro_synth(text: str, path: str) -> bool:
+    """Synthesize into `path` (a .wav). False on any failure, so the caller
+    degrades to `say` exactly as it does for edge."""
+    body = json.dumps({"text": text, "voice": KOKORO_VOICE,
+                       "speed": _kokoro_speed(SPEAK_RATE)}).encode()
+    req = urllib.request.Request(f"{KOKORO_URL}/synth", body,
+                                 {"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=KOKORO_TIMEOUT) as r:
+            wav = r.read()
+    except Exception as e:
+        print(f"  ! kokoro {type(e).__name__} on {len(text)} chars", file=sys.stderr)
+        _kokoro["up"] = None            # re-probe; the daemon may have died
+        return False
+    if len(wav) <= MIN_AUDIO_BYTES:
+        return False
+    with open(path, "wb") as f:
+        f.write(wav)
+    return True
+
+
+def _kokoro_speed(rate: str) -> float:
+    """edge-style '+25%' -> kokoro's multiplier. Same rate, three engines, three
+    unit systems; keep the user-facing setting in one of them."""
+    if not rate:
+        return 1.0
+    try:
+        return max(0.5, min(2.0, 1.0 + int(rate.strip().rstrip("%")) / 100.0))
+    except ValueError:
+        return 1.0
 # The opening chunk is deliberately small so audio starts in ~2s instead of ~9s.
 # 0 disables the ramp and every chunk is SYNTH_CHARS.
 FIRST_CHARS = int(os.environ.get("SPEAKLOOP_FIRST_CHUNK_CHARS", "240"))
@@ -403,6 +465,21 @@ def synth(text: str, engine: str) -> str | None:
     # `say` file, which the player dutifully "played".
     if not text or not text.strip():
         return None
+    # Kokoro is tried first whenever it is reachable, whatever --engine says,
+    # unless the engine was explicitly set to something else on the command
+    # line. It is the only one of the three that cannot be withdrawn.
+    if engine in ("kokoro", "edge") and kokoro_ready():
+        fd, kpath = tempfile.mkstemp(suffix=".wav", prefix="speakloop-")
+        os.close(fd)
+        if kokoro_synth(text, kpath):
+            return kpath
+        try:
+            os.unlink(kpath)
+        except OSError:
+            pass
+        if engine == "kokoro":
+            engine = "say"          # no edge round-trip when kokoro was asked for
+
     suffix = ".mp3" if engine == "edge" else ".aiff"
     fd, path = tempfile.mkstemp(suffix=suffix, prefix="speakloop-")
     os.close(fd)
@@ -1352,7 +1429,7 @@ def main():
     ap.add_argument("--no-follow", action="store_true",
                     help="only the backlog, then exit (bounded run)")
     ap.add_argument("--model", default="haiku")
-    ap.add_argument("--engine", default="edge", choices=["edge", "say"])
+    ap.add_argument("--engine", default="kokoro", choices=["kokoro", "edge", "say"])
     ap.add_argument("--dry", action="store_true",
                     help="print narration only; no synth/play")
     run(ap.parse_args())
