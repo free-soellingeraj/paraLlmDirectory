@@ -36,7 +36,7 @@ REPLAYTURN_FILE="$RUN/$SAFE.replayturn"
 LOG="$RUN/$SAFE.log"
 
 MODEL="${TTS_STREAM_REWRITE_MODEL:-haiku}"
-ENGINE="${SPEAKLOOP_ENGINE:-edge}"
+ENGINE="${SPEAKLOOP_ENGINE:-kokoro}"   # local daemon; falls through to say
 SPEAK_TINT="${SPEAKLOOP_TINT-#3a2044}"
 
 # Friendly chip label: the para-llm env name, else git branch, else dir name.
