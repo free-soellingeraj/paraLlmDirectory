@@ -1642,3 +1642,61 @@ for 3 failed attempts" did not reproduce — it included interpreter and DNS
 warm-up. The repeatable cost is ~2.6s of waste per chunk.
 
 **File**: `prototype/speak_loop.py`
+
+## BUG-072: a local neural voice, served by one daemon for the workspace
+
+edge-tts is gone and not coming back (BUG-071): a reverse-engineered Microsoft
+endpoint, refused with a flat 403, surviving four days of near-total silence, so
+not a rate limit that cools off. There is no account to attach and no paid tier
+for *that* endpoint — it is the private WebSocket behind Edge's "Read Aloud"
+button, authenticated by a `TrustedClientToken` compiled into Edge. Which is
+also why there is no deprecation notice to find: there was never a published API
+to deprecate. The official equivalent is Azure AI Speech (key, 0.5M neural
+chars/month free), and `en-US-AndrewNeural` is an Azure voice — but that is a
+third-party dependency again.
+
+So: **Kokoro, locally.** Aaron picked `am_michael` by ear.
+
+`plugins/tts/kokoro-daemon.py` is one service for the whole workspace. The model
+costs ~5s to load and ~160MB resident, so it loads once and every pane shares
+it; `toggle-speak.sh` starts it with a port-busy check, which makes a second
+start a no-op and lets every pane's toggle just try. One ONNX file plus one
+28MB voices file covers **54 voices**, switchable per request at no cost,
+because the voices are style embeddings rather than separate models.
+
+ONNX, not the torch `kokoro` package that was already installed: torch managed
+**0.3x realtime with the model resident** — unusable at any level of
+persistence. ONNX dropped model load from 39.6s to 2.4s.
+
+Two of my own assumptions were measured and wrong:
+
+- I shipped the daemon serialised, reasoning that the intra-op pool already
+  uses every core so concurrency would only contend. Measured: 0.74x at one
+  worker, 1.13x at two, **1.66x at three**. Serialising put it *under* the 1.0x
+  that keeping up with playback requires. Default is now 3.
+- I told Aaron "~2.4x aggregate, ~5s to first word" before measuring. The real
+  figures were 1.66x and worse-than-quoted latency.
+
+### The numbers are not trustworthy yet, and the reason matters
+
+Latency came back erratic and mostly sub-realtime (0.22x on a 69-char chunk,
+0.96x on 138, 0.57x on 552). The cause is not Kokoro:
+
+```
+load averages: 113.31 96.91 87.27   on 10 cores (8 perf + 2 efficiency)
+```
+
+**11x oversubscribed**, with fseventsd at 76%, a Virtualization VM at 44%, and
+two Ingestscale apps at 32%/23%. No synthesis benchmark means anything in that
+environment. It also casts doubt on the earlier conclusion recorded in
+`tmux-calls-are-expensive` — a ~525ms `tmux capture-pane` was attributed to
+tmux's single-threaded server, and sustained load above 100 is at least as
+likely an explanation.
+
+Shipped anyway because it degrades safely: unreachable daemon or failed
+synthesis falls through to `say` (verified: 2.26s, `.aiff`), and `say` now picks
+the best installed voice (BUG-071). Re-measure on an unloaded machine before
+trusting any figure here.
+
+**File**: `plugins/tts/kokoro-daemon.py`, `prototype/speak_loop.py`,
+`prototype/toggle-speak.sh`

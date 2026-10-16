@@ -151,6 +151,22 @@ echo "$SPEAK_PID" > "$PIDF"
 echo "$SPEAK_PID" > "$SPOOL/watcher.pid"
 resolve_label > "$SPOOL/label"
 
+# --- one shared kokoro daemon for the whole workspace ---
+# The model costs ~5s to load and ~160MB resident, so it is loaded ONCE and
+# every pane talks to the same service. Starting it is idempotent: a second
+# attempt sees the port busy and returns, so each pane's toggle can just try.
+KOKORO_DAEMON="$ROOT/plugins/tts/kokoro-daemon.py"
+KOKORO_PORT="${KOKORO_PORT:-8788}"
+if [[ -x "$KOKORO_DAEMON" || -f "$KOKORO_DAEMON" ]]; then
+    if ! curl -sf -m 2 "http://127.0.0.1:$KOKORO_PORT/health" >/dev/null 2>&1; then
+        KOKORO_PY="${KOKORO_PY:-/opt/homebrew/bin/python3.11}"
+        [[ -x "$KOKORO_PY" ]] || KOKORO_PY="python3"
+        nohup "$KOKORO_PY" "$KOKORO_DAEMON" --port "$KOKORO_PORT" \
+            >> "$RUN/kokoro-daemon.log" 2>&1 &
+        echo $! > "$RUN/kokoro-daemon.pid"
+    fi
+fi
+
 # --- voice commands via the existing wake-listener ---
 if command -v whisper-stream >/dev/null 2>&1 && command -v rec >/dev/null 2>&1; then
     mkdir -p "$TTS_DIR"
