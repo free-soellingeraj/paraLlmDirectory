@@ -1700,3 +1700,51 @@ trusting any figure here.
 
 **File**: `plugins/tts/kokoro-daemon.py`, `prototype/speak_loop.py`,
 `prototype/toggle-speak.sh`
+
+## BUG-073 (correction): the bad numbers in BUG-058 and BUG-072 were machine load
+
+Re-measured on the same machine while it was quiet. Two earlier conclusions in
+this file were drawn from measurements taken at load averages above 100 on 10
+cores, and both were wrong.
+
+**BUG-058 said** a `tmux capture-pane -p` costs ~525ms because tmux's server is
+single-threaded, and that every poll budget therefore ran ~5x long.
+
+```
+under load (113-387):  ~525ms per call
+quiet machine:         < 1ms per call
+```
+
+The premise was contention, not tmux. The *fix* in BUG-058 stands and should
+stay — budgeting a poll loop on the wall clock rather than `waited += 100` is
+right whatever the reason an iteration is slow, and it is the difference between
+a budget meaning what it says and silently running long. But tmux is not
+inherently expensive here, and nothing should be designed around the belief that
+it is.
+
+**BUG-072 said** Kokoro's throughput was "erratic and mostly sub-realtime" and
+flagged the figures as untrustworthy. They were, and here is the same benchmark
+quiet:
+
+| chunk | at load 113-387 | quiet |
+|---|---|---|
+| 69 chars | 15.58s (0.22x) | **0.94s (3.58x)** |
+| 138 chars | 7.16s (0.96x) | **2.54s (2.71x)** |
+| 276 chars | 17.97s (0.77x) | **4.20s (3.30x)** |
+| 552 chars | 48.54s (0.57x) | **9.26s (3.01x)** |
+| 3 workers, aggregate | 1.66x | **5.45x** |
+
+Model load also fell from 4.92s to 1.26s.
+
+So Kokoro is roughly **3x realtime single-threaded and 5.45x aggregate** —
+faster than `say` (1.6x), and time-to-first-word on a short chunk is under a
+second rather than the 4-5s predicted. It is comfortably the right default, and
+the concern recorded in BUG-072 about it being too slow to keep up with playback
+was an artefact.
+
+The machine was running 28 concurrent `claude` processes, a Virtualization VM at
+182% of one core, and 645 processes total. **Record the load average next to any
+timing measurement in this repo**, and do not draw architectural conclusions
+from one taken above ~10x oversubscription.
+
+**File**: documentation only; no behaviour change.
