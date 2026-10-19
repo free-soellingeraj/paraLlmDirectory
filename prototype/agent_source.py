@@ -436,31 +436,142 @@ def _repl_in_pane(pane_id: str) -> Optional[str]:
     return None
 
 
-def for_pane(pane_or_cwd: str) -> AgentSource:
-    """Pick the right adapter for a pane id (%N) or a raw cwd. Chooses by the
-    REPL actually running in the pane; only falls back to transcript-existence
-    when that can't be determined (e.g. a raw cwd with no pane)."""
-    if pane_or_cwd.startswith("%"):
-        cwd = _tmux(pane_or_cwd, "#{pane_current_path}")
-        repl = _repl_in_pane(pane_or_cwd)
-    else:
-        cwd = pane_or_cwd
-        repl = None
+def _source_for_cwd(cwd: str, repl: Optional[str] = None) -> AgentSource:
+    """Resolve one concrete transcript adapter.
+
+    A known running REPL is authoritative even during the short interval before
+    it creates its first transcript. Falling through to the other framework in
+    that interval permanently attaches speak mode to a stale transcript.
+    """
     cc = ClaudeCodeSource(cwd)
     cx = CodexSource(cwd)
-    # Authoritative: match the source to the running REPL, even if the OTHER
-    # framework left a stale transcript folder in this worktree.
-    if repl == "codex" and cx.locate():
+    if repl == "codex":
         return cx
-    if repl == "claude" and cc.locate():
+    if repl == "claude":
         return cc
-    # Inconclusive REPL (raw cwd, or detection failed): fall back to whichever
-    # transcript exists, Claude first (its cwd-keyed lookup is exact).
     if cc.locate():
         return cc
     if cx.locate():
         return cx
-    return PollingSource(pane_or_cwd)
+    return PollingSource(cwd)
+
+
+class PaneSource(AgentSource):
+    """A live adapter that follows whichever REPL is currently in a tmux pane.
+
+    ``Ctrl+b y`` respawns a pane in place when the user changes Claude Code to
+    Codex (or back). A concrete adapter chosen once at speak-mode startup cannot
+    notice that: it keeps tailing the old framework forever. This wrapper
+    re-checks both the process tree and transcript path while following, and
+    changes the parser together with the file.
+    """
+
+    RELOCATE_SECS = 1.0
+    RESOLVE_CACHE_SECS = 0.35
+
+    def __init__(self, pane_id: str):
+        self.pane_id = pane_id
+        self._active: Optional[AgentSource] = None
+        self._cwd = ""
+        self._resolved_at = 0.0
+        self._lock = threading.Lock()
+
+    def _resolve(self, force: bool = False) -> AgentSource:
+        now = time.monotonic()
+        with self._lock:
+            if (not force and self._active is not None
+                    and now - self._resolved_at < self.RESOLVE_CACHE_SECS):
+                return self._active
+
+            cwd = _tmux(self.pane_id, "#{pane_current_path}") or self._cwd
+            repl = _repl_in_pane(self.pane_id)
+
+            # A respawn briefly leaves only the pane shell in the process tree.
+            # Keep the last parser during that inconclusive gap rather than
+            # guessing from stale transcript directories.
+            if (repl is None and self._active is not None and cwd == self._cwd
+                    and not isinstance(self._active, PollingSource)):
+                self._resolved_at = now
+                return self._active
+
+            self._active = _source_for_cwd(cwd, repl)
+            self._cwd = cwd
+            self._resolved_at = now
+            return self._active
+
+    @property
+    def name(self) -> str:
+        return self._resolve().name
+
+    def locate(self) -> Optional[Path]:
+        return self._resolve().locate()
+
+    def extract(self, obj: dict) -> Iterator[TextChunk]:
+        # ``follow`` pins the concrete parser used for each tailed file. This is
+        # only for callers using the abstract API directly.
+        yield from self._resolve().extract(obj)
+
+    def backlog(self, n: int = 500) -> list[TextChunk]:
+        return self._resolve().backlog(n)
+
+    def recent_events(self, n: int = 800) -> "list[tuple[str, str]]":
+        return self._resolve().recent_events(n)
+
+    @staticmethod
+    def _key(src: AgentSource) -> tuple[str, Optional[Path]]:
+        return src.name, src.locate()
+
+    def follow(self) -> Iterator[TextChunk]:
+        """Tail the current transcript and atomically switch file *and* parser."""
+        previous: Optional[tuple[str, Optional[Path]]] = None
+        while True:
+            src = self._resolve(force=True)
+            path = src.locate()
+            current = (src.name, path)
+            if path is None:
+                # The TUI can be visible before its session JSONL is created.
+                # Stay alive so that enabling voice during startup still works.
+                time.sleep(self.RELOCATE_SECS)
+                continue
+            if previous is not None and current != previous:
+                print(f"[source switched: {previous[0]} -> {src.name}; "
+                      f"transcript -> {path}]", file=sys.stderr)
+            previous = current
+
+            proc = subprocess.Popen(["tail", "-n", "0", "-F", str(path)],
+                                    stdout=subprocess.PIPE, text=True)
+            switched = threading.Event()
+
+            def watch(expected=current, proc=proc):
+                while not switched.wait(self.RELOCATE_SECS):
+                    try:
+                        candidate = self._resolve(force=True)
+                        if self._key(candidate) != expected:
+                            proc.terminate()
+                            return
+                    except Exception:
+                        return
+
+            threading.Thread(target=watch, daemon=True).start()
+            try:
+                if proc.stdout is not None:
+                    for line in proc.stdout:
+                        yield from src._parse(line)
+            finally:
+                switched.set()
+                proc.terminate()
+
+            # A deliberate parser/file switch loops immediately. If tail itself
+            # died while the source stayed put, fail closed as before.
+            if self._key(self._resolve(force=True)) == current:
+                return
+
+
+def for_pane(pane_or_cwd: str) -> AgentSource:
+    """Pick a live pane adapter, or a concrete adapter for a raw cwd."""
+    if pane_or_cwd.startswith("%"):
+        return PaneSource(pane_or_cwd)
+    return _source_for_cwd(pane_or_cwd)
 
 
 def _demo(src: AgentSource) -> None:

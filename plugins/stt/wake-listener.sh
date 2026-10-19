@@ -735,22 +735,13 @@ do_send() {
     fi
 }
 
-# Read the current contents of PANE_ID's Claude Code input box: the text
-# between the bottom-most pair of horizontal rules, with the "❯" prompt and its
-# non-breaking-space padding stripped. Returns an empty string when the box
-# holds only the bare prompt. Used to confirm an injected dictation has fully
-# landed before Enter is pressed.
+# Read the current contents of PANE_ID's active input box. Claude Code puts it
+# between horizontal rules; Codex puts it after the last `›` prompt above its
+# model/path footer. The helper understands both screen grammars and ignores
+# Codex's "Ask Codex to do anything" placeholder.
 capture_input_region() {
-    tmux capture-pane -p -t "$PANE_ID" 2>/dev/null | awk '
-        index($0, "──────────") { rules[++n] = NR }
-        { line[NR] = $0 }
-        END {
-            if (n < 2) exit
-            for (i = rules[n-1] + 1; i < rules[n]; i++) print line[i]
-        }' \
-    | sed -e 's/^❯//' -e $'s/\xc2\xa0/ /g' \
-    | tr '\n' ' ' \
-    | sed -e 's/  */ /g' -e 's/^ *//' -e 's/ *$//'
+    tmux capture-pane -p -t "$PANE_ID" 2>/dev/null \
+        | python3 "$SCRIPT_DIR/input-region.py"
 }
 
 # Block until the injected dictation is visible AND stable in the input box

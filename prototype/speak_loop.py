@@ -139,6 +139,37 @@ def despeak(text: str) -> str:
     return _MD.sub("", text)
 
 
+_CODE_EXT = (
+    "py|sh|bash|zsh|js|ts|jsx|tsx|mjs|cjs|md|json|ya?ml|txt|go|rs|rb|php|"
+    "c|cc|cpp|h|hpp|java|kt|swift|html?|css|scss|sql|toml|cfg|ini|conf|"
+    "log|lock|xml|csv|tsv|env|bat|ps1|pl|lua|jl|aiff|mp3|wav"
+)
+
+
+def local_speechify(text: str) -> str:
+    """Deterministic degraded mode when neither narration model is available."""
+    text = text.replace("⏺", " ").replace("●", " ")
+    text = re.sub(r"https?://\S+", " link ", text)
+    text = re.sub(
+        r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+        r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b", " ", text)
+    text = re.sub(
+        r"\b(?:[\w.\-]+/)*([\w.\-]+?)\.(?:%s)(?::\d+(?::\d+)?)?\b"
+        % _CODE_EXT,
+        lambda m: " " + re.sub(r"[._\-]+", " ", m.group(1)) + " ",
+        text, flags=re.I)
+    text = re.sub(r"(?:[\w.\-]+/)+([\w.\-]+)", r"\1", text)
+    text = re.sub(r"\b[0-9a-f]{7,40}\b|\b\d{6,}\b", " ", text)
+    text = re.sub(r"\b\d+(?:\.\d+)?\s*[kKmMgG][bB]?\b", " ", text)
+    text = re.sub(r"\b(\w+)\(\)", r"\1", text).replace("_", " ")
+    text = re.sub(r"(?<![\w-])--?([A-Za-z][\w-]*)",
+                  lambda m: " " + m.group(1).replace("-", " "), text)
+    text = re.sub(r"->|=>|→", " to ", text)
+    text = re.sub(r"&&", " and ", text)
+    text = re.sub(r"[*_`#|~<>]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
 def split_block(text: str, target: int = 700):
     """Break a large agent block into speakable sub-blocks on paragraph (then
     sentence) boundaries. `claude -p` runs ~20s on a 2.5k block but ~10s on a
@@ -172,27 +203,109 @@ def split_block(text: str, target: int = 700):
     return out
 
 
+_BACKEND_ERROR = re.compile(
+    r"(?:you(?:'ve| have) hit your (?:weekly|usage) limit|"
+    r"(?:weekly|usage|rate) limit (?:reached|exceeded)|"
+    r"please (?:log|sign) in|authentication (?:failed|required)|"
+    r"credit balance is too low)", re.I)
+
+
+def _clean_llm_output(text: str) -> str:
+    """Return usable narration, rejecting account/status banners.
+
+    Some CLIs print quota failures to stdout and still exit zero. Treating only
+    the exit code as success made "You've hit your weekly limit" the narration
+    itself, so it was synthesized and repeated as though the pane had said it.
+    """
+    out = _PREAMBLE.sub("", text.strip()).strip()
+    if len(out) <= 500 and _BACKEND_ERROR.search(out):
+        return ""
+    return out
+
+
 def _claude(prompt: str, model: str, timeout: int) -> str:
-    """One `claude -p` call. Empty string on any failure/timeout."""
+    """One `claude -p` call. Empty string on any failure/timeout/banner."""
+    if not shutil.which("claude"):
+        return ""
     try:
-        out = subprocess.run(
+        result = subprocess.run(
             ["claude", "-p", "--model", model],
             input=prompt, capture_output=True, text=True, timeout=timeout,
-        ).stdout.strip()
+        )
     except Exception:
         return ""
-    return _PREAMBLE.sub("", out).strip()
+    if result.returncode != 0:
+        return ""
+    return _clean_llm_output(result.stdout)
 
 
-def rewrite(text: str, model: str, timeout: int = 30) -> str:
-    """Technical agent text -> comprehensible speech via `claude -p`. Empty on
-    failure so the caller can skip rather than speak raw markdown."""
-    return _claude(REWRITE_PROMPT + text, model, timeout)
+def _codex(prompt: str, timeout: int) -> str:
+    """One isolated ``codex exec`` rewrite, returning only its final message.
+
+    Run from the system temp directory and use ``--ephemeral``. Otherwise the
+    helper creates a newer rollout in the pane's working directory, and the live
+    transcript locator can switch from the TUI to its own narration helper.
+    """
+    if not shutil.which("codex"):
+        return ""
+    fd, output_path = tempfile.mkstemp(prefix="speakloop-codex-", suffix=".txt")
+    os.close(fd)
+    cmd = [
+        "codex", "exec", "--ephemeral", "--skip-git-repo-check",
+        "--sandbox", "read-only", "--color", "never",
+    ]
+    codex_model = os.environ.get("SPEAKLOOP_CODEX_MODEL", "").strip()
+    if codex_model:
+        cmd += ["--model", codex_model]
+    cmd += ["--output-last-message", output_path, "-"]
+    try:
+        result = subprocess.run(
+            cmd, input=prompt, capture_output=True, text=True, timeout=timeout,
+            cwd=tempfile.gettempdir(),
+        )
+        if result.returncode != 0:
+            return ""
+        try:
+            out = Path(output_path).read_text()
+        except OSError:
+            return ""
+        return _clean_llm_output(out)
+    except Exception:
+        return ""
+    finally:
+        try:
+            os.unlink(output_path)
+        except OSError:
+            pass
 
 
-def recap(text: str, model: str, timeout: int = 45) -> str:
+def _llm(prompt: str, source: str, claude_model: str, timeout: int) -> str:
+    """Use the pane's REPL backend first, with a safe cross-backend fallback."""
+    configured = os.environ.get("SPEAKLOOP_REWRITE_BACKEND", "auto").lower()
+    if configured in ("claude", "codex"):
+        order = (configured,)
+    elif source == "codex":
+        order = ("codex", "claude")
+    else:
+        order = ("claude", "codex")
+    for backend in order:
+        out = (_codex(prompt, timeout) if backend == "codex"
+               else _claude(prompt, claude_model, timeout))
+        if out:
+            return out
+    return ""
+
+
+def rewrite(text: str, model: str, timeout: int = 30,
+            source: str = "claude") -> str:
+    """Technical agent text -> comprehensible speech using its REPL backend."""
+    return _llm(REWRITE_PROMPT + text, source, model, timeout)
+
+
+def recap(text: str, model: str, timeout: int = 45,
+          source: str = "claude") -> str:
     """Recent transcript -> a short spoken 'where things stand' update."""
-    return _claude(RECAP_PROMPT + text, model, timeout)
+    return _llm(RECAP_PROMPT + text, source, model, timeout)
 
 
 def sentences(text: str):
@@ -483,7 +596,7 @@ def run(args) -> None:
     # ClaudeCodeSource._live_session_id), so the warning can be precise: only
     # complain when the file is cold AND we could not confirm it is the live
     # one, i.e. we guessed by mtime.
-    if loc is not None:
+    if loc is not None and src.name == "claude":
         try:
             age = time.time() - loc.stat().st_mtime
             confirmed = False
@@ -545,6 +658,16 @@ def run(args) -> None:
         hb_gap = float(os.environ.get("TTS_STREAM_WORKING_GAP", "1.1"))
     except ValueError:
         hb_gap = 1.1
+    # A newly respawned REPL can expose its process before creating session
+    # JSONL. Give it a short startup window; PaneSource.follow keeps watching for
+    # later REPL/transcript changes once the loop is live.
+    if loc is None and args.target.startswith("%"):
+        deadline = time.monotonic() + 10
+        while loc is None and time.monotonic() < deadline:
+            time.sleep(0.25)
+            loc = src.locate()
+        if loc is not None:
+            print(f"[transcript appeared: {src.name}]  {loc}", file=sys.stderr)
     if loc is None:
         print("[no transcript for this target — nothing to tail]", file=sys.stderr)
         return
@@ -584,11 +707,11 @@ def run(args) -> None:
                 print(f"[follow ended: {e}]", file=sys.stderr)
         chunk_q.put(None)
 
-    def block_narration(text: str) -> str:
+    def block_narration(text: str, chunk_source: str) -> str:
         """One agent block -> speakable narration. Short clean prose skips the
         ~20s LLM; longer/technical text is rewritten (huge blocks split first so
-        no single `claude -p` prompt is enormous). Empty string on failure so the
-        caller skips it — raw markdown + jargon is never spoken."""
+        no single helper prompt is enormous). If both helpers are unavailable,
+        deterministic cleanup keeps voice mode useful instead of going silent."""
         parts = []
         for pc in split_block(text, target=2500):
             if stop.is_set():
@@ -599,12 +722,17 @@ def run(args) -> None:
             if len(pt) < REWRITE_MIN_CHARS and not _CODEY.search(pt):
                 parts.append(despeak(pt))       # already speakable — no LLM
                 continue
-            narr = rewrite(pt, args.model, timeout=45) or rewrite(pt, args.model, timeout=75)
+            narr = (rewrite(pt, args.model, timeout=45, source=chunk_source)
+                    or rewrite(pt, args.model, timeout=75, source=chunk_source))
             if narr:
                 parts.append(despeak(narr))
             else:
-                print(f"  ✗ rewrite failed, skipped ({len(pt)} chars)",
+                fallback = local_speechify(pt)
+                print(f"  ! rewrite unavailable; local speechify "
+                      f"({len(pt)} chars, source={chunk_source})",
                       file=sys.stderr)
+                if fallback:
+                    parts.append(fallback)
         return " ".join(p for p in parts if p).strip()
 
     executor = ThreadPoolExecutor(max_workers=REWRITE_WORKERS)
@@ -622,11 +750,13 @@ def run(args) -> None:
                     pending.append(None)        # sentinel -> collector
                     pcv.notify_all()
                 return
-            fut = executor.submit(block_narration, ch.text)
+            chunk_source = ch.source or src.name
+            item_generation = gen[0]
+            fut = executor.submit(block_narration, ch.text, chunk_source)
             with pcv:
                 while len(pending) >= CAP and not stop.is_set():
                     pcv.wait(0.2)
-                pending.append(fut)
+                pending.append((fut, item_generation, chunk_source))
                 pcv.notify_all()
 
     def collector():
@@ -638,18 +768,24 @@ def run(args) -> None:
                     pcv.wait(0.2)
                 if not pending:
                     continue
-                fut = pending.popleft()
+                item = pending.popleft()
                 pcv.notify_all()
-            if fut is None:
+            if item is None:
                 synth_q.put(None)
                 return
+            fut, item_generation, item_source = item
             try:
                 narr = fut.result()
             except Exception:
                 narr = ""
             if not narr:
                 continue
-            g = gen[0]                          # generation this block belongs to
+            # Capture generation at SUBMISSION, not after the rewrite finishes.
+            # Otherwise a cancelled old-REPL helper lands after the generation
+            # bump and masquerades as new work.
+            if item_generation != gen[0] or item_source != src.name:
+                continue
+            g = item_generation                 # generation this block belongs to
             last_narr[0] = narr                 # remember for "rewind"
             for c in synth_chunks(narr):
                 if stop.is_set():
@@ -848,6 +984,15 @@ def run(args) -> None:
         print(f"  ⛔ cancel ({reason}): dropped {n} queued item(s), "
               f"generation now {gen[0]}", file=sys.stderr)
 
+    def source_monitor():
+        """Flush speech from the old framework when a pane changes REPL."""
+        previous = src.name
+        while not stop.wait(0.4):
+            current = src.name
+            if current != previous:
+                cancel_all(f"REPL switched {previous} -> {current}")
+                previous = current
+
     def cancel_speech():
         """Stop talking NOW and drop everything queued.
 
@@ -892,8 +1037,11 @@ def run(args) -> None:
                         # Shorter than the old 60/90. On one turn of context a
                         # haiku recap lands in ~2-3s; a 60s first attempt only
                         # meant a stall cost 150s before you heard the failure.
-                        narr = recap(ctx, RECAP_MODEL, timeout=25) \
-                            or recap(ctx, RECAP_MODEL, timeout=40)
+                        recap_source = src.name
+                        narr = recap(ctx, RECAP_MODEL, timeout=25,
+                                     source=recap_source) \
+                            or recap(ctx, RECAP_MODEL, timeout=40,
+                                     source=recap_source)
                         if narr:
                             enqueue_prio(narr, "⟳")
                         else:
@@ -943,6 +1091,15 @@ def run(args) -> None:
     # like "send" when the agent was building a messaging feature.
     tts_speaking_file = spool_dir / "tts.speaking"
 
+    def announcement_active() -> bool:
+        """True while the short local voice naming a new pane is still playing."""
+        try:
+            pid = int(Path(TTS_DIR, "announce.pid").read_text().strip())
+            os.kill(pid, 0)
+            return True
+        except (OSError, ValueError):
+            return False
+
     def publish_speaking(text: str):
         try:
             spool_dir.mkdir(parents=True, exist_ok=True)
@@ -980,6 +1137,11 @@ def run(args) -> None:
                 continue
             p, text = item
             if not stop.is_set():
+                # A window hand-off starts a short local `say` announcement and
+                # the new loop concurrently. Let the label finish before afplay;
+                # two voices at once was perceived as garbled/distorted audio.
+                while announcement_active() and not stop.is_set():
+                    time.sleep(0.08)
                 speaking.set()             # mute the heartbeat while we talk
                 publish_speaking(text)     # ...and tell the mic listener what we say
                 proc = subprocess.Popen(["afplay", p],
@@ -1041,6 +1203,7 @@ def run(args) -> None:
             # (agent may be idle then, but the user should hear we're on it),
             # unless we're already speaking / paused / the mic is live.
             return (not pause_file.exists() and not speaking.is_set()
+                    and not announcement_active()
                     and not voice_active()
                     and (is_working() or preparing.is_set()))
 
@@ -1122,7 +1285,8 @@ def run(args) -> None:
     tr = threading.Thread(target=controller, daemon=True)
     th = threading.Thread(target=heartbeat, daemon=True)
     town = threading.Thread(target=ownership, daemon=True)
-    for t in (tf, tsub, tcol, tsyn, tp, tr, th, town):
+    tsource = threading.Thread(target=source_monitor, daemon=True)
+    for t in (tf, tsub, tcol, tsyn, tp, tr, th, town, tsource):
         t.start()
     try:
         if args.no_follow:
