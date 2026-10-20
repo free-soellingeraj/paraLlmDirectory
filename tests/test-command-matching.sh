@@ -18,7 +18,7 @@ load() { local f; for f in "$@"; do eval "$(fn "$f")" || { echo "could not load 
 # --- the real implementations under test ---
 load normalize matches_word matches_exact_word matches_send ends_with_send \
      subtract_narration narration_update line_has_send line_has_stem \
-     word_is_send all_words_send is_burst
+     word_is_send all_words_send is_burst cmd_forms register_cmd word_is_cmd
 
 # --- the few things they call out to, stubbed deterministically ---
 player_speaking() { [[ "${NARRATING:-0}" == 1 ]]; }
@@ -30,6 +30,24 @@ SEND_STEM=send; REPEAT_TURN_STEM=repeat; REPEAT_STEM=recap
 WINDOW_STEM=window; PLAY_STEM=play; PAUSE_STEM=pause
 FORWARD_STEM=forward; REWIND_STEM=rewind; CANCEL_STEM=cancel
 STT_WAKE_SEND_END_MAX_WORDS=20
+STT_WAKE_TRANSCRIBE_WORD=transcribe
+DIGEST_STEM=digest; DIAGNOSTIC_STEM=diagnos; CLEAR_STEM=text
+# The form registry, exactly as the listener builds it.
+declare -A CMD_FORMS=()
+register_cmd transcri transcribe subscribe
+register_cmd subscrib subscribe
+register_cmd recap    recap
+register_cmd repeat   repeat
+register_cmd cancel   cancel cancelled
+register_cmd send     send sent
+register_cmd window   window
+register_cmd pause    pause
+register_cmd play     play
+register_cmd forward  forward
+register_cmd rewind   rewind
+register_cmd digest   digest
+register_cmd diagnos  diagnostic
+register_cmd text     text
 STT_WAKE_NARRATION_WINDOW=12
 SEND_VERB_BEFORE=" to will would can could should shall must may might please cant wont dont doesnt didnt "
 SECONDS=100
@@ -76,9 +94,54 @@ expect ignore exact play     "the player stopped"
 expect FIRE   exact pause    "pause"
 expect ignore exact pause    "paused"
 expect ignore exact pause    "pausing now"
-# transcribe KEEPS prefix matching on purpose: "transcription" should fire it
 expect FIRE   word  transcri "transcribe"
-expect FIRE   word  transcri "transcription"
+expect FIRE   word  transcri "transcribes"
+expect FIRE   word  transcri "transcribed"           # whisper adds a -d to the spoken word
+expect FIRE   word  transcri "subscribe"             # whisper's usual mishearing
+expect FIRE   word  transcri "transcribe transcribe" # repeat-to-force burst
+
+section "BUG-074: saying the word 'transcription' must not end your take"
+# The cut-offs the user hit live, copied from stream.log:
+#   08:35:28  transcribe-end trigger: 'transcription.'
+#   08:35:46  transcribe-end trigger: 'by itself stopping my transcription.'
+# The stem is the first 8 chars of "transcribe", so "transcri" also prefixes
+# "transcription" — and the end rule is "last word matches, <=6 words". Talking
+# ABOUT dictation therefore ended the dictation, which reads as "it stops by
+# itself". The suite previously ASSERTED this, so it could never catch it.
+reset_narration
+expect ignore end   transcri "transcription"
+expect ignore end   transcri "by itself stopping my transcription"
+expect ignore end   transcri "I just had a whole transcription"
+expect ignore end   transcri "it stopped the transcription"
+expect ignore end   transcri "read me the transcript"
+expect ignore end   transcri "check the transcripts"
+expect ignore end   transcri "it keeps transcribing"
+expect ignore word  transcri "transcription"
+expect ignore word  transcri "the transcription"
+expect ignore word  transcri "transcript"
+# ...while the real gesture still closes the take.
+expect FIRE   end   transcri "transcribe"
+expect FIRE   end   transcri "okay transcribe"
+expect FIRE   end   transcri "ok thats it transcribe"
+# The end rule caps the phrase at 6 words (send's cap is 20, and configurable).
+# Left alone here: widening it is a separate decision, not part of this bug.
+expect ignore end   transcri "thats what I wanted to say transcribe"
+expect FIRE   end   transcri "subscribe"
+
+section "BUG-074: the same prefix trap in every other command"
+reset_narration
+expect ignore word  cancel   "cancellation"          # would have fired cancel
+expect ignore word  cancel   "the cancellation fee"
+expect FIRE   word  cancel   "cancel"
+expect FIRE   word  cancel   "cancelled"
+expect ignore word  forward  "forwarding"
+expect ignore word  forward  "I am forwarding it"
+expect FIRE   word  forward  "forward"
+expect ignore word  recap    "recapture"
+expect FIRE   word  recap    "recap"
+expect ignore word  window   "windowless"
+expect FIRE   word  window   "window"
+expect FIRE   word  window   "windows"
 
 section "BUG-066: a take closes on a trailing 'send', whatever whisper punctuates"
 reset_narration
