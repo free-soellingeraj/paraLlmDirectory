@@ -1748,3 +1748,62 @@ timing measurement in this repo**, and do not draw architectural conclusions
 from one taken above ~10x oversubscription.
 
 **File**: documentation only; no behaviour change.
+
+## BUG-074: saying "transcription" ended the dictation
+
+Reported as "I talked for minutes and then it cut me off ... it is by itself
+stopping my transcription" — a take ending on its own, mid-sentence, submitting
+a half-finished thought. Two instances, both in `stream.log`, with the trigger
+line naming its own cause:
+
+```
+08:35:28  transcribe-end trigger: 'transcription.'
+08:35:46  transcribe-end trigger: 'by itself stopping my transcription.'
+```
+
+**Cause.** `stem8` truncates each command word to 8 characters, so
+`TRANSCRIBE_STEM` is `transcri`, and every matcher tested membership with
+`[[ "$w" == "$stem"* ]]`. The end-of-take rule is "the last word matches, within
+6 words". `transcri` also prefixes **transcription, transcriptions, transcript,
+transcripts, transcribing** — which is the vocabulary of talking about
+dictation. Discussing the feature therefore ended the dictation.
+
+The comment above `stem8` presented this as the point of stems ("so
+'transcribe' also matches whisper renderings like 'transcription'/'transcribed'")
+and `tests/test-command-matching.sh` asserted it outright:
+
+```bash
+# transcribe KEEPS prefix matching on purpose: "transcription" should fire it
+expect FIRE   word  transcri "transcription"
+```
+
+so the suite could not have caught it — 60 green tests included a green test
+for this bug. **A test that asserts current behaviour is documentation, not a
+regression test.**
+
+**Fix.** The rule `send` has always had, generalised. `send` never
+prefix-matched, because "sending"/"sentence" would fire it, and BUG-053/055 gave
+`play`/`pause` the same treatment after `"playing."` resumed playback.
+Transcribe was the command left out — and the worst one to leave out, since the
+feature's own name is a noun form of its command word.
+
+Each stem now registers the forms that may fire it via `register_cmd`: the word,
+`+s`, `+d`, `+ed`, plus whisper mishearings observed in real dictations
+(`subscribe` for transcribe, `sent` for send). `word_is_cmd` tests membership of
+that list; an unregistered stem falls back to the old prefix test so a custom
+`STT_WAKE_*_WORD` still matches something. Stems remain the index for the echo
+latch and the near-miss reporter, where generosity is free.
+
+The same trap was live in every other prefix-matched command and is now covered:
+`cancellation` fired `cancel`, `forwarding` fired `forward`, `recapture` fired
+`recap`, `windowless` fired `window`.
+
+A rejected trailing word now reports what it actually was instead of
+`UNEXPLAINED`, so the next member of this class is one grep away.
+
+Suite: **90 cases, 0 failures**. With the registry disabled — the documented
+fallback, which reproduces the old prefix behaviour exactly — **44 fail**.
+
+**File**: plugins/stt/wake-listener.sh (`stem8` comment, `cmd_forms`,
+`register_cmd`, `word_is_cmd`, `matches_word`, `is_burst`, `log_near_miss`,
+`log_near_miss_dictating`); tests/test-command-matching.sh
