@@ -215,6 +215,30 @@ expect ignore exact play     "[MUSIC PLAYING]"
 expect FIRE   word  transcri "(dramatic music) Transcribe."
 expect FIRE   word  transcri "(door closes) Transcribe."
 
+section "BUG-075: silence must never close a take"
+# The log line that gave this away, from a take that died 8s after it started:
+#   16:36:56  transcribe-end trigger: '[BLANK_AUDIO]'
+# whisper emits [BLANK_AUDIO] throughout silence and normalize() strips it to
+# the empty string. BUG-074's form registry then matched that empty string,
+# because cmd_forms() emits a LEADING and a TRAILING space, so joining the
+# forms of two words ("transcribe", "subscribe") produced a double space, and
+# word_is_cmd's ` $w ` test matched it when $w was "". The old prefix test
+# `[[ "" == "transcri"* ]]` was false, so BUG-074's fix introduced this.
+reset_narration
+expect ignore end   transcri "[BLANK_AUDIO]"
+expect ignore end   transcri ""
+expect ignore end   transcri "[SILENCE]"
+expect ignore end   transcri "(silence)"
+expect ignore word  transcri "[BLANK_AUDIO]"
+expect ignore send  send     "[BLANK_AUDIO]"
+expect ignore lone  send     "[BLANK_AUDIO]"
+expect ignore exact play     "[BLANK_AUDIO]"
+# A take still closes on the real word, including through the alias whose
+# registration created the double space in the first place.
+expect FIRE   end   transcri "transcribe"
+expect FIRE   end   transcri "subscribe"
+expect FIRE   word  transcri "subscribed"
+
 section "ordinary speech must never trigger anything"
 reset_narration
 for s in transcri send repeat play pause forward window cancel recap; do
