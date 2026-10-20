@@ -323,12 +323,54 @@ if [[ ! -f "$MODEL_PATH" ]]; then
     fi
 fi
 
-# Stems are the first 8 chars of each command word, so "transcribe" also
-# matches whisper renderings like "transcription"/"transcribed".
+# Stems are the first 8 chars of each command word. They are an INDEX, not the
+# match rule: they key the echo latch and the near-miss reporter, where being
+# generous costs nothing. What may actually FIRE a command is the explicit form
+# list below.
+#
+# This comment used to read "so 'transcribe' also matches whisper renderings
+# like 'transcription'/'transcribed'" and the matchers did exactly that. It is
+# the wrong trade. "transcri" prefixes "transcription", "transcript",
+# "transcripts" and "transcribing" — the words you say whenever you talk ABOUT
+# dictation — and the end rule is "last word matches, within 6 words". So
+# finishing a sentence with "...my transcription" silently closed the take and
+# submitted a half-finished thought (BUG-074). Reported as "it stops by itself",
+# which is precisely what it looks like from the outside.
 stem8() {
     local n
     n="$(normalize "$1")"
     printf '%s' "${n:0:8}"
+}
+
+# The spoken forms that may fire a command: the word itself, a plural/third
+# person "s", and a past "d"/"ed" — the inflections whisper actually produces
+# for one spoken command word. Not "-ing" ("it keeps transcribing", "I am
+# forwarding it") and not same-stem nouns ("transcription", "cancellation").
+cmd_forms() {
+    local w; w="$(normalize "$1")"
+    [[ -n "$w" ]] || return 0
+    printf ' %s %ss %sd %sed ' "$w" "$w" "$w" "$w"
+}
+
+# stem -> every form that may fire it. Registered once, after the stems exist.
+declare -A CMD_FORMS=()
+register_cmd() {                   # stem word [alias-word...]
+    local stem="$1"; shift
+    local forms="" w
+    for w in "$@"; do forms+="$(cmd_forms "$w")"; done
+    CMD_FORMS["$stem"]="$forms"
+}
+
+# Is this word one of the command's own forms? An UNREGISTERED stem keeps the
+# old prefix behaviour, so a stem set from an env var the registry does not know
+# still matches something rather than nothing.
+word_is_cmd() {
+    local w="$1" stem="$2" forms="${CMD_FORMS[$2]:-}"
+    if [[ -z "$forms" ]]; then
+        [[ "$w" == "$stem"* ]]
+        return
+    fi
+    [[ "$forms" == *" $w "* ]]
 }
 TRANSCRIBE_STEM="$(stem8 "$STT_WAKE_TRANSCRIBE_WORD")"
 # Whisper regularly mishears "transcribe" as "subscribe" (observed in real
@@ -435,8 +477,9 @@ log_near_miss_dictating() {
         label="transcribe"
         if [[ "$echo_stem" == "$TRANSCRIBE_STEM" ]]; then
             reason="echo latch for 'transcribe' still armed — clears on the next line without it, or after ${STT_WAKE_ECHO_LATCH_SECS}s"
-        elif [[ "$last" != "$TRANSCRIBE_STEM"* && "$last" != "$TRANSCRIBE_ALT_STEM"* ]]; then
-            reason="'transcribe' was not the last word (heard '$last' last) — a take closes on a trailing 'transcribe'"
+        elif ! word_is_cmd "$last" "$TRANSCRIBE_STEM" \
+             && ! word_is_cmd "$last" "$TRANSCRIBE_ALT_STEM"; then
+            reason="heard '$last' last, which is not the command word '$STT_WAKE_TRANSCRIBE_WORD' — a take closes on a trailing '$STT_WAKE_TRANSCRIBE_WORD', and words that merely share its stem ('transcription', 'transcript') no longer count"
         elif (( count > 6 )); then
             reason="$count words, over the 6-word cap for closing a take"
         else
@@ -475,7 +518,7 @@ log_near_miss() {
         for w in $norm; do
             if [[ "$w" == "$stem"* ]]; then
                 hit="$stem"; hitword="$w"
-                [[ "$w" == "$stem" || "$w" == "${stem}s" ]] && whole=0
+                word_is_cmd "$w" "$stem" && whole=0
                 break
             fi
         done
@@ -486,7 +529,7 @@ log_near_miss() {
     local reason
     if [[ "$echo_stem" == "$hit" ]]; then
         reason="echo latch for '$hit' still armed — clears on the next line without it, or after ${STT_WAKE_ECHO_LATCH_SECS}s"
-    elif [[ "$exact" == "1" && "$whole" != "0" ]]; then
+    elif [[ "$whole" != "0" ]]; then
         reason="heard '$hitword', which only starts with '$hit' — '$label' must be the whole word"
     elif [[ -z "$norm" ]]; then
         reason="every word on this line was the agent's own narration, so nothing of yours remained"
@@ -555,6 +598,25 @@ REWIND_STEM="$(stem8 "$STT_WAKE_REWIND_WORD")"
 DIGEST_STEM="$(stem8 "$STT_WAKE_DIGEST_WORD")"
 DIAGNOSTIC_STEM="$(stem8 "$STT_WAKE_DIAGNOSTIC_WORD")"
 CLEAR_STEM="$(stem8 "${STT_WAKE_CLEAR_WORD%% *}")"
+
+# --- what may actually fire each command -------------------------------------
+# One line per command, listing the words that count as that command. Aliases
+# are whisper mishearings observed in real dictations, not guesses. Anything
+# sharing only the 8-char stem is deliberately absent: that is BUG-074.
+register_cmd "$TRANSCRIBE_STEM"     "$STT_WAKE_TRANSCRIBE_WORD" subscribe
+register_cmd "$TRANSCRIBE_ALT_STEM" subscribe
+register_cmd "$REPEAT_STEM"         "$STT_WAKE_REPEAT_WORD"
+register_cmd "$REPEAT_TURN_STEM"    "$STT_WAKE_REPEAT_TURN_WORD"
+register_cmd "$CANCEL_STEM"         "$STT_WAKE_CANCEL_WORD" cancelled
+register_cmd "$SEND_STEM"           "$STT_WAKE_SEND_WORD" sent
+register_cmd "$WINDOW_STEM"         "$STT_WAKE_WINDOW_WORD"
+register_cmd "$PAUSE_STEM"          "$STT_WAKE_PAUSE_WORD"
+register_cmd "$PLAY_STEM"           "$STT_WAKE_PLAY_WORD"
+register_cmd "$FORWARD_STEM"        "$STT_WAKE_FORWARD_WORD"
+register_cmd "$REWIND_STEM"         "$STT_WAKE_REWIND_WORD"
+register_cmd "$DIGEST_STEM"         "$STT_WAKE_DIGEST_WORD"
+register_cmd "$DIAGNOSTIC_STEM"     "$STT_WAKE_DIAGNOSTIC_WORD"
+register_cmd "$CLEAR_STEM"          "${STT_WAKE_CLEAR_WORD%% *}"
 CLEAR_NORM="$(normalize "$STT_WAKE_CLEAR_WORD")"
 
 # Multi-word command ("text box"): contains-match on a short utterance.
@@ -757,7 +819,7 @@ is_burst() {
     [[ -n "$stem" ]] || return 1
     for w in $line; do
         count=$((count + 1))
-        [[ "$w" == "$stem"* ]] || return 1   # any non-stem word => not a clean burst
+        word_is_cmd "$w" "$stem" || return 1  # any other word => not a clean burst
     done
     [[ "$count" -ge 2 ]]
 }
@@ -781,7 +843,7 @@ matches_word() {
     for w in $line; do
         count=$((count + 1))
         last="$w"
-        if [[ "$w" == "$stem"* ]]; then
+        if word_is_cmd "$w" "$stem"; then
             found=0
             (( pos_first == 0 )) && pos_first=$count
             pos_last=$count
@@ -789,7 +851,7 @@ matches_word() {
     done
     local ok=1
     if [[ "$mode" == "end" ]]; then
-        [[ "$last" == "$stem"* && "$count" -le 6 ]] && ok=0
+        word_is_cmd "$last" "$stem" && (( count <= 6 )) && ok=0
     else
         # ONE rule, whether or not the agent is talking. The line reaching us has
         # already had the narration's own words subtracted, so "while speaking"
