@@ -1807,3 +1807,65 @@ fallback, which reproduces the old prefix behaviour exactly — **44 fail**.
 **File**: plugins/stt/wake-listener.sh (`stem8` comment, `cmd_forms`,
 `register_cmd`, `word_is_cmd`, `matches_word`, `is_burst`, `log_near_miss`,
 `log_near_miss_dictating`); tests/test-command-matching.sh
+
+## BUG-075: silence closed the take (a regression from BUG-074)
+
+Same report as BUG-074 — "it's still cutting me off halfway through, it's
+ending the transcription session by itself" — with a different cause, created by
+the BUG-074 fix. The log line is unambiguous:
+
+```
+16:36:48  transcribe trigger: 'transcribe.'
+16:36:48  dictation started
+16:36:56  transcribe-end trigger: '[BLANK_AUDIO]'    <- 8s in, nobody spoke
+16:36:57  dictation injected: 33 chars
+```
+
+**Cause.** whisper emits `[BLANK_AUDIO]` continuously while nobody is talking,
+and `normalize()` strips it to the empty string, so an empty normalized line is
+the hot path during every pause in a dictation.
+
+`cmd_forms()` printed its forms padded with a space at **both** ends, and
+`register_cmd` concatenated one call per registered word. Registering
+`transcribe` together with its `subscribe` alias therefore produced:
+
+```
+ transcribe transcribes transcribed transcribeed  subscribe subscribes ...
+                                                ^^ double space
+```
+
+`word_is_cmd` tests membership as `[[ "$forms" == *" $w "* ]]`. For an empty
+`$w` that reduces to `*"  "*`, which matched the junction. The empty string
+became a form of "transcribe"; end mode tests only the **last** word; so a line
+of pure silence closed the take.
+
+The matcher BUG-074 replaced tested `[[ "$w" == "$stem"* ]]`, which is false for
+`""`. **Replacing a prefix test with a membership test made the empty string a
+member.** `all_words_send` already guarded this with `(( count >= 1 ))`, two
+functions away in the same file.
+
+**Fix**, at every level, because one guard in the wrong place is what caused it:
+
+| function | guard |
+|---|---|
+| `cmd_forms` | no edge spaces, so joins cannot create a double space |
+| `register_cmd` | collapses whitespace, pads exactly once |
+| `word_is_cmd` | rejects an empty word outright, whatever the list holds |
+| `matches_word` | rejects an empty line in either mode |
+
+Both of the only two end-of-take paths are now verified against silence:
+`transcribe-end` through `matches_word`, `send-end` through `ends_with_send`.
+The 120s cap and recorder death call `roll_dictation`, which keeps recording and
+cannot end a take.
+
+**The process failure worth keeping.** BUG-074 was verified by checking that
+the mechanism I had theorised about was gone — "transcription" no longer ends a
+take — and that check passed on the live file. It was never verified against the
+symptom the user reported, which is that a take runs to completion. Verify the
+complaint, not the diagnosis.
+
+Suite: **101 cases, 0 failures**; with the four guards removed, the 4 silence
+cases fail.
+
+**File**: plugins/stt/wake-listener.sh (`cmd_forms`, `register_cmd`,
+`word_is_cmd`, `matches_word`); tests/test-command-matching.sh
