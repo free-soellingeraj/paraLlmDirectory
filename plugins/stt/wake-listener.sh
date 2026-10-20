@@ -349,7 +349,7 @@ stem8() {
 cmd_forms() {
     local w; w="$(normalize "$1")"
     [[ -n "$w" ]] || return 0
-    printf ' %s %ss %sd %sed ' "$w" "$w" "$w" "$w"
+    printf '%s %ss %sd %sed' "$w" "$w" "$w" "$w"
 }
 
 # stem -> every form that may fire it. Registered once, after the stems exist.
@@ -357,8 +357,13 @@ declare -A CMD_FORMS=()
 register_cmd() {                   # stem word [alias-word...]
     local stem="$1"; shift
     local forms="" w
-    for w in "$@"; do forms+="$(cmd_forms "$w")"; done
-    CMD_FORMS["$stem"]="$forms"
+    for w in "$@"; do forms+=" $(cmd_forms "$w")"; done
+    # Collapse whitespace via word splitting, then pad once. Without this, two
+    # registered words left a double space in the middle of the list and the
+    # `*" $w "*` test below matched an empty $w — so a line of pure silence
+    # counted as the command and closed the take (BUG-075).
+    # shellcheck disable=SC2086
+    CMD_FORMS["$stem"]=" $(echo $forms) "
 }
 
 # Is this word one of the command's own forms? An UNREGISTERED stem keeps the
@@ -366,6 +371,10 @@ register_cmd() {                   # stem word [alias-word...]
 # still matches something rather than nothing.
 word_is_cmd() {
     local w="$1" stem="$2" forms="${CMD_FORMS[$2]:-}"
+    # Silence is not a command. whisper emits "[BLANK_AUDIO]" continuously while
+    # nobody is talking and normalize() strips it to nothing, so this is the hot
+    # path during every pause in a dictation, not an edge case.
+    [[ -n "$w" ]] || return 1
     if [[ -z "$forms" ]]; then
         [[ "$w" == "$stem"* ]]
         return
@@ -837,6 +846,9 @@ is_burst() {
 matches_word() {
     local line="$1" stem="$2" mode="${3:-normal}"
     [[ -n "$stem" && ${#stem} -ge 3 ]] || return 1
+    # Nothing was said. Guarded here as well as in word_is_cmd because "end"
+    # mode tests only the LAST word, and an empty line's last word is "".
+    [[ -n "${line// /}" ]] || return 1
     # Repeat-to-force: a clean burst of the command word is always the user.
     is_burst "$line" "$stem" && return 0
     local count=0 found=1 w last="" pos_first=0 pos_last=0
