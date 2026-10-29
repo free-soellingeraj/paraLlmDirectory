@@ -285,8 +285,8 @@ cleanup() {
     [[ -n "$pid" ]] && kill_recorder "$pid"
     pid="$(cat "$STREAM_PID_FILE" 2>/dev/null)"
     [[ -n "$pid" ]] && signal_tree TERM "$pid"
-    pid="$(cat "${DEVICE_POLL_PID_FILE:-/nonexistent}" 2>/dev/null)"
-    [[ -n "$pid" ]] && signal_tree TERM "$pid"
+    # From the variable: stop_pane may have removed the spool already.
+    [[ -n "${DEVICE_POLL_PID:-}" ]] && signal_tree TERM "$DEVICE_POLL_PID"
     # Never leave playback suspended.
     resume_playback
     rm -f "$STATE_FILE" "$REC_PID_FILE" "$STREAM_PID_FILE" \
@@ -991,8 +991,17 @@ restart_whisper() {
 
 CUR_INPUT_DEVICE="$(input_device 2>/dev/null)"
 printf '%s' "$CUR_INPUT_DEVICE" > "$DEVICE_FILE" 2>/dev/null || true
+# The loop condition is the PARENT'S liveness, not `while :`. A backgrounded
+# subshell does not die when its parent does, and toggle-speak's stop_pane
+# `rm -rf`s this spool directory — so the pid file can be gone before the EXIT
+# trap gets to read it. That race left one orphan per toggle, reparented to
+# init, each calling system_profiler every 15s forever on a machine that is
+# already short of CPU. Watching $$ makes the poller self-terminating within
+# one interval however it is orphaned, and cleanup below kills the pid from a
+# VARIABLE rather than from a file that may no longer exist.
+_wake_pid=$$
 (
-    while :; do
+    while kill -0 "$_wake_pid" 2>/dev/null; do
         sleep "$STT_WAKE_DEVICE_POLL_SECS"
         _d="$(input_device 2>/dev/null)" || continue
         [[ -n "$_d" ]] || continue
@@ -1000,7 +1009,8 @@ printf '%s' "$CUR_INPUT_DEVICE" > "$DEVICE_FILE" 2>/dev/null || true
             || printf '%s' "$_d" > "$DEVICE_FILE"
     done
 ) >/dev/null 2>&1 &
-echo "$!" > "$DEVICE_POLL_PID_FILE"
+DEVICE_POLL_PID=$!
+echo "$DEVICE_POLL_PID" > "$DEVICE_POLL_PID_FILE"
 
 state="listening"
 dict_started=0
