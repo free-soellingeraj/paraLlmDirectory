@@ -209,6 +209,43 @@ reset_narration
 narrating "i will send the message now"
 expect FIRE   lone send "i will send the message now send"
 
+section "BUG-076: an annotation-only line must normalize to EMPTY, not a space"
+# whisper prefixes every line with a space, so " [BLANK_AUDIO]" normalized to
+# " " — non-empty. Four guards test this with [[ -n ]] and all four inverted on
+# silence, the normal state. mic_health said "I can hear you: 40 of the last 40
+# segments had speech" while the mic delivered pure silence; the echo latch
+# cleared on silence; voice.active was always fresh; one near-miss reason could
+# never fire. The matchers word-split, so they were fine — which is why the
+# commands kept working while every explanation of them lied.
+reset_narration
+norm_is_empty() {                  # the predicate all four guards actually want
+    local got; got="$(normalize "$1")"
+    if [[ -z "$got" ]]; then PASS=$((PASS+1)); else
+        FAIL=$((FAIL+1))
+        printf 'FAIL  normalize(%s) should be EMPTY, got [%s]\n' "'$1'" "$got"
+    fi
+}
+norm_is_speech() {
+    local got; got="$(normalize "$1")"
+    if [[ -n "$got" ]]; then PASS=$((PASS+1)); else
+        FAIL=$((FAIL+1))
+        printf 'FAIL  normalize(%s) should be SPEECH, got empty\n' "'$1'"
+    fi
+}
+norm_is_empty " [BLANK_AUDIO]"       # exactly the bytes whisper writes
+norm_is_empty "[BLANK_AUDIO]"
+norm_is_empty " [BLANK_AUDIO] "
+norm_is_empty " (soft music)"
+norm_is_empty " (birds chirping)"
+norm_is_empty " (water splashing)"
+norm_is_empty " [MUSIC PLAYING]"
+norm_is_empty " *clears throat*"
+norm_is_empty "   "
+norm_is_empty ""
+norm_is_speech " Transcribe."
+norm_is_speech " hello there"
+norm_is_speech " (door closes) Transcribe."
+
 section "normalize: whisper's noise annotations are not speech"
 reset_narration
 expect ignore exact play     "[MUSIC PLAYING]"

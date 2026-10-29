@@ -184,9 +184,34 @@ normalize() {
     # BEFORE word-counting: they inflate utterance length past the strict
     # while-speaking limits and can even trigger commands ("[MUSIC PLAYING]"
     # once matched "play").
+    # TRIM, or an annotation-only line does not come back empty. whisper writes
+    # a leading space before each line, so " [BLANK_AUDIO]" survived as " " —
+    # a single space, which is non-empty. Four separate guards test this output
+    # with [[ -n ]] and every one of them was therefore inverted on silence,
+    # which is the normal state (BUG-076):
+    #
+    #   mic_health          reported "I can hear you: 40 of the last 40
+    #                       segments had speech" while the microphone was
+    #                       delivering nothing but silence. That is the
+    #                       `diagnostic` command, i.e. the one check the
+    #                       comments point at for noticing a mid-session input
+    #                       change, confidently saying the opposite.
+    #   the echo latch      cleared on silence, defeating the guard whose own
+    #                       comment records what that costs: "a dictation ended
+    #                       one second after it started".
+    #   voice.active        was touched on every silent frame, so "the user is
+    #                       talking" was permanently true and the working
+    #                       heartbeat never played.
+    #   a near-miss reason  could never report that the whole line was the
+    #                       agent's own narration.
+    #
+    # The matchers were unaffected: they word-split, and a lone space yields no
+    # words. That is exactly why this hid for so long — commands kept working
+    # while everything built to EXPLAIN them was lying.
     printf '%s' "$1" \
         | sed -E 's/\[[^][]*\]//g; s/\([^()]*\)//g; s/\*[^*]*\*//g' \
-        | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z ' | tr -s ' '
+        | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z ' | tr -s ' ' \
+        | sed -E 's/^ +//; s/ +$//'
 }
 
 # --- Mic health ---------------------------------------------------------------
