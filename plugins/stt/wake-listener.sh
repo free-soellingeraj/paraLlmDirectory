@@ -285,9 +285,12 @@ cleanup() {
     [[ -n "$pid" ]] && kill_recorder "$pid"
     pid="$(cat "$STREAM_PID_FILE" 2>/dev/null)"
     [[ -n "$pid" ]] && signal_tree TERM "$pid"
+    pid="$(cat "${DEVICE_POLL_PID_FILE:-/nonexistent}" 2>/dev/null)"
+    [[ -n "$pid" ]] && signal_tree TERM "$pid"
     # Never leave playback suspended.
     resume_playback
-    rm -f "$STATE_FILE" "$REC_PID_FILE" "$STREAM_PID_FILE"
+    rm -f "$STATE_FILE" "$REC_PID_FILE" "$STREAM_PID_FILE" \
+          "${DEVICE_POLL_PID_FILE:-}" "${DEVICE_FILE:-}"
 }
 trap cleanup EXIT
 trap 'cleanup; exit 0' TERM INT
@@ -911,6 +914,12 @@ warn_if_echoing_setup
 STT_WAKE_AUTO_RAISE_INPUT="${STT_WAKE_AUTO_RAISE_INPUT:-1}"
 STT_WAKE_TARGET_INPUT_VOLUME="${STT_WAKE_TARGET_INPUT_VOLUME:-75}"
 
+# Was a one-shot block at start-up. It is now a function because the level is
+# stored PER DEVICE: when the default input changes mid-session the new device
+# arrives with its own stored value, and the raise that ran at start-up applied
+# to the device that is no longer being used.
+ensure_input_level() {
+local _vol _dev _new
 _vol="$(input_volume)"
 if [[ -n "$_vol" && "$_vol" -lt "$STT_WAKE_MIN_INPUT_VOLUME" ]]; then
     _dev="$(input_device)"; [[ -n "$_dev" ]] || _dev="the input device"
@@ -938,6 +947,60 @@ if [[ -n "$_vol" && "$_vol" -lt "$STT_WAKE_MIN_INPUT_VOLUME" ]]; then
             ( say "Warning. $_dev input volume is $_vol, too low to hear commands." >/dev/null 2>&1 & )
     fi
 fi
+}
+ensure_input_level
+
+# --- the input device can change under a running whisper-stream --------------
+# whisper-stream captures through SDL, which opens ONE device at init and never
+# follows the system default. So when headphones connect mid-session macOS moves
+# the default input to them, you talk into the headphones, and whisper keeps
+# reading the device it opened. It does not die, it does not slow down, and it
+# does not log anything: it simply stops hearing you.
+#
+# Measured on the session that prompted this: 552 consecutive frames over six
+# minutes, 429 of them "speech" that was nothing but "[BLANK_AUDIO]",
+# "(water splashing)" and "(birds chirping)" — room noise through the laptop
+# mic while the user spoke into AirPods — and then a "transcribe" that finally
+# leaked through and started a take minutes after it was asked for. Nothing in
+# the existing health checks can see this state, because every component is
+# healthy; only the device binding is wrong.
+#
+# The per-device input level is the other half of the SAME event, which is why
+# the comment above kept being right about the symptom (27, every time) and
+# wrong about the cause: nothing was resetting a level, a different device was
+# being selected and bringing its own.
+#
+# system_profiler SPAudioDataType costs ~0.4s, which must not land in the
+# command loop, so a background poller publishes the name and the loop reads a
+# file.
+STT_WAKE_DEVICE_POLL_SECS="${STT_WAKE_DEVICE_POLL_SECS:-15}"
+DEVICE_FILE="$SPOOL/input.device"
+DEVICE_POLL_PID_FILE="$SPOOL/device-poll.pid"
+
+restart_whisper() {
+    local why="$1" spid
+    spid="$(cat "$STREAM_PID_FILE" 2>/dev/null)"
+    [[ -n "$spid" ]] && signal_tree TERM "$spid"
+    # Deliberately NOT truncating WAKE_LOG: the command loop reads it through an
+    # open fd, and truncating under the reader leaves its offset past EOF.
+    whisper-stream -m "$MODEL_PATH" -t 4 --step "$STT_WAKE_STEP_MS" --length 6000 \
+        -f "$WAKE_LOG" >/dev/null 2>> "$SPOOL/error.log" &
+    echo "$!" > "$STREAM_PID_FILE"
+    log_lifecycle "whisper-stream restarted ($why)"
+}
+
+CUR_INPUT_DEVICE="$(input_device 2>/dev/null)"
+printf '%s' "$CUR_INPUT_DEVICE" > "$DEVICE_FILE" 2>/dev/null || true
+(
+    while :; do
+        sleep "$STT_WAKE_DEVICE_POLL_SECS"
+        _d="$(input_device 2>/dev/null)" || continue
+        [[ -n "$_d" ]] || continue
+        [[ "$_d" == "$(cat "$DEVICE_FILE" 2>/dev/null)" ]] \
+            || printf '%s' "$_d" > "$DEVICE_FILE"
+    done
+) >/dev/null 2>&1 &
+echo "$!" > "$DEVICE_POLL_PID_FILE"
 
 state="listening"
 dict_started=0
@@ -1990,10 +2053,20 @@ while mode_active; do
     # If whisper-stream died (mic conflict, crash), restart it once per tick.
     spid="$(cat "$STREAM_PID_FILE" 2>/dev/null)"
     if [[ -n "$spid" ]] && ! kill -0 "$spid" 2>/dev/null; then
-        log_lifecycle "whisper-stream died; restarting"
-        whisper-stream -m "$MODEL_PATH" -t 4 --step "$STT_WAKE_STEP_MS" --length 6000 \
-            -f "$WAKE_LOG" >/dev/null 2>> "$SPOOL/error.log" &
-        echo "$!" > "$STREAM_PID_FILE"
+        restart_whisper "it died"
+    fi
+    # The default input device may have moved out from under whisper-stream.
+    # Reading the poller's file is free; the system_profiler call is not.
+    dev_now="$(cat "$DEVICE_FILE" 2>/dev/null)"
+    if [[ -n "$dev_now" && -n "$CUR_INPUT_DEVICE" \
+          && "$dev_now" != "$CUR_INPUT_DEVICE" ]]; then
+        log_lifecycle "input device changed '$CUR_INPUT_DEVICE' -> '$dev_now'; re-applying level and rebinding whisper-stream"
+        CUR_INPUT_DEVICE="$dev_now"
+        ensure_input_level
+        restart_whisper "input device is now $dev_now"
+        tmux display-message -t "$PANE_ID" \
+            "🎤 Input switched to $dev_now — listening again" 2>/dev/null || true
+        announce "input switched to $dev_now. Listening again."
     fi
 done
 
