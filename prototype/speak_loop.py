@@ -323,20 +323,56 @@ _edge = {"fails": 0, "until": 0.0, "told": False}
 KOKORO_URL = os.environ.get("SPEAKLOOP_KOKORO_URL", "http://127.0.0.1:8788")
 KOKORO_VOICE = os.environ.get("SPEAKLOOP_KOKORO_VOICE", "am_michael")
 KOKORO_TIMEOUT = int(os.environ.get("SPEAKLOOP_KOKORO_TIMEOUT", "120"))
-_kokoro = {"up": None}          # None = unknown, True/False = last probe
+# How long a FAILED probe is trusted before trying again. A negative verdict
+# has to expire. The daemon is shared and long-lived, so "down" is nearly
+# always a transient miss -- a 5s probe losing a race with machine load, which
+# on this box swings to triple digits -- and not a standing fact about the
+# engine. Caching it forever was BUG-077.
+KOKORO_RECHECK_SECS = float(os.environ.get("SPEAKLOOP_KOKORO_RECHECK_SECS", "30"))
+KOKORO_PROBE_TIMEOUT = float(os.environ.get("SPEAKLOOP_KOKORO_PROBE_TIMEOUT", "5"))
+_kokoro = {"up": None, "checked": 0.0, "warned": False}
 
 
 def kokoro_ready() -> bool:
-    """Is the shared daemon answering? Cached, because the answer only changes
-    when the daemon starts or dies, and the synth path is hot."""
-    if _kokoro["up"] is not None:
-        return _kokoro["up"]
+    """Is the shared daemon answering?
+
+    A True verdict is cached outright: the synth path is hot, and a daemon that
+    dies under us is caught by kokoro_synth, which resets the cache to None.
+
+    A False verdict expires after KOKORO_RECHECK_SECS. It used to be permanent,
+    and that was a one-way door (BUG-077): the only reset lived inside
+    kokoro_synth's error path, which is reachable only when this function has
+    already returned True. So one timed-out probe at startup dropped the loop
+    to the local robot voice for its entire lifetime, with the daemon healthy
+    the whole time and nothing in any log to say what had happened.
+    """
+    if _kokoro["up"] is True:
+        return True
+    if (_kokoro["up"] is False
+            and time.monotonic() - _kokoro["checked"] < KOKORO_RECHECK_SECS):
+        return False
+    why = ""
     try:
-        with urllib.request.urlopen(f"{KOKORO_URL}/health", timeout=5) as r:
-            _kokoro["up"] = bool(json.loads(r.read()).get("ok"))
-    except Exception:
-        _kokoro["up"] = False
-    return _kokoro["up"]
+        with urllib.request.urlopen(f"{KOKORO_URL}/health",
+                                   timeout=KOKORO_PROBE_TIMEOUT) as r:
+            ok = bool(json.loads(r.read()).get("ok"))
+    except Exception as e:
+        ok, why = False, type(e).__name__
+    _kokoro["up"], _kokoro["checked"] = ok, time.monotonic()
+    # Say why, once per outage, rather than silently degrading the voice. The
+    # edge path already had this discipline; the kokoro path only logged a
+    # failed SYNTH, so a failed PROBE -- the case that actually happens -- was
+    # the one failure that made no sound and left no line.
+    if not ok and not _kokoro["warned"]:
+        print(f"  ! kokoro daemon not answering at {KOKORO_URL} ({why}); "
+              f"using the local voice, re-probing every "
+              f"{KOKORO_RECHECK_SECS:g}s", file=sys.stderr)
+        _kokoro["warned"] = True
+    elif ok and _kokoro["warned"]:
+        print("  * kokoro daemon is answering again; neural voice is back",
+              file=sys.stderr)
+        _kokoro["warned"] = False
+    return ok
 
 
 def kokoro_synth(text: str, path: str) -> bool:
