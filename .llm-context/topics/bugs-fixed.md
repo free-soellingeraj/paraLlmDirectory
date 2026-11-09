@@ -1869,3 +1869,91 @@ cases fail.
 
 **File**: plugins/stt/wake-listener.sh (`cmd_forms`, `register_cmd`,
 `word_is_cmd`, `matches_word`); tests/test-command-matching.sh
+
+## BUG-076: every status line lied about silence (`normalize` never trimmed)
+
+`mic_health` said *"I can hear you: 40 of the last 40 segments had speech"* while
+the raw spool held 180 frames, 8 of them non-blank, and all 8 were noise
+annotations — `(water splashing)`, `(birds chirping)`. Both numbers came from the
+same log, so one of them had to be a lie.
+
+**Cause.** whisper writes a leading space on every line. `normalize()` stripped
+bracketed and parenthesised annotations and squeezed runs of spaces, but `tr -s
+' '` squeezes without trimming:
+
+```
+" [BLANK_AUDIO]"  ->  " "        # non-empty!
+```
+
+Four guards test that result with `[[ -n ... ]]`, so all four were inverted for
+silence, which is the normal state between words:
+
+| guard | what it actually did |
+|---|---|
+| `mic_health` | counted every silent frame as speech |
+| echo latch | cleared on silence, defeating the guard whose own comment records the cost: "a dictation ended one second after it started" |
+| `voice.active` | marked the user as permanently talking, so the working heartbeat never played and `stream-watcher` ducked forever |
+| near-miss reason | could never report a line that was entirely the agent's own narration |
+
+The **matchers** were unaffected, because they word-split and a lone space
+yields no words. That is exactly why this survived so long: commands kept
+working while every line that explained them was wrong, so each debugging
+session was steered away from the truth.
+
+**Fix.** `normalize` trims, at the source: `sed -E 's/^ +//; s/ +$//'`. One
+change, all four guards correct. Covered by the `norm_is_empty` / `norm_is_speech`
+cases in `tests/test-command-matching.sh`, which assert the exact bytes whisper
+writes, leading space included.
+
+**File**: plugins/stt/wake-listener.sh (`normalize`)
+
+## BUG-077: one missed probe pinned the voice to the robot for good
+
+Report: *"what happened to my tts? It's using fallback."* The daemon was up the
+whole time — `/health` answered 200 in 53ms while the complaint was being typed.
+
+**Cause.** `kokoro_ready()` cached its probe, which is correct for the hot synth
+path. But a `False` never expired:
+
+```python
+_kokoro = {"up": None}          # None = unknown, True/False = last probe
+
+def kokoro_ready() -> bool:
+    if _kokoro["up"] is not None:
+        return _kokoro["up"]    # a False returns here, forever
+```
+
+The **only** code that reset the cache was in `kokoro_synth`'s error path:
+
+```python
+    except Exception as e:
+        _kokoro["up"] = None    # re-probe; the daemon may have died
+```
+
+and that line is unreachable unless `kokoro_ready()` already returned True. So
+the recovery path was gated on the condition it was meant to recover from — a
+one-way door. A single 5s probe losing a race with machine load (this box swings
+to triple-digit load, and a stray pre-fix listener was holding ~80% of a core for
+two days) dropped the loop to `say` for its entire lifetime.
+
+It was also **silent**. The edge path logs when it degrades; the kokoro path
+logged a failed *synth* only, so a failed *probe* — the case that actually
+happens — made no sound and left no line. The engine comment two screens up
+states the intent it missed: *"say why, once, instead of silently degrading the
+voice"*.
+
+**Fix.**
+
+| behaviour | before | after |
+|---|---|---|
+| `True` verdict | cached | cached (unchanged — `kokoro_synth` still resets to `None` if the daemon dies under us) |
+| `False` verdict | permanent | expires after `SPEAKLOOP_KOKORO_RECHECK_SECS`, default 30s |
+| failed probe | silent | one line naming the URL and the exception, once per outage |
+| recovery | never happened | logged when the neural voice returns |
+
+**Lesson.** A cached negative verdict about a shared, long-lived service is a
+claim about the future, not a measurement. Cache the success; let the failure
+expire.
+
+**File**: prototype/speak_loop.py (`kokoro_ready`)
+**Test**: tests/test-kokoro-probe.py (12 cases; 2 fail against the old code)
