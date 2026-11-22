@@ -108,6 +108,26 @@ Required for `display-popup` command. Older versions will need alternative appro
 
 ### Bash 3.2 vs 4+
 Scripts avoid Bash 4+ features (associative arrays, `|&` syntax) for macOS compatibility with default Bash.
+- Scripts launched as `bash foo.sh` or via `#!/usr/bin/env bash` from tmux get `/bin/bash` 3.2 unless Homebrew bash is installed — don't assume it is. A `declare -A` killed the wake listener at startup (BUG-078).
+- Use parallel indexed arrays instead of a map (`CMD_STEMS`/`CMD_FORMS` in `wake-listener.sh`).
+- Under `set -u`, 3.2 treats `"${a[@]}"` on an EMPTY array as unbound; use `${a[@]+"${a[@]}"}` or loop on `${#a[@]}`.
+- Run shell tests with `/bin/bash`, not `bash`, so they exercise the shell the scripts really get.
+
+---
+
+## Voice dependencies (installed by install.sh)
+
+### Kokoro (local neural TTS for speak mode)
+- **Purpose**: the voice speak mode (Ctrl+b o) narrates with; falls back to `say` if unavailable
+- **Service**: `plugins/tts/kokoro-daemon.py`, one HTTP daemon on 127.0.0.1:8788 shared by every pane; `toggle-speak.sh` starts it
+- **Runtime**: Homebrew `python3.11` (`KOKORO_PY`), because Homebrew's default python3 is newer than onnxruntime ships wheels for
+- **Packages**: `kokoro-onnx==0.6.1` (pulls `onnxruntime`, `phonemizer`, `numpy`), `soundfile` — installed into that interpreter with `--break-system-packages`
+- **System**: `espeak-ng` (daemon reads `/opt/homebrew/share/espeak-ng-data`)
+- **Model files**: `~/.cache/kokoro-onnx/` (`KOKORO_MODEL_DIR`) — `kokoro-v1.0.fp16.onnx` (164 MB) + `voices-v1.0.bin` (28 MB, 54 voices), from the kokoro-onnx `model-files-v1.1` release, SHA-256 pinned in `install.sh`
+- **Install**: `install.sh` (Homebrew only); idempotent, downloads via `.part` + checksum + rename
+- **Verify**: `curl -s 127.0.0.1:8788/health` → `{"ok": true, ...}` while speak mode is on; failures land in `/tmp/para-speakloop/kokoro-daemon.log`
+
+**File**: install.sh (`install_kokoro`), plugins/tts/kokoro-daemon.py
 # tech stack
 
 ## Overview

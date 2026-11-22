@@ -1957,3 +1957,54 @@ expire.
 
 **File**: prototype/speak_loop.py (`kokoro_ready`)
 **Test**: tests/test-kokoro-probe.py (12 cases; 2 fail against the old code)
+
+## BUG-078: every voice command was dead — `declare -A` under macOS bash 3.2
+
+**Symptom.** Speak mode (Ctrl+b o) narrated fine, but no voice command did
+anything. Reported as "I said repeat and it isn't working"; `recap`, `send`,
+`transcribe` and the rest were equally dead.
+
+**Cause.** BUG-074 (#98) added the stem → forms registry as an associative
+array:
+
+```bash
+declare -A CMD_FORMS=()
+```
+
+`toggle-speak.sh` launches the listener as `nohup bash wake-listener.sh`, and on
+this machine `bash` is `/bin/bash` 3.2 — Homebrew bash is not installed, so
+tmux's PATH finds nothing newer. Associative arrays are Bash 4. The listener
+died at startup, before its main loop, every time:
+
+```
+wake-listener.sh: line 384: declare: -A: invalid option
+wake-listener.sh: line 394: transcri: unbound variable
+```
+
+(The second line is 3.2 treating `CMD_FORMS` as an indexed array and evaluating
+the subscript `transcri` arithmetically, which `set -u` rejects.) The only trace
+was `/tmp/para-speakloop/<pane>.wake.log`. Narration comes from `speak_loop.py`,
+a separate process, so speak mode *looked* healthy.
+
+`tech-stack` already says scripts must avoid associative arrays for exactly this
+reason. The matcher suite (`tests/test-command-matching.sh`) had the same
+`declare -A`, so it could only ever have passed under a newer bash — it tested
+the matchers, not the shell they would really run in.
+
+**Fix.** Two parallel indexed arrays (`CMD_STEMS` / `CMD_FORMS`) with a linear
+scan — ~14 stems, no subshell on the per-word hot path. Re-registering a stem
+replaces it, as the map assignment did. The same pattern `NEAR_MISS_KEYS` /
+`NEAR_MISS_AT` already uses in this file. Every other array idiom in the script
+was checked against 3.2 with `set -u` (empty-array `"${a[@]}"` is the classic
+3.2 trap; the file already guards it).
+
+**Still open.** `scripts/para-llm-restore.sh` (Ctrl+b r) has its own
+`declare -A SAVED_ENTRIES` and runs under the same `/bin/bash`.
+
+**Debugging.** If voice commands do nothing, read the wake log before anything
+else: `cat /tmp/para-speakloop/<pane>.wake.log`. An empty log is healthy; any
+shell error there means the listener is not running at all.
+
+**File**: plugins/stt/wake-listener.sh (`register_cmd`, `word_is_cmd`)
+**Test**: `/bin/bash tests/test-command-matching.sh` (114 pass under 3.2; the
+suite now runs under the shell the listener really gets)

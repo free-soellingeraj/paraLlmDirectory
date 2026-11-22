@@ -7,7 +7,9 @@
 # undoing it — the "first word or within the last two" rule fixed commands
 # during narration and simultaneously made 'on forward request' fire `forward`.
 #
-# Run: bash tests/test-command-matching.sh
+# Run: /bin/bash tests/test-command-matching.sh
+# /bin/bash, not bash: macOS ships 3.2 and that is what the listener really gets
+# (BUG-078). A newer bash on PATH would hide a Bash-4-only construct.
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 SRC=plugins/stt/wake-listener.sh
@@ -33,7 +35,7 @@ STT_WAKE_SEND_END_MAX_WORDS=20
 STT_WAKE_TRANSCRIBE_WORD=transcribe
 DIGEST_STEM=digest; DIAGNOSTIC_STEM=diagnos; CLEAR_STEM=text
 # The form registry, exactly as the listener builds it.
-declare -A CMD_FORMS=()
+CMD_STEMS=(); CMD_FORMS=()
 register_cmd transcri transcribe subscribe
 register_cmd subscrib subscribe
 register_cmd recap    recap

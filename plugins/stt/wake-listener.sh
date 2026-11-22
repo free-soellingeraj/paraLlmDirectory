@@ -381,28 +381,49 @@ cmd_forms() {
 }
 
 # stem -> every form that may fire it. Registered once, after the stems exist.
-declare -A CMD_FORMS=()
+# Two parallel INDEXED arrays, not `declare -A`: associative arrays are Bash 4,
+# and this script runs under macOS's /bin/bash 3.2, where `declare -A` is an
+# invalid option. It used to be one, and the listener died on that line at
+# startup — every voice command dead, with only the wake log saying so
+# (BUG-078). There are ~14 stems, so a linear scan costs nothing.
+CMD_STEMS=()
+CMD_FORMS=()
 register_cmd() {                   # stem word [alias-word...]
     local stem="$1"; shift
-    local forms="" w
+    local forms="" w i
     for w in "$@"; do forms+=" $(cmd_forms "$w")"; done
     # Collapse whitespace via word splitting, then pad once. Without this, two
     # registered words left a double space in the middle of the list and the
     # `*" $w "*` test below matched an empty $w — so a line of pure silence
     # counted as the command and closed the take (BUG-075).
     # shellcheck disable=SC2086
-    CMD_FORMS["$stem"]=" $(echo $forms) "
+    forms=" $(echo $forms) "
+    # Re-registering a stem replaces it, as a map assignment would.
+    for (( i = 0; i < ${#CMD_STEMS[@]}; i++ )); do
+        if [[ "${CMD_STEMS[i]}" == "$stem" ]]; then
+            CMD_FORMS[i]="$forms"
+            return 0
+        fi
+    done
+    CMD_STEMS+=("$stem")
+    CMD_FORMS+=("$forms")
 }
 
 # Is this word one of the command's own forms? An UNREGISTERED stem keeps the
 # old prefix behaviour, so a stem set from an env var the registry does not know
 # still matches something rather than nothing.
 word_is_cmd() {
-    local w="$1" stem="$2" forms="${CMD_FORMS[$2]:-}"
+    local w="$1" stem="$2" forms="" i
     # Silence is not a command. whisper emits "[BLANK_AUDIO]" continuously while
     # nobody is talking and normalize() strips it to nothing, so this is the hot
     # path during every pause in a dictation, not an edge case.
     [[ -n "$w" ]] || return 1
+    for (( i = 0; i < ${#CMD_STEMS[@]}; i++ )); do
+        if [[ "${CMD_STEMS[i]}" == "$stem" ]]; then
+            forms="${CMD_FORMS[i]}"
+            break
+        fi
+    done
     if [[ -z "$forms" ]]; then
         [[ "$w" == "$stem"* ]]
         return
