@@ -56,6 +56,8 @@ brew install sox whisper-cpp
 pipx install edge-tts
 ```
 
+`install.sh` also sets up Kokoro, the local neural voice speak mode (`Ctrl+b o`) narrates with: `espeak-ng`, Homebrew `python3.11` with `kokoro-onnx`, and ~190 MB of model files in `~/.cache/kokoro-onnx/`. Without it, speak mode falls back to the macOS `say` voice.
+
 ## Installation
 
 ### 1. Clone this repo

@@ -173,6 +173,78 @@ else
     echo "  edge-tts already installed"
 fi
 
+# Kokoro: the local neural voice speak mode narrates with
+# (plugins/tts/kokoro-daemon.py). toggle-speak.sh starts the daemon with
+# $KOKORO_PY, default Homebrew's python3.11, so the packages must land in THAT
+# interpreter — Homebrew's python3 is newer than onnxruntime publishes wheels
+# for. Without any of this speak mode still works, on the `say` robot voice.
+KOKORO_PY="${KOKORO_PY:-/opt/homebrew/bin/python3.11}"
+KOKORO_MODEL_DIR="${KOKORO_MODEL_DIR:-$HOME/.cache/kokoro-onnx}"
+KOKORO_RELEASE="https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.1"
+KOKORO_FILES="kokoro-v1.0.fp16.onnx:f3a290d384fbb27966d462905c71a46cef9e5fd00516b40df32a0b4afe77ac96
+voices-v1.0.bin:bca610b8308e8d99f32e6fe4197e7ec01679264efed0cac9140fe9c29f1fbf7d"
+
+# Every step returns non-zero instead of exiting: a failed voice download must
+# not abort the whole install under `set -e`.
+install_kokoro() {
+    local spec name sha part
+
+    if ! command -v espeak-ng &>/dev/null; then
+        echo "  Installing espeak-ng (Kokoro's phonemizer)..."
+        pkg_install espeak-ng || return 1
+    fi
+
+    if [[ ! -x "$KOKORO_PY" ]]; then
+        echo "  Installing python@3.11 (Kokoro's runtime)..."
+        pkg_install python@3.11 || return 1
+    fi
+
+    if "$KOKORO_PY" -c "import kokoro_onnx, soundfile" &>/dev/null; then
+        echo "  Kokoro Python packages already installed"
+    else
+        echo "  Installing kokoro-onnx into $KOKORO_PY..."
+        # Homebrew's Python refuses installs into its site-packages (PEP 668)
+        # unless told otherwise. A venv would be cleaner, but the daemon is
+        # launched with this exact interpreter. kokoro-onnx is pinned to the
+        # version verified against the daemon (it uses Kokoro.from_session).
+        if command -v uv &>/dev/null; then
+            uv pip install --quiet --python "$KOKORO_PY" --break-system-packages \
+                "kokoro-onnx==0.6.1" soundfile || return 1
+        else
+            "$KOKORO_PY" -m pip install --quiet --break-system-packages \
+                "kokoro-onnx==0.6.1" soundfile || return 1
+        fi
+    fi
+
+    mkdir -p "$KOKORO_MODEL_DIR" || return 1
+    while IFS= read -r spec; do
+        name="${spec%%:*}"; sha="${spec##*:}"
+        if [[ -f "$KOKORO_MODEL_DIR/$name" ]]; then
+            echo "  $name already downloaded"
+            continue
+        fi
+        echo "  Downloading $name..."
+        # Into a .part file, verified, then renamed. The daemon only checks
+        # that the file EXISTS, so an interrupted download left under the real
+        # name would fail every load until someone deleted it by hand.
+        part="$KOKORO_MODEL_DIR/$name.part"
+        if ! curl -fL --retry 3 -sS -o "$part" "$KOKORO_RELEASE/$name"; then
+            rm -f "$part"; return 1
+        fi
+        if [[ "$(shasum -a 256 "$part" | cut -d' ' -f1)" != "$sha" ]]; then
+            echo "  $name failed its checksum" >&2
+            rm -f "$part"; return 1
+        fi
+        mv "$part" "$KOKORO_MODEL_DIR/$name" || return 1
+    done <<< "$KOKORO_FILES"
+}
+
+if [[ "$(detect_package_manager)" == "brew" ]]; then
+    install_kokoro || echo "  Warning: Kokoro setup incomplete; speak mode will use the macOS 'say' voice. Re-run install.sh to retry."
+else
+    echo "  Skipping Kokoro (local neural voice): its setup is macOS/Homebrew only"
+fi
+
 cat >> "$PARA_LLM_ROOT/config" << 'EOF'
 
 # Voice settings
